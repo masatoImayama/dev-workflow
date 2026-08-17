@@ -9124,6 +9124,257 @@ case "$RUN_SKILL_UNKNOWN" in
 esac
 
 # ---------------------------------------------------------------------------
+# share-prepared-dirs.sh（準備成果ディレクトリの共有・共有モード、Task #106）
+#
+# 生成物（node_modules 等）の共有元・レーン側ともに一時ディレクトリ（mktemp -d）で組み立て、
+# `DEV_WORKFLOW_SANDBOX_EXEC` にフェイクの sandbox-exec.sh を刺して検証する（Docker 非依存）。
+# フェイクは「呼び出し回数を1行ずつ記録してから、最後の引数（コンテナ内スクリプト）を
+# 素の sh -c で実行する」だけの単純なスタブであり、共有元・レーン側とも host 上の
+# 通常ディレクトリなので `ln -s` はこの検証環境でも十分に動作する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== share-prepared-dirs.sh（準備成果ディレクトリの共有・共有モード） =="
+
+SPD_SCRIPT="${REPO_ROOT}/scripts/share-prepared-dirs.sh"
+
+# --- bash -n が通る ---
+if bash -n "$SPD_SCRIPT" 2>/dev/null; then
+  pass "share-prepared-dirs.sh: bash -n の構文チェックが通る（#106）"
+else
+  fail "share-prepared-dirs.sh: bash -n の構文チェックが通る（#106）"
+fi
+
+# --- rm / rmdir によるディレクトリ削除が無い（安全ルール）。cleanup-lane-worktrees.sh と
+#     同じ検査方法（コメント行を除外し、単語境界での一致だけを見る） ---
+SPD_FORBIDDEN_HITS="$(grep -v '^[[:space:]]*#' "$SPD_SCRIPT" \
+  | grep -E '(^|[^A-Za-z0-9_])(rm|rmdir)([[:space:]]|$)' || true)"
+if [ -z "$SPD_FORBIDDEN_HITS" ]; then
+  pass "share-prepared-dirs.sh: rm / rmdir によるディレクトリ削除が無い（#106）"
+else
+  fail "share-prepared-dirs.sh: rm / rmdir によるディレクトリ削除が無い（#106）" "$SPD_FORBIDDEN_HITS"
+fi
+
+# --- スクリプト冒頭のコメントに背景（#104）・使い方・出力形式・終了コードが書かれている ---
+SPD_HEADER="$(awk '/^set -u/{exit} {print}' "$SPD_SCRIPT")"
+case "$SPD_HEADER" in
+  *'#104'*'使い方'*'出力'*'終了コード'*'prep='*)
+    pass "share-prepared-dirs.sh: 冒頭コメントに背景（#104）・使い方・出力・終了コードが書かれている（#106）" ;;
+  *)
+    fail "share-prepared-dirs.sh: 冒頭コメントに背景（#104）・使い方・出力・終了コードが書かれている（#106）" \
+      "見つかりませんでした" ;;
+esac
+
+# --- テスト用のフェイク sandbox-exec.sh（呼び出し回数を記録してから最後の引数を sh -c で実行する） ---
+spd_make_stub() {
+  # spd_make_stub <call_log>  スタブスクリプトのパスを出力する
+  local call_log="$1" stub
+  stub="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-stub.XXXXXX")"
+  {
+    echo '#!/bin/bash'
+    echo 'set -u'
+    printf 'echo 1 >> %q\n' "$call_log"
+    echo 'cmd="${@: -1}"'
+    echo 'sh -c "$cmd"'
+  } > "$stub"
+  printf '%s' "$stub"
+}
+
+spd_run() {
+  # spd_run <lane_dir> <stub> [share-prepared-dirs.shへの追加引数...]
+  local lane="$1" stub="$2"
+  shift 2
+  (cd "$lane" || exit 1; DEV_WORKFLOW_SANDBOX_EXEC="$stub" bash "$SPD_SCRIPT" "$@")
+}
+
+SPD_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-source.XXXXXX")"
+SPD_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-lane.XXXXXX")"
+SPD_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-calllog.XXXXXX")"
+SPD_STUB="$(spd_make_stub "$SPD_CALL_LOG")"
+
+mkdir -p "${SPD_SOURCE}/node_modules"
+printf 'lock-content\n'    > "${SPD_SOURCE}/yarn.lock"
+printf 'package-content\n' > "${SPD_SOURCE}/package.json"
+printf 'lock-content\n'    > "${SPD_LANE}/yarn.lock"
+printf 'package-content\n' > "${SPD_LANE}/package.json"
+
+# --- ケース1: フィンガープリント一致 → linked / 全件 linked なら prep=skip ---
+SPD_OUT1="$(spd_run "$SPD_LANE" "$SPD_STUB" --source "$SPD_SOURCE" \
+  --dir "node_modules yarn.lock package.json")"
+SPD_EXIT1=$?
+assert_exit_code "ケース1: フィンガープリント一致で exit 0" 0 "$SPD_EXIT1"
+
+case "$SPD_OUT1" in
+  *"linked"*"node_modules"*)
+    pass "ケース1: フィンガープリント一致で linked が出る（#106）" ;;
+  *)
+    fail "ケース1: フィンガープリント一致で linked が出る（#106）" "output=[${SPD_OUT1}]" ;;
+esac
+
+case "$SPD_OUT1" in
+  *"prep=skip"*)
+    pass "ケース1: 全件 linked のとき prep=skip（#106）" ;;
+  *)
+    fail "ケース1: 全件 linked のとき prep=skip（#106）" "output=[${SPD_OUT1}]" ;;
+esac
+
+assert_eq "ケース1: linked 後、レーン側に node_modules が実在する（#106）" \
+  "yes" "$([ -e "${SPD_LANE}/node_modules" ] && echo yes || echo no)"
+
+# --- ケース2: レーン側に既に存在する（ケース1の結果を再利用）→ skip reason exists /
+#     全件 exists なら prep=skip ---
+SPD_OUT2="$(spd_run "$SPD_LANE" "$SPD_STUB" --source "$SPD_SOURCE" \
+  --dir "node_modules yarn.lock package.json")"
+case "$SPD_OUT2" in
+  *"skip"*"node_modules"*"reason"*"exists"*)
+    pass "ケース2: レーン側に既に存在する場合 skip reason exists（#106）" ;;
+  *)
+    fail "ケース2: レーン側に既に存在する場合 skip reason exists（#106）" "output=[${SPD_OUT2}]" ;;
+esac
+case "$SPD_OUT2" in
+  *"prep=skip"*)
+    pass "ケース2: 全件 exists のとき prep=skip（#106）" ;;
+  *)
+    fail "ケース2: 全件 exists のとき prep=skip（#106）" "output=[${SPD_OUT2}]" ;;
+esac
+
+# --- ケース3: 共有元にディレクトリが無い → skip reason no-source / prep=run ---
+SPD_OUT3="$(spd_run "$SPD_LANE" "$SPD_STUB" --source "$SPD_SOURCE" \
+  --dir "does_not_exist_dir")"
+case "$SPD_OUT3" in
+  *"skip"*"does_not_exist_dir"*"reason"*"no-source"*)
+    pass "ケース3: 共有元にディレクトリが無い場合 skip reason no-source（#106）" ;;
+  *)
+    fail "ケース3: 共有元にディレクトリが無い場合 skip reason no-source（#106）" "output=[${SPD_OUT3}]" ;;
+esac
+case "$SPD_OUT3" in
+  *"prep=run"*)
+    pass "ケース3: no-source を含む場合 prep=run（#106）" ;;
+  *)
+    fail "ケース3: no-source を含む場合 prep=run（#106）" "output=[${SPD_OUT3}]" ;;
+esac
+
+# --- ケース4: フィンガープリント不一致・欠損 → skip reason fingerprint-mismatch / prep=run ---
+mkdir -p "${SPD_SOURCE}/mmdir" "${SPD_SOURCE}/mmdir2"
+printf 'source-value\n' > "${SPD_SOURCE}/mismatch.lock"
+printf 'lane-value\n'   > "${SPD_LANE}/mismatch.lock"
+
+SPD_OUT4="$(spd_run "$SPD_LANE" "$SPD_STUB" --source "$SPD_SOURCE" \
+  --dir "mmdir mismatch.lock")"
+case "$SPD_OUT4" in
+  *"skip"*"mmdir"*"reason"*"fingerprint-mismatch"*)
+    pass "ケース4: フィンガープリント不一致で skip reason fingerprint-mismatch（#106）" ;;
+  *)
+    fail "ケース4: フィンガープリント不一致で skip reason fingerprint-mismatch（#106）" "output=[${SPD_OUT4}]" ;;
+esac
+case "$SPD_OUT4" in
+  *"prep=run"*)
+    pass "ケース4: fingerprint-mismatch を含む場合 prep=run（#106）" ;;
+  *)
+    fail "ケース4: fingerprint-mismatch を含む場合 prep=run（#106）" "output=[${SPD_OUT4}]" ;;
+esac
+
+# 欠損（レーン側・共有元側ともにフィンガープリントファイルが無い）場合も同様に扱う
+SPD_OUT4B="$(spd_run "$SPD_LANE" "$SPD_STUB" --source "$SPD_SOURCE" \
+  --dir "mmdir2 missing.lock")"
+case "$SPD_OUT4B" in
+  *"skip"*"mmdir2"*"reason"*"fingerprint-mismatch"*)
+    pass "ケース4b: フィンガープリントファイルが欠損している場合も skip reason fingerprint-mismatch（#106）" ;;
+  *)
+    fail "ケース4b: フィンガープリントファイルが欠損している場合も skip reason fingerprint-mismatch（#106）" \
+      "output=[${SPD_OUT4B}]" ;;
+esac
+
+# --- ケース5: --spec の空行・# 始まりの行が無視される ---
+SPD_SPEC_TEXT="$(printf '# comment line\n\n   \nno_such_source_dir_for_spec_test\n#trailing comment\n')"
+SPD_OUT5="$(spd_run "$SPD_LANE" "$SPD_STUB" --source "$SPD_SOURCE" --spec "$SPD_SPEC_TEXT")"
+case "$SPD_OUT5" in
+  *"skip"*"no_such_source_dir_for_spec_test"*"reason"*"no-source"*)
+    pass "ケース5: --spec の空行・#始まりの行を挟んでも実体エントリは正しく解釈される（#106）" ;;
+  *)
+    fail "ケース5: --spec の空行・#始まりの行を挟んでも実体エントリは正しく解釈される（#106）" \
+      "output=[${SPD_OUT5}]" ;;
+esac
+SPD_OUT5_LINES="$(printf '%s\n' "$SPD_OUT5" | grep -c '.')"
+assert_eq "ケース5: --spec の空行・#始まりの行は実体エントリとして混入せず出力は2行（対象1件+prep）のみ（#106）" \
+  "2" "$SPD_OUT5_LINES"
+
+# --- ケース6: --dry-run で linked を出すが実際には symlink を作らない ---
+mkdir -p "${SPD_SOURCE}/dryrun_dir"
+SPD_OUT6="$(spd_run "$SPD_LANE" "$SPD_STUB" --source "$SPD_SOURCE" --dir "dryrun_dir" --dry-run)"
+case "$SPD_OUT6" in
+  *"linked"*"dryrun_dir"*)
+    pass "ケース6: --dry-run でも linked 行が出る（#106）" ;;
+  *)
+    fail "ケース6: --dry-run でも linked 行が出る（#106）" "output=[${SPD_OUT6}]" ;;
+esac
+assert_eq "ケース6: --dry-run では実際には symlink が作られない（#106）" \
+  "no" "$([ -e "${SPD_LANE}/dryrun_dir" ] && echo yes || echo no)"
+
+# --- ケース7: symlink 作成に失敗 → skip reason link-failed / prep=run
+#     （レーン側の親ディレクトリが存在しないため ln -s が実際に失敗する） ---
+mkdir -p "${SPD_SOURCE}/nopar/child"
+SPD_OUT7="$(spd_run "$SPD_LANE" "$SPD_STUB" --source "$SPD_SOURCE" --dir "nopar/child")"
+case "$SPD_OUT7" in
+  *"skip"*"nopar/child"*"reason"*"link-failed"*)
+    pass "ケース7: symlink 作成に失敗すると skip reason link-failed（#106）" ;;
+  *)
+    fail "ケース7: symlink 作成に失敗すると skip reason link-failed（#106）" "output=[${SPD_OUT7}]" ;;
+esac
+case "$SPD_OUT7" in
+  *"prep=run"*)
+    pass "ケース7: link-failed を含む場合 prep=run（#106）" ;;
+  *)
+    fail "ケース7: link-failed を含む場合 prep=run（#106）" "output=[${SPD_OUT7}]" ;;
+esac
+
+# --- ケース8: --source 欠落・値なしオプションで exit 2（無限ループしない） ---
+if command -v timeout >/dev/null 2>&1; then
+  SPD_NOSRC_OUT="$(timeout 5 bash "$SPD_SCRIPT" --dir "x" 2>&1)"
+  SPD_NOSRC_EXIT=$?
+  assert_no_hang "ケース8: --source 欠落は無限ループせず exit 2（#106）" \
+    2 "$SPD_NOSRC_EXIT" "$SPD_NOSRC_OUT" "--source は必須です"
+
+  SPD_NOVAL_OPTS=(--source --spec --dir --epic)
+  for SPD_NOVAL_OPT in "${SPD_NOVAL_OPTS[@]}"; do
+    SPD_NOVAL_OUT="$(timeout 5 bash "$SPD_SCRIPT" --source "$SPD_SOURCE" "$SPD_NOVAL_OPT" 2>&1)"
+    SPD_NOVAL_EXIT=$?
+    assert_no_hang "ケース8: ${SPD_NOVAL_OPT} が末尾で値なしでも無限ループせず exit 2（#106）" \
+      2 "$SPD_NOVAL_EXIT" "$SPD_NOVAL_OUT" "${SPD_NOVAL_OPT} には値が必要です"
+  done
+
+  SPD_UNKNOWN_OUT="$(timeout 5 bash "$SPD_SCRIPT" --source "$SPD_SOURCE" --unknown-option 2>&1)"
+  SPD_UNKNOWN_EXIT=$?
+  assert_no_hang "ケース8: 未知のオプションは無限ループせず exit 2（#106）" \
+    2 "$SPD_UNKNOWN_EXIT" "$SPD_UNKNOWN_OUT" "未知のオプション"
+else
+  skip "share-prepared-dirs.sh: --source 欠落・値なしオプションで無限ループしない（#106）" \
+    "timeout コマンドが利用できません"
+fi
+
+# --- ケース9: コンテナへの投入が1回にまとめられている（スタブの呼び出し回数で検証する） ---
+SPD_CALL_LOG9="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-calllog9.XXXXXX")"
+SPD_STUB9="$(spd_make_stub "$SPD_CALL_LOG9")"
+mkdir -p "${SPD_SOURCE}/multi_a" "${SPD_SOURCE}/multi_b"
+
+SPD_OUT9="$(spd_run "$SPD_LANE" "$SPD_STUB9" --source "$SPD_SOURCE" \
+  --dir "multi_a" --dir "multi_b" --dir "no_source_multi" --epic epic105)"
+SPD_EXIT9=$?
+assert_exit_code "ケース9: 複数エントリでも exit 0" 0 "$SPD_EXIT9"
+
+SPD_CALL_COUNT9="$(grep -c '.' "$SPD_CALL_LOG9" 2>/dev/null || echo 0)"
+assert_eq "ケース9: 複数エントリ（no-source混在）でもコンテナ呼び出しは1回にまとめられる（#106）" \
+  "1" "$SPD_CALL_COUNT9"
+
+case "$SPD_OUT9" in
+  *"linked"*"multi_a"*"linked"*"multi_b"*)
+    pass "ケース9: 1回の呼び出しでも複数エントリが正しくlinkedとして報告される（#106）" ;;
+  *)
+    fail "ケース9: 1回の呼び出しでも複数エントリが正しくlinkedとして報告される（#106）" \
+      "output=[${SPD_OUT9}]" ;;
+esac
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
