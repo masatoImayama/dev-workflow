@@ -1172,14 +1172,22 @@ fi
 渡して`scripts/cleanup-lane-worktrees.sh`を呼ぶ。Epicブランチへ取り込み済みであることの確認は
 スクリプト側が行うため、run側は対象を集めて渡すだけでよい。
 
+Epic本文に「共有ディレクトリ」節があり、共有対象のディレクトリ名（`node_modules`とは限らない。
+`vendor`・`.venv`等もありうる）が宣言されている場合は、その名前をすべて`--unlink-dir`として渡す。
+節が無い（宣言が無い）場合は`--unlink-dir`を付けず、現行どおり既定の`node_modules`のみで動かす。
+
 ```bash
 # 3) 本Epicで使ったレーンworktreeのうち、Epicブランチへ取り込み済みのものだけを削除する
 #    （削除失敗でrun全体を止めない。取り込み判定はスクリプト側が行う。
-#     --lane-branch は本runで使ったレーンの数だけ繰り返す）
+#     --lane-branch は本runで使ったレーンの数だけ繰り返す。
+#     --unlink-dir はEpic本文の「共有ディレクトリ」節が宣言されている場合のみ、
+#     宣言された名前の数だけ繰り返す。節が無ければ付けない（既定node_modulesのまま））
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/cleanup-lane-worktrees.sh" \
   --epic-branch "${EPIC_BRANCH}" \
   --lane-branch "[レーンAの作業ブランチ]" \
-  --lane-branch "[レーンBの作業ブランチ]" 2>&1 || true
+  --lane-branch "[レーンBの作業ブランチ]" \
+  --unlink-dir "[共有ディレクトリ節で宣言された名前A]" \
+  --unlink-dir "[共有ディレクトリ節で宣言された名前B]" 2>&1 || true
 
 # 4) 上記で保護された（=削除されなかった）worktree はそのまま残る。壊れた登録だけを掃除する
 git worktree prune

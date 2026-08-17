@@ -8353,6 +8353,90 @@ else
     "marker.txt が消えました: ${CLW_SYM_REAL_TARGET}"
 fi
 
+# --- ケース9b（Task #109）: --unlink-dir vendor を指定すると vendor の symlink が
+#     解除される（既定の node_modules とは別名でも動くこと） ---
+CLW_VENDOR_REPO="$(make_temp_repo)"
+CLW_VENDOR_DEFAULT_BRANCH="$(cd "$CLW_VENDOR_REPO" && git rev-parse --abbrev-ref HEAD)"
+CLW_VENDOR_EPIC_BRANCH="epic/testvendor/109"
+CLW_VENDOR_BASE="$(ml_head_of "$CLW_VENDOR_REPO" HEAD)"
+ml_branch_from "$CLW_VENDOR_REPO" "$CLW_VENDOR_EPIC_BRANCH" "$CLW_VENDOR_BASE"
+ml_commit_file "$CLW_VENDOR_REPO" "epic.txt" "epic base\n" "epic base commit"
+CLW_VENDOR_EPIC_TIP="$(ml_head_of "$CLW_VENDOR_REPO" "$CLW_VENDOR_EPIC_BRANCH")"
+ml_branch_from "$CLW_VENDOR_REPO" "lane-vendor" "$CLW_VENDOR_EPIC_TIP"
+ml_commit_file "$CLW_VENDOR_REPO" "vendor.txt" "vendor\n" "lane vendor change"
+(cd "$CLW_VENDOR_REPO" && git checkout -q "$CLW_VENDOR_EPIC_BRANCH" \
+  && git merge -q --no-edit lane-vendor \
+  && git checkout -q "$CLW_VENDOR_DEFAULT_BRANCH") >/dev/null 2>&1
+clw_add_worktree "$CLW_VENDOR_REPO" "${CLW_VENDOR_REPO}/.claude/worktrees/lane-vendor" "lane-vendor"
+
+CLW_VENDOR_REAL_TARGET="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-clw-vendordir.XXXXXX")"
+printf 'do not delete me\n' > "${CLW_VENDOR_REAL_TARGET}/marker.txt"
+(cd "${CLW_VENDOR_REPO}/.claude/worktrees/lane-vendor" && ln -s "$CLW_VENDOR_REAL_TARGET" vendor) >/dev/null 2>&1
+
+CLW_VENDOR_OUT="$(run_cleanup "$CLW_VENDOR_REPO" --epic-branch "$CLW_VENDOR_EPIC_BRANCH" \
+  --lane-branch lane-vendor --unlink-dir vendor)"
+CLW_VENDOR_EXIT=$?
+
+assert_exit_code "ケース9b: --unlink-dir vendor 指定時も exit 0" 0 "$CLW_VENDOR_EXIT"
+
+case "$CLW_VENDOR_OUT" in
+  *"removed"*"lane-vendor"*)
+    pass "ケース9b: --unlink-dir vendor 指定でも removed と報告される（出力契約は変わらない）" ;;
+  *)
+    fail "ケース9b: --unlink-dir vendor 指定でも removed と報告される（出力契約は変わらない）" \
+      "output=[${CLW_VENDOR_OUT}]" ;;
+esac
+
+assert_eq "ケース9b: --unlink-dir vendor 指定でレーンworktreeが削除される" \
+  "no" "$(clw_worktree_exists "$CLW_VENDOR_REPO" lane-vendor)"
+
+if [ -f "${CLW_VENDOR_REAL_TARGET}/marker.txt" ]; then
+  pass "ケース9b: --unlink-dir vendor の symlink解除により symlink先の実体ファイルは消えない"
+else
+  fail "ケース9b: --unlink-dir vendor の symlink解除により symlink先の実体ファイルは消えない" \
+    "marker.txt が消えました: ${CLW_VENDOR_REAL_TARGET}"
+fi
+
+# --- ケース9c（Task #109）: --unlink-dir を複数指定できる（vendor と .venv の両方を解除） ---
+CLW_MULTI_REPO="$(make_temp_repo)"
+CLW_MULTI_DEFAULT_BRANCH="$(cd "$CLW_MULTI_REPO" && git rev-parse --abbrev-ref HEAD)"
+CLW_MULTI_EPIC_BRANCH="epic/testmulti/109"
+CLW_MULTI_BASE="$(ml_head_of "$CLW_MULTI_REPO" HEAD)"
+ml_branch_from "$CLW_MULTI_REPO" "$CLW_MULTI_EPIC_BRANCH" "$CLW_MULTI_BASE"
+ml_commit_file "$CLW_MULTI_REPO" "epic.txt" "epic base\n" "epic base commit"
+CLW_MULTI_EPIC_TIP="$(ml_head_of "$CLW_MULTI_REPO" "$CLW_MULTI_EPIC_BRANCH")"
+ml_branch_from "$CLW_MULTI_REPO" "lane-multi" "$CLW_MULTI_EPIC_TIP"
+ml_commit_file "$CLW_MULTI_REPO" "multi.txt" "multi\n" "lane multi change"
+(cd "$CLW_MULTI_REPO" && git checkout -q "$CLW_MULTI_EPIC_BRANCH" \
+  && git merge -q --no-edit lane-multi \
+  && git checkout -q "$CLW_MULTI_DEFAULT_BRANCH") >/dev/null 2>&1
+clw_add_worktree "$CLW_MULTI_REPO" "${CLW_MULTI_REPO}/.claude/worktrees/lane-multi" "lane-multi"
+
+CLW_MULTI_VENDOR_TARGET="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-clw-multivendor.XXXXXX")"
+CLW_MULTI_VENV_TARGET="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-clw-multivenv.XXXXXX")"
+printf 'do not delete me (vendor)\n' > "${CLW_MULTI_VENDOR_TARGET}/marker.txt"
+printf 'do not delete me (venv)\n' > "${CLW_MULTI_VENV_TARGET}/marker.txt"
+(cd "${CLW_MULTI_REPO}/.claude/worktrees/lane-multi" \
+  && ln -s "$CLW_MULTI_VENDOR_TARGET" vendor \
+  && ln -s "$CLW_MULTI_VENV_TARGET" .venv) >/dev/null 2>&1
+
+run_cleanup "$CLW_MULTI_REPO" --epic-branch "$CLW_MULTI_EPIC_BRANCH" \
+  --lane-branch lane-multi --unlink-dir vendor --unlink-dir .venv >/dev/null
+CLW_MULTI_EXIT=$?
+
+assert_exit_code "ケース9c: --unlink-dir を複数指定しても exit 0" 0 "$CLW_MULTI_EXIT"
+
+assert_eq "ケース9c: --unlink-dir を複数指定するとレーンworktreeが削除される" \
+  "no" "$(clw_worktree_exists "$CLW_MULTI_REPO" lane-multi)"
+
+if [ -f "${CLW_MULTI_VENDOR_TARGET}/marker.txt" ] && [ -f "${CLW_MULTI_VENV_TARGET}/marker.txt" ]; then
+  pass "ケース9c: --unlink-dir を複数指定すると両方の symlink 先の実体ファイルが残る"
+else
+  fail "ケース9c: --unlink-dir を複数指定すると両方の symlink 先の実体ファイルが残る" \
+    "vendor marker exists=$([ -f "${CLW_MULTI_VENDOR_TARGET}/marker.txt" ] && echo yes || echo no), \
+venv marker exists=$([ -f "${CLW_MULTI_VENV_TARGET}/marker.txt" ] && echo yes || echo no)"
+fi
+
 # --- ケース10: 引数バリデーション（引数エラーは exit 2） ---
 CLW_REPO_ARGS="$(make_temp_repo)"
 
@@ -8373,6 +8457,9 @@ assert_exit_code "--lane-branch に値なしは exit 2" 2 "$?"
 
 run_cleanup "$CLW_REPO_ARGS" --epic-branch main --lane-branch dummy --unknown-option >/dev/null 2>&1
 assert_exit_code "未知のオプションは exit 2" 2 "$?"
+
+run_cleanup "$CLW_REPO_ARGS" --epic-branch main --lane-branch dummy --unlink-dir >/dev/null 2>&1
+assert_exit_code "--unlink-dir に値なしは exit 2（Task #109）" 2 "$?"
 
 # ---------------------------------------------------------------------------
 # H2（Task #94）: 準備コマンドをレーンの作業ディレクトリで初回1回だけ実行させる
@@ -8604,6 +8691,25 @@ if [ -z "$H6_RS_CLEANUP" ]; then
 else
   pass "SKILL.md: 『worktree クリーンアップ』節が見つかる（前提）（#95）"
 fi
+
+# --- クリーンアップ節が cleanup-lane-worktrees.sh を --unlink-dir 付きで呼ぶ手順を案内している
+#     （Task #109。Epic本文の「共有ディレクトリ」節で宣言された名前を渡す） ---
+case "$H6_RS_CLEANUP" in
+  *'cleanup-lane-worktrees.sh'*'--unlink-dir'*)
+    pass "SKILL.md: クリーンアップ節が cleanup-lane-worktrees.sh を --unlink-dir 付きで呼ぶ手順を案内している（#109）" ;;
+  *)
+    fail "SKILL.md: クリーンアップ節が cleanup-lane-worktrees.sh を --unlink-dir 付きで呼ぶ手順を案内している（#109）" \
+      "$H6_RS_CLEANUP" ;;
+esac
+
+# --- 「共有ディレクトリ」節が無い場合は --unlink-dir を付けない旨が明記されている（#109） ---
+case "$H6_RS_CLEANUP" in
+  *'節が無い'*'--unlink-dir'*'付けず'*)
+    pass "SKILL.md: 『共有ディレクトリ』節が無い場合は --unlink-dir を付けない旨が明記されている（#109）" ;;
+  *)
+    fail "SKILL.md: 『共有ディレクトリ』節が無い場合は --unlink-dir を付けない旨が明記されている（#109）" \
+      "$H6_RS_CLEANUP" ;;
+esac
 
 # --- クリーンアップ節が cleanup-lane-worktrees.sh を --epic-branch / --lane-branch 付きで呼ぶ ---
 case "$H6_RS_CLEANUP" in
