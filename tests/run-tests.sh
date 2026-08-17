@@ -9851,6 +9851,219 @@ for f in agents/planner.md codex-agents/planner.toml; do
 done
 
 # ---------------------------------------------------------------------------
+# share-prepared-dirs.sh のロック兼完了マーカーと --run-prep（Task #111）
+#
+# 対象はレーンの作業ディレクトリ単位（git rev-parse --git-dir 配下）のため、レーンは
+# 実際に git init したディレクトリを使う（共有モードの既存テストブロックが使う SPD_LANE は
+# 非 git ディレクトリのままにしておく。既存ブロック内部は無変更）。
+# 共有モードと同じスタブ（DEV_WORKFLOW_SANDBOX_EXEC）を使い、Docker 非依存に検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== share-prepared-dirs.sh（ロック兼完了マーカー・--run-prep、Task #111） =="
+
+# --- 冒頭コメントに、ロックを削除しない理由・--force の用途・done を書くタイミングが
+#     書かれている ---
+SPD_LOCK_HEADER="$(awk '/^set -u/{exit} {print}' "$SPD_SCRIPT")"
+
+case "$SPD_LOCK_HEADER" in
+  *'ロックディレクトリは削除しない'*)
+    pass "share-prepared-dirs.sh: 冒頭コメントにロックを削除しない理由が書かれている（#111）" ;;
+  *)
+    fail "share-prepared-dirs.sh: 冒頭コメントにロックを削除しない理由が書かれている（#111）" \
+      "見つかりませんでした" ;;
+esac
+
+case "$SPD_LOCK_HEADER" in
+  *'--force'*'残存ロック'*)
+    pass "share-prepared-dirs.sh: 冒頭コメントに--forceの用途が書かれている（#111）" ;;
+  *)
+    fail "share-prepared-dirs.sh: 冒頭コメントに--forceの用途が書かれている（#111）" \
+      "見つかりませんでした" ;;
+esac
+
+case "$SPD_LOCK_HEADER" in
+  *'成功したときだけ'*'done'*'を書く'*)
+    pass "share-prepared-dirs.sh: 冒頭コメントにdoneを書くタイミングが書かれている（#111）" ;;
+  *)
+    fail "share-prepared-dirs.sh: 冒頭コメントにdoneを書くタイミングが書かれている（#111）" \
+      "見つかりませんでした" ;;
+esac
+
+# --- テスト用の共有元・呼び出しヘルパー（spd_run / spd_make_stub は既存ブロックで定義済み） ---
+SPD_LOCK_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-lock-source.XXXXXX")"
+mkdir -p "${SPD_LOCK_SOURCE}/lock_shared_dir"
+
+spd_lock_make_lane() {
+  # spd_lock_make_lane  git init 済みの一時レーンディレクトリのパスを出力する
+  local lane
+  lane="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-lock-lane.XXXXXX")"
+  (cd "$lane" && git init -q) >/dev/null 2>&1
+  printf '%s' "$lane"
+}
+
+spd_count_lines() {
+  # spd_count_lines <file>  行数を出力する（0行のときも "0" を1行だけ出す。
+  # `grep -c '.' file || echo 0` は grep がマッチ0件で非0終了するため
+  # 両方の出力が連結される事故が起きる。wc -l は件数に関わらず必ず0終了するため使わない）
+  wc -l < "$1" | tr -d '[:space:]'
+}
+
+# --- ケース1: 初回実行でロックが取得され、成功時に done が作られる。
+#     ロックは作業ツリーではなく git rev-parse --git-dir 配下（git status --porcelain は空のまま。
+#     レーン側に共有対象を事前に置き exists 判定にすることで、共有そのものによる
+#     working tree の変化を排除し、ロックだけの影響を検証する） ---
+SPD_LOCK_LANE1="$(spd_lock_make_lane)"
+mkdir -p "${SPD_LOCK_LANE1}/lock_shared_dir"
+SPD_LOCK_CALL_LOG1="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-lock-calllog1.XXXXXX")"
+SPD_LOCK_STUB1="$(spd_make_stub "$SPD_LOCK_CALL_LOG1")"
+
+SPD_LOCK_OUT1="$(spd_run "$SPD_LOCK_LANE1" "$SPD_LOCK_STUB1" --source "$SPD_LOCK_SOURCE" --dir "lock_shared_dir")"
+SPD_LOCK_EXIT1=$?
+assert_exit_code "ロック ケース1: 初回実行は exit 0（#111）" 0 "$SPD_LOCK_EXIT1"
+
+assert_eq "ロック ケース1: 成功時に done マーカーが作られる（#111）" \
+  "yes" "$([ -f "${SPD_LOCK_LANE1}/.git/dev-workflow-prep.lock/done" ] && echo yes || echo no)"
+
+SPD_LOCK_STATUS1="$(cd "$SPD_LOCK_LANE1" && git status --porcelain)"
+assert_eq "ロック ケース1: ロックは .git 配下にあり git status --porcelain は空のまま（#111）" \
+  "" "$SPD_LOCK_STATUS1"
+
+# --- ケース2: done がある状態で再実行すると prep=done-already / exit 0 で、
+#     symlink 作成（コンテナ呼び出し）も準備コマンド実行も行われない ---
+SPD_LOCK_CALL_COUNT1_BEFORE="$(spd_count_lines "$SPD_LOCK_CALL_LOG1")"
+SPD_LOCK_MARKER2="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-lock-marker2.XXXXXX")"
+
+SPD_LOCK_OUT2="$(spd_run "$SPD_LOCK_LANE1" "$SPD_LOCK_STUB1" --source "$SPD_LOCK_SOURCE" --dir "lock_shared_dir" \
+  --run-prep "printf x >> $(printf '%q' "$SPD_LOCK_MARKER2")")"
+SPD_LOCK_EXIT2=$?
+assert_exit_code "ロック ケース2: done ありの再実行は exit 0（#111）" 0 "$SPD_LOCK_EXIT2"
+
+case "$SPD_LOCK_OUT2" in
+  *"prep=done-already"*)
+    pass "ロック ケース2: done がある場合 prep=done-already（#111）" ;;
+  *)
+    fail "ロック ケース2: done がある場合 prep=done-already（#111）" "output=[${SPD_LOCK_OUT2}]" ;;
+esac
+
+SPD_LOCK_CALL_COUNT1_AFTER="$(spd_count_lines "$SPD_LOCK_CALL_LOG1")"
+assert_eq "ロック ケース2: done-already 時は symlink 作成（コンテナ呼び出し）が行われない（#111）" \
+  "$SPD_LOCK_CALL_COUNT1_BEFORE" "$SPD_LOCK_CALL_COUNT1_AFTER"
+
+assert_eq "ロック ケース2: done-already 時は --run-prep のコマンドも実行されない（#111）" \
+  "no" "$([ -s "$SPD_LOCK_MARKER2" ] && echo yes || echo no)"
+
+# --- ケース3: done の無いロックがある状態で実行すると exit 3 で停止し、
+#     stderr にロックパスが出る ---
+SPD_LOCK_LANE3="$(spd_lock_make_lane)"
+mkdir -p "${SPD_LOCK_LANE3}/.git/dev-workflow-prep.lock"
+SPD_LOCK_CALL_LOG3="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-lock-calllog3.XXXXXX")"
+SPD_LOCK_STUB3="$(spd_make_stub "$SPD_LOCK_CALL_LOG3")"
+
+SPD_LOCK_OUT3="$(spd_run "$SPD_LOCK_LANE3" "$SPD_LOCK_STUB3" --source "$SPD_LOCK_SOURCE" --dir "lock_shared_dir" 2>&1)"
+SPD_LOCK_EXIT3=$?
+assert_exit_code "ロック ケース3: 残存ロック（done無し）は exit 3（#111）" 3 "$SPD_LOCK_EXIT3"
+
+case "$SPD_LOCK_OUT3" in
+  *"同一 worktree で準備が既に実行中です"*"dev-workflow-prep.lock"*)
+    pass "ロック ケース3: stderr にロックパスを含むエラーが出る（#111）" ;;
+  *)
+    fail "ロック ケース3: stderr にロックパスを含むエラーが出る（#111）" "output=[${SPD_LOCK_OUT3}]" ;;
+esac
+
+SPD_LOCK_CALL_COUNT3="$(spd_count_lines "$SPD_LOCK_CALL_LOG3")"
+assert_eq "ロック ケース3: 競合時は symlink 作成（コンテナ呼び出し）が行われない（#111）" \
+  "0" "$SPD_LOCK_CALL_COUNT3"
+
+# --- ケース4: --force を付けると done の無い残存ロックがあっても続行する
+#     （ケース3と同じ残存ロックを再利用する） ---
+SPD_LOCK_OUT4="$(spd_run "$SPD_LOCK_LANE3" "$SPD_LOCK_STUB3" --source "$SPD_LOCK_SOURCE" --dir "lock_shared_dir" --force)"
+SPD_LOCK_EXIT4=$?
+assert_exit_code "ロック ケース4: --force を付けると続行し exit 0（#111）" 0 "$SPD_LOCK_EXIT4"
+
+case "$SPD_LOCK_OUT4" in
+  *"prep="*)
+    pass "ロック ケース4: --force で通常どおり prep= 行が出る（#111）" ;;
+  *)
+    fail "ロック ケース4: --force で通常どおり prep= 行が出る（#111）" "output=[${SPD_LOCK_OUT4}]" ;;
+esac
+
+assert_eq "ロック ケース4: --force での成功後は done マーカーが作られる（#111）" \
+  "yes" "$([ -f "${SPD_LOCK_LANE3}/.git/dev-workflow-prep.lock/done" ] && echo yes || echo no)"
+
+# --- ケース5: prep=skip のときは --run-prep のコマンドが実行されない
+#     （レーン側に実体ディレクトリを事前に置き、skip reason exists で prep=skip にする） ---
+SPD_LOCK_LANE5="$(spd_lock_make_lane)"
+mkdir -p "${SPD_LOCK_LANE5}/lock_shared_dir"
+SPD_LOCK_CALL_LOG5="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-lock-calllog5.XXXXXX")"
+SPD_LOCK_STUB5="$(spd_make_stub "$SPD_LOCK_CALL_LOG5")"
+SPD_LOCK_MARKER5="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-lock-marker5.XXXXXX")"
+
+SPD_LOCK_OUT5="$(spd_run "$SPD_LOCK_LANE5" "$SPD_LOCK_STUB5" --source "$SPD_LOCK_SOURCE" --dir "lock_shared_dir" \
+  --run-prep "printf x >> $(printf '%q' "$SPD_LOCK_MARKER5")")"
+SPD_LOCK_EXIT5=$?
+assert_exit_code "ロック ケース5: prep=skip のときも exit 0（#111）" 0 "$SPD_LOCK_EXIT5"
+
+case "$SPD_LOCK_OUT5" in
+  *"prep=skip"*)
+    pass "ロック ケース5: レーン側に実体がある場合 prep=skip（#111）" ;;
+  *)
+    fail "ロック ケース5: レーン側に実体がある場合 prep=skip（#111）" "output=[${SPD_LOCK_OUT5}]" ;;
+esac
+
+assert_eq "ロック ケース5: prep=skip のときは --run-prep のコマンドが実行されない（#111）" \
+  "no" "$([ -s "$SPD_LOCK_MARKER5" ] && echo yes || echo no)"
+
+# --- ケース6: prep=run のときは --run-prep のコマンドが実行される
+#     （共有元に存在しないディレクトリを指定し no-source で prep=run にする） ---
+SPD_LOCK_LANE6="$(spd_lock_make_lane)"
+SPD_LOCK_CALL_LOG6="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-lock-calllog6.XXXXXX")"
+SPD_LOCK_STUB6="$(spd_make_stub "$SPD_LOCK_CALL_LOG6")"
+SPD_LOCK_MARKER6="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-lock-marker6.XXXXXX")"
+
+SPD_LOCK_OUT6="$(spd_run "$SPD_LOCK_LANE6" "$SPD_LOCK_STUB6" --source "$SPD_LOCK_SOURCE" --dir "no_such_lock_dir" \
+  --run-prep "printf x >> $(printf '%q' "$SPD_LOCK_MARKER6")")"
+SPD_LOCK_EXIT6=$?
+assert_exit_code "ロック ケース6: prep=run で --run-prep が成功すると exit 0（#111）" 0 "$SPD_LOCK_EXIT6"
+
+case "$SPD_LOCK_OUT6" in
+  *"prep=run"*)
+    pass "ロック ケース6: 共有元に無い場合 prep=run（#111）" ;;
+  *)
+    fail "ロック ケース6: 共有元に無い場合 prep=run（#111）" "output=[${SPD_LOCK_OUT6}]" ;;
+esac
+
+assert_eq "ロック ケース6: prep=run のときは --run-prep のコマンドが実行される（#111）" \
+  "yes" "$([ -s "$SPD_LOCK_MARKER6" ] && echo yes || echo no)"
+
+assert_eq "ロック ケース6: --run-prep 成功後は done マーカーが作られる（#111）" \
+  "yes" "$([ -f "${SPD_LOCK_LANE6}/.git/dev-workflow-prep.lock/done" ] && echo yes || echo no)"
+
+# --- ケース7: --run-prep のコマンドが失敗すると exit 4 になり、done が作られない ---
+SPD_LOCK_LANE7="$(spd_lock_make_lane)"
+SPD_LOCK_CALL_LOG7="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-lock-calllog7.XXXXXX")"
+SPD_LOCK_STUB7="$(spd_make_stub "$SPD_LOCK_CALL_LOG7")"
+
+SPD_LOCK_OUT7="$(spd_run "$SPD_LOCK_LANE7" "$SPD_LOCK_STUB7" --source "$SPD_LOCK_SOURCE" --dir "no_such_lock_dir7" \
+  --run-prep "exit 1" 2>&1)"
+SPD_LOCK_EXIT7=$?
+assert_exit_code "ロック ケース7: --run-prep のコマンドが失敗すると exit 4（#111）" 4 "$SPD_LOCK_EXIT7"
+
+assert_eq "ロック ケース7: --run-prep 失敗時は done マーカーが作られない（#111）" \
+  "no" "$([ -f "${SPD_LOCK_LANE7}/.git/dev-workflow-prep.lock/done" ] && echo yes || echo no)"
+
+# --- ケース8: --run-prep が末尾で値なしでも無限ループせず exit 2 ---
+if command -v timeout >/dev/null 2>&1; then
+  SPD_LOCK_NOVAL_OUT="$(timeout 5 bash "$SPD_SCRIPT" --source "$SPD_LOCK_SOURCE" --run-prep 2>&1)"
+  SPD_LOCK_NOVAL_EXIT=$?
+  assert_no_hang "ロック ケース8: --run-prep が末尾で値なしでも無限ループせず exit 2（#111）" \
+    2 "$SPD_LOCK_NOVAL_EXIT" "$SPD_LOCK_NOVAL_OUT" "--run-prep には値が必要です"
+else
+  skip "share-prepared-dirs.sh: --run-prep 値なしで無限ループしない（#111）" \
+    "timeout コマンドが利用できません"
+fi
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 

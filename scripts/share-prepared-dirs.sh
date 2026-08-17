@@ -10,8 +10,8 @@
 # 既に存在する。これをレーンへ symlink で共有すればレーンでの install は不要になる。
 # 判定を散文で generator に委ねると取りこぼすため、本スクリプトに固定する。
 #
-# 本スクリプトは共有モード（既定モード）と `--detach`（#110）を実装する。
-# ロック・`--run-prep`（#111）は後続タスクで追加する。
+# 本スクリプトは共有モード（既定モード）・`--detach`（#110）・ロック兼完了マーカーと
+# `--run-prep`（#111）を実装する。
 #
 # --detach は共有モードの逆操作である。依存マニフェスト（package.json / yarn.lock 等）を
 # 変更するタスクは、install 前に共有リンクを解除しないと symlink 越しに共有元と他レーンの
@@ -29,17 +29,24 @@
 #       --dir "node_modules yarn.lock package.json" --dir ".venv requirements.txt"
 #   bash scripts/share-prepared-dirs.sh --source <epic-worktree-path> --epic epic105 --dry-run ...
 #   bash scripts/share-prepared-dirs.sh --detach --dir node_modules --dir .venv
+#   bash scripts/share-prepared-dirs.sh --source <epic-worktree-path> --dir "node_modules yarn.lock" \
+#       --run-prep "yarn install --frozen-lockfile"
 #
 # オプション:
-#   --source <path>  共有元（Epic 専用 worktree）のパス。必須
-#   --spec <text>    共有対象の指定。複数行可（1行1エントリ）。複数回指定すると連結される
-#   --dir <text>     --spec の1行分を追加する（繰り返し可）
-#   --epic <識別子>  sandbox-exec.sh に渡す --epic（例 epic105）。省略可
-#   --dry-run        symlink を実際には作らず判定結果だけを出す
-#   --detach         共有モードの逆操作（#110）。依存マニフェストを変更するタスクが
-#                    install 前に共有リンクを解除するために使う。--source は不要で、
-#                    --dir が1つ以上必要。symlink の解除のみを行い、実体ディレクトリ
-#                    には絶対に触れない（skip reason not-a-link として保護する）
+#   --source <path>   共有元（Epic 専用 worktree）のパス。必須（--detach 時は不要）
+#   --spec <text>     共有対象の指定。複数行可（1行1エントリ）。複数回指定すると連結される
+#   --dir <text>      --spec の1行分を追加する（繰り返し可）
+#   --epic <識別子>   sandbox-exec.sh に渡す --epic（例 epic105）。省略可
+#   --dry-run         symlink を実際には作らず判定結果だけを出す。ロック（後述）の
+#                     取得・`done` の書き込みも行わない（プレビューのため状態を変えない）
+#   --detach          共有モードの逆操作（#110）。依存マニフェストを変更するタスクが
+#                     install 前に共有リンクを解除するために使う。--source は不要で、
+#                     --dir が1つ以上必要。symlink の解除のみを行い、実体ディレクトリ
+#                     には絶対に触れない（skip reason not-a-link として保護する）。
+#                     --detach にはロック（後述）は適用されない
+#   --force           残存ロック（`done` が無いロックディレクトリ）を無視して続行する（#111）
+#   --run-prep <cmd>  共有の判定結果が prep=run のときだけ、渡されたコマンドをレーンの
+#                     作業ディレクトリで実行する（#111）。詳細は後述
 #
 # エントリの行書式（空白区切り、すべてリポジトリルート相対。空行と # 始まりの行は無視する）:
 #   <共有するディレクトリ> [<フィンガープリントファイル> ...]
@@ -87,10 +94,55 @@
 # ルート外。実装上はカレントディレクトリと共有元が同じドライブ/ルートを共有しない場合）は
 # link-failed として扱う。
 #
+# ロック兼完了マーカー（#111。共有モードのみ。--detach には適用されない）:
+#
+# issue #104 では、generator が同一 worktree に2本目の準備コマンド（`yarn install` 等）を
+# 並行実行し、ネイティブバイナリを破損させた。「同一 worktree で準備は初回1回だけ」という
+# 規約（Task #94）は散文でしかなく強制力が無いため、本スクリプトの構造で固定する。
+#
+# 対象はレーンの作業ディレクトリ単位。`git rev-parse --git-dir` が返すディレクトリ配下の
+# `dev-workflow-prep.lock`（ディレクトリ）を `mkdir` で作って取得する（`mkdir` はアトミック）。
+# 作業ツリー内にロックを置かないのは、`git status` を汚し可読性ガードやコミット対象に
+# 混ざるのを避けるためである（`.git` 配下は git の追跡対象外）。
+#   - `mkdir` に成功                        -> 自分が初回。処理を行い、成功したときだけ
+#                                              ロックディレクトリ内に `done` ファイルを書く
+#                                              （`--run-prep` のコマンドが失敗した場合は
+#                                              「処理が完了していない」ので書かない）
+#   - `mkdir` に失敗し、中に `done` がある   -> 準備済み。prep=done-already を出して exit 0。
+#                                              symlink 作成も準備コマンド実行も行わない
+#   - `mkdir` に失敗し、`done` が無い        -> 実行中（または異常終了で残った残骸）。
+#                                              待たずに exit 3 で停止し、ロックパスを
+#                                              stderr に出す。`--force` 指定時のみ、この
+#                                              「`done` の無い残存ロック」を無視して続行する
+#                                              （異常終了後の復旧手段）
+#
+# **ロックディレクトリは削除しない。** 安全ルール（`rm` / `rmdir` を使わない）と整合させる
+# ためであり、同時に「同一 worktree で準備は1回だけ」を決定論的に固定する効果を持つ。
+# 異常終了で `done` の無いロックが残り以降 exit 3 になり続けるのは意図した挙動である
+# （黙って2本目を走らせて事故るより、明示的に停止して人間に判断させる。復旧には `--force`
+# を使う）。
+#
+# `git rev-parse --git-dir` が失敗する場合（レーンの作業ディレクトリが git リポジトリでない。
+# 実運用では起こらないが、素の一時ディレクトリでの検証等）はロックを適用せず、既存の
+# 共有モード（#106）どおりに動作する。
+#
+# `--run-prep <cmd>`:
+#   - prep=run のときだけ、渡されたコマンドをレーンの作業ディレクトリで実行する。
+#     prep=skip / prep=done-already のときは実行しない
+#   - 実行は `DEV_WORKFLOW_SANDBOX_EXEC`（既定: 本スクリプトと同じディレクトリの
+#     sandbox-exec.sh）経由で行う。**`--warm` は使わない**（終了コードが必要なため）
+#   - コマンドが失敗したら exit 4 で停止し、`done` マーカーを作らない
+#     （準備が完了していないため。次回呼び出しは実行中ロックとして exit 3 になり、
+#     `--force` での再試行が明示的に必要になる）
+#   - `--run-prep` を渡さなかった場合は何も実行しない（prep=run を出して exit 0）
+#   - `--dry-run` 指定時は実行しない
+#
 # 終了コード:
 #   0 = 正常終了（共有モードは prep= 行で成否を判断する。--detach に prep= 行は無い）
 #   2 = 引数エラー（--source 欠落（共有モード）、--dir 皆無（--detach）、
 #       値なしのオプション、未知のオプション等）
+#   3 = ロック競合（同一 worktree で既に準備が実行中。#111）
+#   4 = --run-prep に渡したコマンドが失敗した（#111）
 #
 # 安全ルール:
 #   - 削除コマンド（rm / rmdir）を使わない
@@ -105,6 +157,8 @@ SOURCE=""
 EPIC=""
 DRY_RUN=0
 DETACH=0
+FORCE=0
+RUN_PREP=""
 RAW_LINES=()
 
 while [ $# -gt 0 ]; do
@@ -138,6 +192,13 @@ while [ $# -gt 0 ]; do
       EPIC="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --detach) DETACH=1; shift ;;
+    --force) FORCE=1; shift ;;
+    --run-prep)
+      if [ $# -lt 2 ]; then
+        echo "ERROR: --run-prep には値が必要です" >&2
+        exit 2
+      fi
+      RUN_PREP="$2"; shift 2 ;;
     -*) echo "ERROR: 未知のオプション: $1" >&2; exit 2 ;;
     *)  echo "ERROR: 未知の引数: $1" >&2; exit 2 ;;
   esac
@@ -218,6 +279,49 @@ compute_rel_path() {
 }
 
 if [ "$DETACH" -eq 0 ]; then
+
+# ---------------------------------------------------------------------------
+# ロック兼完了マーカー（#111）。--dry-run はプレビューのため状態を変えない
+# （ロックの取得も done の書き込みも行わず、既存の共有モードどおりに動作する）。
+# `git rev-parse --git-dir` が失敗する場合（レーンの作業ディレクトリが git リポジトリで
+# ない）もロックを適用せず、既存の共有モードどおりに動作する。
+# ---------------------------------------------------------------------------
+
+LOCK_ELIGIBLE=0
+LOCK_STATE="no-lock"
+LOCK_DIR=""
+
+if [ "$DRY_RUN" -eq 0 ]; then
+  GIT_DIR_RAW="$(git rev-parse --git-dir 2>/dev/null)"
+  if [ -n "$GIT_DIR_RAW" ]; then
+    GIT_DIR_ABS="$(cd "$GIT_DIR_RAW" 2>/dev/null && pwd)"
+    if [ -n "$GIT_DIR_ABS" ]; then
+      LOCK_ELIGIBLE=1
+      LOCK_DIR="${GIT_DIR_ABS}/dev-workflow-prep.lock"
+    fi
+  fi
+fi
+
+if [ "$LOCK_ELIGIBLE" -eq 1 ]; then
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    LOCK_STATE="fresh"
+  elif [ -f "${LOCK_DIR}/done" ]; then
+    LOCK_STATE="done-already"
+  elif [ "$FORCE" -eq 1 ]; then
+    LOCK_STATE="forced"
+  else
+    LOCK_STATE="conflict"
+  fi
+fi
+
+case "$LOCK_STATE" in
+  done-already)
+    printf 'prep=done-already\n'
+    exit 0 ;;
+  conflict)
+    echo "ERROR: 同一 worktree で準備が既に実行中です（${LOCK_DIR}）" >&2
+    exit 3 ;;
+esac
 
 REL_SOURCE=""
 REL_SOURCE_OK=0
@@ -358,7 +462,32 @@ for idx in "${!ENTRY_DIRS[@]}"; do
   fi
 done
 
+# ---------------------------------------------------------------------------
+# --run-prep（#111）。prep=run のときだけ実行する。--dry-run 指定時は実行しない。
+# ---------------------------------------------------------------------------
+
+RUN_PREP_RAN=0
+RUN_PREP_EXIT=0
+if [ -n "$RUN_PREP" ] && [ "$PREP" = "run" ] && [ "$DRY_RUN" -eq 0 ]; then
+  RUN_PREP_RAN=1
+  RUN_PREP_SANDBOX_ARGS=()
+  [ -n "$EPIC" ] && RUN_PREP_SANDBOX_ARGS+=(--epic "$EPIC")
+  bash "$SANDBOX_EXEC" "${RUN_PREP_SANDBOX_ARGS[@]}" "$RUN_PREP"
+  RUN_PREP_EXIT=$?
+fi
+
 printf 'prep=%s\n' "$PREP"
+
+if [ "$RUN_PREP_RAN" -eq 1 ] && [ "$RUN_PREP_EXIT" -ne 0 ]; then
+  echo "ERROR: --run-prep のコマンドが失敗しました（exit ${RUN_PREP_EXIT}）" >&2
+  exit 4
+fi
+
+# 成功したのでロック取得済みなら done マーカーを書く（#111）。
+if [ "$LOCK_ELIGIBLE" -eq 1 ]; then
+  printf '' > "${LOCK_DIR}/done" 2>/dev/null || true
+fi
+
 exit 0
 
 fi
