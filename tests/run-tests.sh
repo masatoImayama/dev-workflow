@@ -9481,6 +9481,120 @@ case "$SPD_OUT9" in
 esac
 
 # ---------------------------------------------------------------------------
+# share-prepared-dirs.sh --detach（共有リンクの解除、Task #110）
+#
+# 依存マニフェスト（package.json 等）を変更するタスクが install 前に共有リンクを
+# 解除するためのモード。共有モードと同じスタブ（DEV_WORKFLOW_SANDBOX_EXEC）を使い、
+# Docker 非依存に検証する。symlink の判定・解除もこの host 上の sh -c で実際に行われる
+# ため、判定には -L ではなく -e（存在有無）を使う（ホストが Windows の場合 test -L が
+# 誤判定しうるのは冒頭コメントに記載の既知の制約であり、-e はその影響を受けない）。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== share-prepared-dirs.sh --detach（共有リンクの解除） =="
+
+SPD_DETACH_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-detach-lane.XXXXXX")"
+SPD_DETACH_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-detach-calllog.XXXXXX")"
+SPD_DETACH_STUB="$(spd_make_stub "$SPD_DETACH_CALL_LOG")"
+
+# --- 準備: symlink 1件・実体ディレクトリ1件を用意する（absent は何も作らない） ---
+mkdir -p "${SPD_DETACH_LANE}/detach_real_target"
+(cd "${SPD_DETACH_LANE}" && ln -s "detach_real_target" "detach_link_dir")
+mkdir -p "${SPD_DETACH_LANE}/detach_entity_dir"
+
+# --- ケース1: symlink を解除して detached を出す ---
+SPD_DOUT1="$(spd_run "$SPD_DETACH_LANE" "$SPD_DETACH_STUB" --detach --dir "detach_link_dir")"
+SPD_DEXIT1=$?
+assert_exit_code "--detach ケース1: symlink 解除で exit 0" 0 "$SPD_DEXIT1"
+case "$SPD_DOUT1" in
+  *"detached"*"detach_link_dir"*)
+    pass "--detach ケース1: symlink を解除して detached を出す（#110）" ;;
+  *)
+    fail "--detach ケース1: symlink を解除して detached を出す（#110）" "output=[${SPD_DOUT1}]" ;;
+esac
+assert_eq "--detach ケース1: 解除後、レーン側の symlink は消える（#110）" \
+  "no" "$([ -e "${SPD_DETACH_LANE}/detach_link_dir" ] && echo yes || echo no)"
+
+# --- ケース2: 実体ディレクトリは skip reason not-a-link で保護され、削除されない ---
+SPD_DOUT2="$(spd_run "$SPD_DETACH_LANE" "$SPD_DETACH_STUB" --detach --dir "detach_entity_dir")"
+case "$SPD_DOUT2" in
+  *"skip"*"detach_entity_dir"*"reason"*"not-a-link"*)
+    pass "--detach ケース2: 実体ディレクトリは skip reason not-a-link で保護される（#110）" ;;
+  *)
+    fail "--detach ケース2: 実体ディレクトリは skip reason not-a-link で保護される（#110）" \
+      "output=[${SPD_DOUT2}]" ;;
+esac
+assert_eq "--detach ケース2: 実体ディレクトリは削除されない（#110）" \
+  "yes" "$([ -d "${SPD_DETACH_LANE}/detach_entity_dir" ] && echo yes || echo no)"
+
+# --- ケース3: 存在しない場合 skip reason absent ---
+SPD_DOUT3="$(spd_run "$SPD_DETACH_LANE" "$SPD_DETACH_STUB" --detach --dir "detach_missing_dir")"
+case "$SPD_DOUT3" in
+  *"skip"*"detach_missing_dir"*"reason"*"absent"*)
+    pass "--detach ケース3: 存在しない場合 skip reason absent（#110）" ;;
+  *)
+    fail "--detach ケース3: 存在しない場合 skip reason absent（#110）" "output=[${SPD_DOUT3}]" ;;
+esac
+
+# --- ケース4: --dir を複数指定できる／--detach では prep= 行を出さない／
+#     コンテナへの投入は1回にまとめられる（スタブの呼び出し回数で検証する） ---
+mkdir -p "${SPD_DETACH_LANE}/detach_multi_target_a" "${SPD_DETACH_LANE}/detach_multi_target_b"
+(cd "${SPD_DETACH_LANE}" && ln -s "detach_multi_target_a" "detach_multi_link_a")
+(cd "${SPD_DETACH_LANE}" && ln -s "detach_multi_target_b" "detach_multi_link_b")
+
+SPD_DETACH_CALL_LOG4="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-detach-calllog4.XXXXXX")"
+SPD_DETACH_STUB4="$(spd_make_stub "$SPD_DETACH_CALL_LOG4")"
+
+SPD_DOUT4="$(spd_run "$SPD_DETACH_LANE" "$SPD_DETACH_STUB4" --detach \
+  --dir "detach_multi_link_a" --dir "detach_multi_link_b" --dir "detach_missing_dir2")"
+SPD_DEXIT4=$?
+assert_exit_code "--detach ケース4: 複数エントリでも exit 0" 0 "$SPD_DEXIT4"
+
+case "$SPD_DOUT4" in
+  *"detached"*"detach_multi_link_a"*"detached"*"detach_multi_link_b"*)
+    pass "--detach ケース4: --dir を複数指定でき、それぞれ detached が出る（#110）" ;;
+  *)
+    fail "--detach ケース4: --dir を複数指定でき、それぞれ detached が出る（#110）" \
+      "output=[${SPD_DOUT4}]" ;;
+esac
+
+case "$SPD_DOUT4" in
+  *"prep="*)
+    fail "--detach ケース4: --detach では prep= 行を出さない（#110）" "output=[${SPD_DOUT4}]" ;;
+  *)
+    pass "--detach ケース4: --detach では prep= 行を出さない（#110）" ;;
+esac
+
+SPD_DETACH_CALL_COUNT4="$(grep -c '.' "$SPD_DETACH_CALL_LOG4" 2>/dev/null || echo 0)"
+assert_eq "--detach ケース4: 複数エントリ（absent混在）でもコンテナ呼び出しは1回にまとめられる（#110）" \
+  "1" "$SPD_DETACH_CALL_COUNT4"
+
+# --- ケース5: --dry-run では実際には解除しない ---
+mkdir -p "${SPD_DETACH_LANE}/detach_dryrun_target"
+(cd "${SPD_DETACH_LANE}" && ln -s "detach_dryrun_target" "detach_dryrun_link")
+
+SPD_DOUT5="$(spd_run "$SPD_DETACH_LANE" "$SPD_DETACH_STUB" --detach --dir "detach_dryrun_link" --dry-run)"
+case "$SPD_DOUT5" in
+  *"detached"*"detach_dryrun_link"*)
+    pass "--detach ケース5: --dry-run でも detached 行が出る（#110）" ;;
+  *)
+    fail "--detach ケース5: --dry-run でも detached 行が出る（#110）" "output=[${SPD_DOUT5}]" ;;
+esac
+assert_eq "--detach ケース5: --dry-run では実際には解除しない（#110）" \
+  "yes" "$([ -e "${SPD_DETACH_LANE}/detach_dryrun_link" ] && echo yes || echo no)"
+
+# --- ケース6: --detach 指定時に --dir が1つも無いと無限ループせず exit 2 ---
+if command -v timeout >/dev/null 2>&1; then
+  SPD_DETACH_NODIR_OUT="$(timeout 5 bash "$SPD_SCRIPT" --detach 2>&1)"
+  SPD_DETACH_NODIR_EXIT=$?
+  assert_no_hang "--detach ケース6: --dir 皆無は無限ループせず exit 2（#110）" \
+    2 "$SPD_DETACH_NODIR_EXIT" "$SPD_DETACH_NODIR_OUT" "--dir が1つ以上必要です"
+else
+  skip "share-prepared-dirs.sh --detach: --dir 皆無で無限ループしない（#110）" \
+    "timeout コマンドが利用できません"
+fi
+
+# ---------------------------------------------------------------------------
 # Task #107: Epic本文の「## 共有ディレクトリ」節がplanner・共通ルールに定義されている
 #
 # レーンごとのフル install（#104）を避けるための共有宣言。既存の「## 準備コマンド」節・

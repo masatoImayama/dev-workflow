@@ -10,8 +10,14 @@
 # 既に存在する。これをレーンへ symlink で共有すればレーンでの install は不要になる。
 # 判定を散文で generator に委ねると取りこぼすため、本スクリプトに固定する。
 #
-# 本スクリプトは共有モード（既定モード）のみを実装する。`--detach`（#110）と
+# 本スクリプトは共有モード（既定モード）と `--detach`（#110）を実装する。
 # ロック・`--run-prep`（#111）は後続タスクで追加する。
+#
+# --detach は共有モードの逆操作である。依存マニフェスト（package.json / yarn.lock 等）を
+# 変更するタスクは、install 前に共有リンクを解除しないと symlink 越しに共有元と他レーンの
+# 成果を壊す（issue #104 と同種の壊れ方を、共有によってより広範囲に起こしうる）。
+# `--detach` はレーン側 <dir> が symlink のときだけ unlink する。symlink でない実体
+# ディレクトリには絶対に触れない（skip reason not-a-link として保護する）。
 #
 # 使い方（レーンの作業ディレクトリをカレントディレクトリとして呼び出す前提）:
 #   bash scripts/share-prepared-dirs.sh --source <epic-worktree-path> \
@@ -22,6 +28,7 @@
 #   bash scripts/share-prepared-dirs.sh --source <epic-worktree-path> \
 #       --dir "node_modules yarn.lock package.json" --dir ".venv requirements.txt"
 #   bash scripts/share-prepared-dirs.sh --source <epic-worktree-path> --epic epic105 --dry-run ...
+#   bash scripts/share-prepared-dirs.sh --detach --dir node_modules --dir .venv
 #
 # オプション:
 #   --source <path>  共有元（Epic 専用 worktree）のパス。必須
@@ -29,6 +36,10 @@
 #   --dir <text>     --spec の1行分を追加する（繰り返し可）
 #   --epic <識別子>  sandbox-exec.sh に渡す --epic（例 epic105）。省略可
 #   --dry-run        symlink を実際には作らず判定結果だけを出す
+#   --detach         共有モードの逆操作（#110）。依存マニフェストを変更するタスクが
+#                    install 前に共有リンクを解除するために使う。--source は不要で、
+#                    --dir が1つ以上必要。symlink の解除のみを行い、実体ディレクトリ
+#                    には絶対に触れない（skip reason not-a-link として保護する）
 #
 # エントリの行書式（空白区切り、すべてリポジトリルート相対。空行と # 始まりの行は無視する）:
 #   <共有するディレクトリ> [<フィンガープリントファイル> ...]
@@ -43,7 +54,18 @@
 # --dry-run でも linked 行を出すが実際には作らない
 # （scripts/cleanup-lane-worktrees.sh の removed 行が「削除予定」を表す既存慣習に合わせる）。
 #
-# エントリごとの判定順序:
+# 出力（--detach。1行1件・タブ区切り。prep= 行は出さない。エントリは <dir> のみ使い、
+# --dir の2番目以降のフィールド（フィンガープリントファイル）は無視する）:
+#   detached	<dir>
+#   skip	<dir>	reason	<not-a-link|absent>
+#
+# --detach の判定順序:
+#   1. レーン側 <dir> が symlink である              -> unlink して detached
+#      （--dry-run 指定時は実際には解除せず detached だけを出す）
+#   2. symlink ではないが存在する（実体ディレクトリ等） -> skip reason not-a-link（触れない）
+#   3. 存在しない                                    -> skip reason absent
+#
+# エントリごとの判定順序（共有モード）:
 #   1. <source>/<dir> が存在しない（ディレクトリでない）      -> no-source
 #   2. レーン側 <dir> が既に存在する（symlink・実体を問わない） -> exists
 #   3. フィンガープリントファイルの欠損・不一致が1つでもある   -> fingerprint-mismatch
@@ -66,8 +88,9 @@
 # link-failed として扱う。
 #
 # 終了コード:
-#   0 = 正常終了（共有の成否は prep= 行で判断する）
-#   2 = 引数エラー（--source 欠落、値なしのオプション、未知のオプション等）
+#   0 = 正常終了（共有モードは prep= 行で成否を判断する。--detach に prep= 行は無い）
+#   2 = 引数エラー（--source 欠落（共有モード）、--dir 皆無（--detach）、
+#       値なしのオプション、未知のオプション等）
 #
 # 安全ルール:
 #   - 削除コマンド（rm / rmdir）を使わない
@@ -81,6 +104,7 @@ SANDBOX_EXEC="${DEV_WORKFLOW_SANDBOX_EXEC:-${SCRIPT_DIR}/sandbox-exec.sh}"
 SOURCE=""
 EPIC=""
 DRY_RUN=0
+DETACH=0
 RAW_LINES=()
 
 while [ $# -gt 0 ]; do
@@ -113,12 +137,13 @@ while [ $# -gt 0 ]; do
       fi
       EPIC="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --detach) DETACH=1; shift ;;
     -*) echo "ERROR: 未知のオプション: $1" >&2; exit 2 ;;
     *)  echo "ERROR: 未知の引数: $1" >&2; exit 2 ;;
   esac
 done
 
-if [ -z "$SOURCE" ]; then
+if [ "$DETACH" -eq 0 ] && [ -z "$SOURCE" ]; then
   echo "ERROR: --source は必須です" >&2
   exit 2
 fi
@@ -145,6 +170,11 @@ for _raw in "${RAW_LINES[@]:-}"; do
   ENTRY_DIRS+=("${_fields[0]}")
   ENTRY_FILES+=("${_fields[*]:1}")
 done
+
+if [ "$DETACH" -eq 1 ] && [ "${#ENTRY_DIRS[@]}" -eq 0 ]; then
+  echo "ERROR: --detach には --dir が1つ以上必要です" >&2
+  exit 2
+fi
 
 # ---------------------------------------------------------------------------
 # 共有元からレーン（カレントディレクトリ）への相対パスを計算する（純粋な文字列処理。
@@ -186,6 +216,8 @@ compute_rel_path() {
   [ -z "$rel" ] && rel="."
   printf '%s' "$rel"
 }
+
+if [ "$DETACH" -eq 0 ]; then
 
 REL_SOURCE=""
 REL_SOURCE_OK=0
@@ -328,3 +360,46 @@ done
 
 printf 'prep=%s\n' "$PREP"
 exit 0
+
+fi
+
+# ---------------------------------------------------------------------------
+# --detach: 共有モードの逆操作（#110）。レーン側 <dir> が symlink であれば解除する。
+# 判定・解除はコンテナ内で行う（共有モードと同じ理由。ホストが Windows（Git Bash）の場合、
+# コンテナ内から作られた symlink をホスト側の test -L が正しく判定できない）。
+# symlink でない実体には絶対に触れない（not-a-link として保護し、削除しない）。
+# コンテナへの投入は1回にまとめる（エントリごとに docker exec を往復させない）。
+# --dry-run 指定時は detached 行を出すが実際には解除しない（共有モードの linked と同じ慣習）。
+# ---------------------------------------------------------------------------
+
+if [ "$DETACH" -eq 1 ]; then
+
+DETACH_SCRIPT="set -u"$'\n'
+# shellcheck disable=SC2016  # 単一引用符は意図的。$d はここでは展開せず、
+# コンテナ側で実行されるミニスクリプトの文字列としてそのまま埋め込む。
+for dir in "${ENTRY_DIRS[@]}"; do
+  DETACH_SCRIPT+="d=$(printf '%q' "$dir")"$'\n'
+  DETACH_SCRIPT+='if [ -L "$d" ]; then'$'\n'
+  if [ "$DRY_RUN" -eq 1 ]; then
+    DETACH_SCRIPT+='  printf "detached\t%s\n" "$d"'$'\n'
+  else
+    DETACH_SCRIPT+='  if unlink "$d" 2>/dev/null; then'$'\n'
+    DETACH_SCRIPT+='    printf "detached\t%s\n" "$d"'$'\n'
+    DETACH_SCRIPT+='  else'$'\n'
+    DETACH_SCRIPT+='    printf "skip\t%s\treason\tunlink-failed\n" "$d"'$'\n'
+    DETACH_SCRIPT+='  fi'$'\n'
+  fi
+  DETACH_SCRIPT+='elif [ -e "$d" ]; then'$'\n'
+  DETACH_SCRIPT+='  printf "skip\t%s\treason\tnot-a-link\n" "$d"'$'\n'
+  DETACH_SCRIPT+='else'$'\n'
+  DETACH_SCRIPT+='  printf "skip\t%s\treason\tabsent\n" "$d"'$'\n'
+  DETACH_SCRIPT+='fi'$'\n'
+done
+
+SANDBOX_ARGS=()
+[ -n "$EPIC" ] && SANDBOX_ARGS+=(--epic "$EPIC")
+
+bash "$SANDBOX_EXEC" "${SANDBOX_ARGS[@]}" "$DETACH_SCRIPT"
+exit $?
+
+fi
