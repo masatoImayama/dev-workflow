@@ -9481,6 +9481,109 @@ case "$SPD_OUT9" in
 esac
 
 # ---------------------------------------------------------------------------
+# Task #107: Epic本文の「## 共有ディレクトリ」節がplanner・共通ルールに定義されている
+#
+# レーンごとのフル install（#104）を避けるための共有宣言。既存の「## 準備コマンド」節・
+# 「## SKIPパターン」節と対称な位置・対称な書き方であることを検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #107: Epic本文の『## 共有ディレクトリ』節がplanner・共通ルールに定義されている =="
+
+# --- core/roles/planner.md: 「プロジェクト固有の準備コマンド」と「SKIPパターン」の間に
+#     共有ディレクトリ節の書き方がある ---
+PLANNER_SHAREDIR_SECTION="$(awk '/^#### 共有ディレクトリ（該当する場合のみ）/{f=1} /^#### SKIPパターン（該当する場合のみ）/{f=0} f' \
+  "${REPO_ROOT}/core/roles/planner.md")"
+
+if [ -z "$PLANNER_SHAREDIR_SECTION" ]; then
+  fail "core/roles/planner.md: 『#### 共有ディレクトリ（該当する場合のみ）』節が見つかる（#107）" "節が空でした"
+else
+  pass "core/roles/planner.md: 『#### 共有ディレクトリ（該当する場合のみ）』節が見つかる（#107）"
+fi
+
+case "$PLANNER_SHAREDIR_SECTION" in
+  *'## 共有ディレクトリ'*'<共有するディレクトリ>'*'<フィンガープリントファイル>'*)
+    pass "core/roles/planner.md: 共有ディレクトリ節の見出し・行書式（空白区切り・リポジトリルート相対）が明記されている（#107）" ;;
+  *)
+    fail "core/roles/planner.md: 共有ディレクトリ節の見出し・行書式（空白区切り・リポジトリルート相対）が明記されている（#107）" \
+      "$PLANNER_SHAREDIR_SECTION" ;;
+esac
+
+case "$PLANNER_SHAREDIR_SECTION" in
+  *'node_modules'*'yarn.lock'*'package.json'*)
+    pass "core/roles/planner.md: 共有ディレクトリ節の例（node_modules  yarn.lock package.json）がある（#107）" ;;
+  *)
+    fail "core/roles/planner.md: 共有ディレクトリ節の例（node_modules  yarn.lock package.json）がある（#107）" \
+      "$PLANNER_SHAREDIR_SECTION" ;;
+esac
+
+case "$PLANNER_SHAREDIR_SECTION" in
+  *'フィンガープリントには lockfile を必ず書く'*)
+    pass "core/roles/planner.md: フィンガープリントにlockfileを必ず書く旨が明記されている（#107）" ;;
+  *)
+    fail "core/roles/planner.md: フィンガープリントにlockfileを必ず書く旨が明記されている（#107）" \
+      "$PLANNER_SHAREDIR_SECTION" ;;
+esac
+
+case "$PLANNER_SHAREDIR_SECTION" in
+  *'Task issue 側にはこの節を書かない'*)
+    pass "core/roles/planner.md: Task issue側には書かない旨が明記されている（#107）" ;;
+  *)
+    fail "core/roles/planner.md: Task issue側には書かない旨が明記されている（#107）" \
+      "$PLANNER_SHAREDIR_SECTION" ;;
+esac
+
+# --- core/instructions.md: 「Epic 本文の『## SKIPパターン』節」と対称な位置に
+#     「Epic 本文の『## 共有ディレクトリ』節」がある ---
+INSTR_SHAREDIR_SECTION="$(awk '/^### Epic 本文の `## 共有ディレクトリ` 節/{f=1} /^### Epic 本文の `## SKIPパターン` 節/{f=0} f' \
+  "${REPO_ROOT}/core/instructions.md")"
+
+if [ -z "$INSTR_SHAREDIR_SECTION" ]; then
+  fail "core/instructions.md: 『### Epic 本文の \`## 共有ディレクトリ\` 節』が見つかる（#107）" "節が空でした"
+else
+  pass "core/instructions.md: 『### Epic 本文の \`## 共有ディレクトリ\` 節』が見つかる（#107）"
+fi
+
+case "$INSTR_SHAREDIR_SECTION" in
+  *'#104'*'Step 3'*'generator プロンプトへ渡す'*)
+    pass "core/instructions.md: runがEpic開始時に節を読みStep 3のgeneratorプロンプトへ渡す旨が明記されている（#107）" ;;
+  *)
+    fail "core/instructions.md: runがEpic開始時に節を読みStep 3のgeneratorプロンプトへ渡す旨が明記されている（#107）" \
+      "$INSTR_SHAREDIR_SECTION" ;;
+esac
+
+case "$INSTR_SHAREDIR_SECTION" in
+  *'節を書くかどうかの判断は planner が行う'*)
+    pass "core/instructions.md: 節を書くかどうかの判断はplannerが行う旨が明記されている（#107）" ;;
+  *)
+    fail "core/instructions.md: 節を書くかどうかの判断はplannerが行う旨が明記されている（#107）" \
+      "$INSTR_SHAREDIR_SECTION" ;;
+esac
+
+# --- 生成物（agents/*.md・codex-agents/*.toml）にもcore/instructions.mdの共有ディレクトリ節が
+#     伝播している（build.shの再生成漏れを検知する） ---
+for f in agents/planner.md agents/generator.md agents/evaluator.md \
+         codex-agents/planner.toml codex-agents/generator.toml codex-agents/evaluator.toml; do
+  if grep -Fq -- '### Epic 本文の `## 共有ディレクトリ` 節' "${REPO_ROOT}/${f}"; then
+    pass "${f}: core/instructions.mdの共有ディレクトリ節が生成物に反映されている（#107）"
+  else
+    fail "${f}: core/instructions.mdの共有ディレクトリ節が生成物に反映されている（#107）" \
+      "節が見つかりませんでした"
+  fi
+done
+
+# --- 生成物（agents/planner.md・codex-agents/planner.toml）にもcore/roles/planner.mdの
+#     共有ディレクトリ節が伝播している ---
+for f in agents/planner.md codex-agents/planner.toml; do
+  if grep -Fq -- '#### 共有ディレクトリ（該当する場合のみ）' "${REPO_ROOT}/${f}"; then
+    pass "${f}: core/roles/planner.mdの共有ディレクトリ節が生成物に反映されている（#107）"
+  else
+    fail "${f}: core/roles/planner.mdの共有ディレクトリ節が生成物に反映されている（#107）" \
+      "節が見つかりませんでした"
+  fi
+done
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 

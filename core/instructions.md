@@ -295,6 +295,16 @@ isolation worktree には及ばない。**
   （`core/roles/generator.md`）
 - 節を書くかどうかの判断は planner が行う（`core/roles/planner.md`）
 
+### Epic 本文の `## 共有ディレクトリ` 節
+
+レーンごとに準備コマンドをフル実行すると、`node_modules` / `vendor` 等の大量のファイルを
+含むディレクトリ生成が支配的なコストになる（issue #104）。Epic 本文の `## 共有ディレクトリ`
+節は、Epic 専用 worktree の準備成果ディレクトリをレーンへ symlink で共有するための宣言である。
+
+- 節があれば run が Epic 開始時にその内容を読み、Step 3 の各 generator プロンプトへ渡す
+- 節が無ければ何もしない（共有せず、現行どおり各レーンで準備コマンドをフル実行する）
+- 節を書くかどうかの判断は planner が行う（`core/roles/planner.md`）
+
 ### Epic 本文の `## SKIPパターン` 節
 
 `scripts/count-skips.sh` は go / jest / pytest の3形式しか built-in で判定できない。
