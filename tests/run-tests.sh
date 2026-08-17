@@ -9239,6 +9239,159 @@ esac
 # 通常ディレクトリなので `ln -s` はこの検証環境でも十分に動作する。
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Task #108: READMEに共有ディレクトリ節とcomposeのキャッシュvolume既知の限界を追記する
+#
+# 上記1〜5がすべてREADME.mdに記載されていることと、既存記述（container_name:/固定ホスト
+# ポートの既知の限界、symlink警告、cleanup-lane-worktrees.shの案内）が消えていないことを
+# 確認する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== README.md（共有ディレクトリ節・composeキャッシュvolumeの既知の限界。#108） =="
+
+DOC108_README="${REPO_ROOT}/README.md"
+
+# --- 1. Epicの「## 共有ディレクトリ」節の書き方が案内されている ---
+DOC108_SHARED_SECTION="$(awk '/^### Epic の `## 共有ディレクトリ` 節/{f=1} /^## YOLOモード/{f=0} f' \
+  "$DOC108_README")"
+
+if [ -z "$DOC108_SHARED_SECTION" ]; then
+  fail "README.md: 『Epic の \`## 共有ディレクトリ\` 節』が見つかる（#108）" "節が空でした"
+else
+  pass "README.md: 『Epic の \`## 共有ディレクトリ\` 節』が見つかる（#108）"
+fi
+
+case "$DOC108_SHARED_SECTION" in
+  *'## 共有ディレクトリ'*'node_modules'*'yarn.lock'*'フィンガープリント'*'--detach'*)
+    pass "README.md: 共有ディレクトリ節に書式例・フィンガープリントの必須化・--detachの案内がある（#108）" ;;
+  *)
+    fail "README.md: 共有ディレクトリ節に書式例・フィンガープリントの必須化・--detachの案内がある（#108）" \
+      "$DOC108_SHARED_SECTION" ;;
+esac
+
+case "$DOC108_SHARED_SECTION" in
+  *'節が無ければ何もしない'*)
+    pass "README.md: 共有ディレクトリ節が無ければ何もしない（後方互換）旨が明記されている（#108）" ;;
+  *)
+    fail "README.md: 共有ディレクトリ節が無ければ何もしない（後方互換）旨が明記されている（#108）" \
+      "$DOC108_SHARED_SECTION" ;;
+esac
+
+# --- 2. composeモードのキャッシュvolume既知の限界とサンプルが記載されている ---
+DOC108_COMPOSE_SECTION="$(awk '/^### compose モード/{f=1} /^### Windows の CRLF に注意/{f=0} f' \
+  "$DOC108_README")"
+
+if [ -z "$DOC108_COMPOSE_SECTION" ]; then
+  fail "README.md: 『compose モード』節が見つかる（前提）（#108）" "節が空でした"
+else
+  pass "README.md: 『compose モード』節が見つかる（前提）（#108）"
+fi
+
+case "$DOC108_COMPOSE_SECTION" in
+  *'dockerfile モード専用'*'compose モードでは一切マウントされません'*'named volume'*'介入しません'*)
+    pass "README.md: composeモードはキャッシュvolumeがdockerfile専用で介入しない旨が明記されている（#108）" ;;
+  *)
+    fail "README.md: composeモードはキャッシュvolumeがdockerfile専用で介入しない旨が明記されている（#108）" \
+      "$DOC108_COMPOSE_SECTION" ;;
+esac
+
+case "$DOC108_COMPOSE_SECTION" in
+  *'yarn-cache'*'volumes:'*)
+    pass "README.md: composeのキャッシュvolumeサンプルが記載されている（#108）" ;;
+  *)
+    fail "README.md: composeのキャッシュvolumeサンプルが記載されている（#108）" \
+      "$DOC108_COMPOSE_SECTION" ;;
+esac
+
+# --- 既存記述: container_name: / 固定ホストポートの既知の限界が消えていない ---
+case "$DOC108_COMPOSE_SECTION" in
+  *'container_name:'*'固定ホストポート'*'epic の並行実行ができません'*)
+    pass "README.md: 既存のcontainer_name:/固定ホストポートの既知の限界が壊れずに残っている（#108）" ;;
+  *)
+    fail "README.md: 既存のcontainer_name:/固定ホストポートの既知の限界が壊れずに残っている（#108）" \
+      "$DOC108_COMPOSE_SECTION" ;;
+esac
+
+# --- 3. 「Claude Code との差分」表に共有ディレクトリ機構がClaude Code固有である旨の1行がある ---
+DOC108_CODEX_DIFF="$(awk '/^### Claude Code との差分/{f=1} /^## このプラグイン自体を開発する場合/{f=0} f' \
+  "$DOC108_README")"
+
+if [ -z "$DOC108_CODEX_DIFF" ]; then
+  fail "README.md: 『Claude Code との差分』節が見つかる（前提）（#108）" "節が空でした"
+else
+  pass "README.md: 『Claude Code との差分』節が見つかる（前提）（#108）"
+fi
+
+case "$DOC108_CODEX_DIFF" in
+  *'準備成果ディレクトリの共有'*'なし'*'レーン worktree が存在せず'*)
+    pass "README.md: Claude Codeとの差分表に共有ディレクトリ機構がClaude Code固有である旨の行がある（#108）" ;;
+  *)
+    fail "README.md: Claude Codeとの差分表に共有ディレクトリ機構がClaude Code固有である旨の行がある（#108）" \
+      "$DOC108_CODEX_DIFF" ;;
+esac
+
+# --- 4. 「worktree運用の注意」節に共有symlinkとcleanup-lane-worktrees.shの関係が書かれている ---
+DOC108_WORKTREE_SECTION="$(awk '/^### worktree運用の注意/{f=1} /^## 並列実行/{f=0} f' \
+  "$DOC108_README")"
+
+if [ -z "$DOC108_WORKTREE_SECTION" ]; then
+  fail "README.md: 『worktree運用の注意』節が見つかる（前提）（#108）" "節が空でした"
+else
+  pass "README.md: 『worktree運用の注意』節が見つかる（前提）（#108）"
+fi
+
+case "$DOC108_WORKTREE_SECTION" in
+  *'共有 symlink'*'--unlink-dir'*'node_modules'*)
+    pass "README.md: worktree運用の注意に共有symlinkと--unlink-dirの関係が明記されている（#108）" ;;
+  *)
+    fail "README.md: worktree運用の注意に共有symlinkと--unlink-dirの関係が明記されている（#108）" \
+      "$DOC108_WORKTREE_SECTION" ;;
+esac
+
+# --- 既存記述: symlink警告（node_modules/git worktree remove --force）が消えていない ---
+case "$DOC108_WORKTREE_SECTION" in
+  *'git worktree remove --force'*'symlink越しにメインリポの実体ファイルを削除する'*)
+    pass "README.md: 既存のsymlink警告が壊れずに残っている（#108）" ;;
+  *)
+    fail "README.md: 既存のsymlink警告が壊れずに残っている（#108）" \
+      "$DOC108_WORKTREE_SECTION" ;;
+esac
+
+# --- 既存記述: cleanup-lane-worktrees.shの案内が消えていない ---
+case "$DOC108_WORKTREE_SECTION" in
+  *'scripts/cleanup-lane-worktrees.sh'*)
+    pass "README.md: 既存のcleanup-lane-worktrees.shの案内が壊れずに残っている（#108）" ;;
+  *)
+    fail "README.md: 既存のcleanup-lane-worktrees.shの案内が壊れずに残っている（#108）" \
+      "$DOC108_WORKTREE_SECTION" ;;
+esac
+
+# --- 5. 環境変数一覧にDEV_WORKFLOW_SANDBOX_EXECが追加されている ---
+DOC108_ENVLIST="$(awk '/^### 環境変数一覧/{f=1} /^## Slack通知/{f=0} f' "$DOC108_README")"
+
+if [ -z "$DOC108_ENVLIST" ]; then
+  fail "README.md: 『環境変数一覧』節が見つかる（前提）（#108）" "節が空でした"
+else
+  pass "README.md: 『環境変数一覧』節が見つかる（前提）（#108）"
+fi
+
+case "$DOC108_ENVLIST" in
+  *'DEV_WORKFLOW_SANDBOX_EXEC'*)
+    pass "README.md: 環境変数一覧にDEV_WORKFLOW_SANDBOX_EXECが追加されている（#108）" ;;
+  *)
+    fail "README.md: 環境変数一覧にDEV_WORKFLOW_SANDBOX_EXECが追加されている（#108）" \
+      "$DOC108_ENVLIST" ;;
+esac
+
+# --- 駆動先プロジェクト固有の値をハードコードしていない（汎用の例のみ。kikumemo等の固有名詞が無い） ---
+if grep -Eq 'kikumemo' "$DOC108_README"; then
+  fail "README.md: 駆動先プロジェクト固有の値をハードコードしていない（#108）" \
+    "$(grep -n -E 'kikumemo' "$DOC108_README")"
+else
+  pass "README.md: 駆動先プロジェクト固有の値をハードコードしていない（#108）"
+fi
+
 echo ""
 echo "== share-prepared-dirs.sh（準備成果ディレクトリの共有・共有モード） =="
 
