@@ -139,6 +139,10 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/share-prepared-dirs.sh" --source "<Epic専�
   2本目の準備コマンドを並行実行してネイティブバイナリを破損させた事故（issue #104）の直接の
   再発防止である。exit 3 が返ったら実装に進まず、その事実を完了報告に含めて停止する
 - exit 4（`--run-prep` に渡したコマンドが失敗した）の場合も実装に進まず、その事実を報告する
+- **共有ディレクトリが複数あり一部だけ共有できた場合（prep=run）、`--run-prep` に渡した
+  コマンドが linked 済みの共有symlink越しに共有元へ書き込むことは無い。** スクリプト自身が
+  実行直前に linked 済みエントリの共有symlinkを全て解除してから準備コマンドを実行する
+  （Review #116）。generator 側で個別に `--detach` を挟む必要は無い
 - **依存マニフェスト（`package.json` / lockfile 等）を変更するタスクでは、install 系コマンドを
   実行する前に `--detach --dir <共有ディレクトリ>` で共有リンクを解除する。** 解除せずに
   install すると、symlink 越しに共有元（Epic 専用 worktree）と他レーンの成果を壊す

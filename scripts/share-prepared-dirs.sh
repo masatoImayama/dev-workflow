@@ -143,6 +143,20 @@
 #     `--force` での再試行が明示的に必要になる）
 #   - `--run-prep` を渡さなかった場合は何も実行しない（prep=run を出して exit 0）
 #   - `--dry-run` 指定時は実行しない
+#   - **エントリが複数あり一部だけ linked・残りが no-source 等で prep=run になった場合、
+#     コマンドを実行する直前にその linked 済みエントリの共有symlinkを全て解除してから
+#     実行する（Review #116）。** linked 済みの symlink を張ったまま準備コマンド
+#     （`yarn install` 等）を実行すると、install はレーンの `<dir>`（= 共有元 Epic 専用
+#     worktree への symlink）へ書き込むため、共有元と他レーンが参照している実体を
+#     書き換えてしまう（issue #104 の『同一 node_modules への並行 install によるネイティブ
+#     バイナリ破損』を、レーンをまたいでより広範囲に再現しうる）。エントリが1件のみ
+#     （全件 linked または全件 non-linked）の場合はこの解除は発生しない。
+#     解除はコマンド実行と同じコンテナ呼び出し内で `unlink <dir> && ...` として前置する
+#     （コンテナ呼び出しを増やさないため）。解除に失敗した場合はコマンド自体を実行せず、
+#     以降の失敗時と同じ扱い（exit 4、`done` を作らない）にする。
+#     全件 linked でなければ全件 prep=run に倒す（all-or-nothing）方式は採らなかった。
+#     `--run-prep` を渡さない呼び出し（#106 の複数エントリ混在ケース等）では、混在バッチ
+#     でも個々の共有可否をそのまま `linked`/`skip` 行で報告する既存の挙動を変えないため。
 #
 # 終了コード:
 #   0 = 正常終了（共有モードは prep= 行で成否を判断する。--detach に prep= 行は無い）
@@ -481,15 +495,31 @@ done
 
 # ---------------------------------------------------------------------------
 # --run-prep（#111）。prep=run のときだけ実行する。--dry-run 指定時は実行しない。
+#
+# エントリが複数あり一部だけ linked（残りが no-source 等）で prep=run になった場合、
+# linked 済みの共有symlinkを張ったままコマンドを実行すると共有元へ書き込んでしまう
+# （Review #116。詳細は冒頭コメント参照）。そのため、linked 済みエントリを解除する
+# `unlink` を実行対象コマンドの前に連結し、同じコンテナ呼び出し1回にまとめて実行する。
+# `&&` で連結するため、解除に1つでも失敗すれば本体のコマンドは実行されず、
+# 呼び出し全体が非0終了して以降の失敗時処理（exit 4、doneを作らない）に合流する。
 # ---------------------------------------------------------------------------
 
 RUN_PREP_RAN=0
 RUN_PREP_EXIT=0
 if [ -n "$RUN_PREP" ] && [ "$PREP" = "run" ] && [ "$DRY_RUN" -eq 0 ]; then
   RUN_PREP_RAN=1
+
+  RUN_PREP_UNLINK_PREFIX=""
+  for idx in "${!ENTRY_DIRS[@]}"; do
+    if [ "${RESULT_KIND[$idx]:-}" = "linked" ]; then
+      RUN_PREP_UNLINK_PREFIX+="unlink $(printf '%q' "${ENTRY_DIRS[$idx]}") && "
+    fi
+  done
+  RUN_PREP_CMD="${RUN_PREP_UNLINK_PREFIX}${RUN_PREP}"
+
   RUN_PREP_SANDBOX_ARGS=()
   [ -n "$EPIC" ] && RUN_PREP_SANDBOX_ARGS+=(--epic "$EPIC")
-  bash "$SANDBOX_EXEC" "${RUN_PREP_SANDBOX_ARGS[@]}" "$RUN_PREP"
+  bash "$SANDBOX_EXEC" "${RUN_PREP_SANDBOX_ARGS[@]}" "$RUN_PREP_CMD"
   RUN_PREP_EXIT=$?
 fi
 

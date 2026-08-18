@@ -10336,6 +10336,78 @@ assert_eq "ネストしたエントリ: linked 後、共有元のファイルが
   "$(cat "${SPD_NEST_LANE}/packages/app/node_modules/marker.txt" 2>/dev/null || echo "READ_FAILED")"
 
 # ---------------------------------------------------------------------------
+# share-prepared-dirs.sh: 混在ケース（linked 1件 + no-source 1件）+ --run-prep で
+# 共有元が書き換えられない（Review #116）
+#
+# エントリが複数あり一部だけ linked・残りが no-source になると prep=run になり、
+# --run-prep のコマンド（yarn install 等）が「linked 済みの symlink を張ったまま」
+# レーンで実行されうる。install はレーンの <dir>（= 共有元への symlink）へ書き込むため、
+# 対策が無いと共有元と他レーンが参照している実体を書き換えてしまう（issue #104 と同種の
+# 破損をレーンをまたいで再現しうる）。--run-prep 実行直前に linked 済みエントリの共有symlink
+# を解除する修正により、準備コマンドが共有元へ書き込まないことを検証する。
+# 既存のフィクスチャ（SPD_SCRIPT / spd_make_stub / spd_run）を再利用する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== share-prepared-dirs.sh: 混在ケース + --run-prep で共有元が書き換えられない（Review #116） =="
+
+SPD116_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-116-source.XXXXXX")"
+SPD116_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-116-lane.XXXXXX")"
+SPD116_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-116-calllog.XXXXXX")"
+SPD116_STUB="$(spd_make_stub "$SPD116_CALL_LOG")"
+
+mkdir -p "${SPD116_SOURCE}/shared_ok"
+printf 'source-content\n' > "${SPD116_SOURCE}/shared_ok/original.txt"
+
+SPD116_MARKER="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-116-marker.XXXXXX")"
+SPD116_PREP_CMD="mkdir -p shared_ok && printf 'lane-write\n' > shared_ok/newfile.txt && printf x >> $(printf '%q' "$SPD116_MARKER")"
+
+SPD116_OUT="$(spd_run "$SPD116_LANE" "$SPD116_STUB" --source "$SPD116_SOURCE" \
+  --dir "shared_ok" --dir "no_source_entry" --run-prep "$SPD116_PREP_CMD")"
+SPD116_EXIT=$?
+assert_exit_code "混在+--run-prep ケース: 準備コマンド成功で exit 0（#116）" 0 "$SPD116_EXIT"
+
+case "$SPD116_OUT" in
+  *"linked"*"shared_ok"*)
+    pass "混在+--run-prep ケース: shared_ok は linked と報告される（#116）" ;;
+  *)
+    fail "混在+--run-prep ケース: shared_ok は linked と報告される（#116）" "output=[${SPD116_OUT}]" ;;
+esac
+
+case "$SPD116_OUT" in
+  *"skip"*"no_source_entry"*"reason"*"no-source"*)
+    pass "混在+--run-prep ケース: no_source_entry は skip reason no-source（#116）" ;;
+  *)
+    fail "混在+--run-prep ケース: no_source_entry は skip reason no-source（#116）" "output=[${SPD116_OUT}]" ;;
+esac
+
+case "$SPD116_OUT" in
+  *"prep=run"*)
+    pass "混在+--run-prep ケース: 一部が no-source のため prep=run（#116）" ;;
+  *)
+    fail "混在+--run-prep ケース: 一部が no-source のため prep=run（#116）" "output=[${SPD116_OUT}]" ;;
+esac
+
+assert_eq "混在+--run-prep ケース: --run-prep のコマンドが実行される（#116）" \
+  "yes" "$([ -s "$SPD116_MARKER" ] && echo yes || echo no)"
+
+# 本題1: 共有元の shared_ok に、レーンで実行された準備コマンドの書き込みが入り込んでいない
+assert_eq "混在+--run-prep ケース: 共有元の shared_ok に newfile.txt が書き込まれていない（#116）" \
+  "no" "$([ -e "${SPD116_SOURCE}/shared_ok/newfile.txt" ] && echo yes || echo no)"
+
+# 共有元の既存ファイルも変化していない
+assert_eq "混在+--run-prep ケース: 共有元の既存ファイルが変化していない（#116）" \
+  "source-content" "$(cat "${SPD116_SOURCE}/shared_ok/original.txt" 2>/dev/null || echo "READ_FAILED")"
+
+# 本題2: --run-prep 実行前に共有symlinkが解除され、レーン側 shared_ok は実体ディレクトリに
+# なっており、準備コマンドの書き込みはレーン側だけに反映されている
+assert_eq "混在+--run-prep ケース: --run-prep 前に共有symlinkが解除されレーン側は実体ディレクトリになる（#116）" \
+  "no" "$([ -L "${SPD116_LANE}/shared_ok" ] && echo yes || echo no)"
+
+assert_eq "混在+--run-prep ケース: レーン側 shared_ok に準備コマンドの書き込みが反映されている（#116）" \
+  "lane-write" "$(cat "${SPD116_LANE}/shared_ok/newfile.txt" 2>/dev/null || echo "READ_FAILED")"
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
