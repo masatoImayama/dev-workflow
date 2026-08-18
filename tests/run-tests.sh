@@ -10286,6 +10286,56 @@ case "$H112_RS_STEP3" in
 esac
 
 # ---------------------------------------------------------------------------
+# share-prepared-dirs.sh: ネストしたエントリのsymlinkターゲット計算（Review #115）
+#
+# symlink のターゲットはリンク自身の親ディレクトリ基準で解決されるため、
+# `packages/app/node_modules` のようにネストしたエントリ（行書式はリポジトリルート相対で
+# あり、モノレポでは主要な用途）ではレーン worktree 基準の相対パスをそのまま使うと誤った
+# ターゲットになり dangling symlink になる（#115）。linked 後に共有元のファイルが実際に
+# レーン側から読めることまで確認する（symlink が正しく解決できていることの検証）。
+# 既存のフィクスチャ（SPD_SCRIPT / spd_make_stub / spd_run）を再利用する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== share-prepared-dirs.sh: ネストしたエントリのsymlinkターゲット計算（Review #115） =="
+
+SPD_NEST_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-nest-source.XXXXXX")"
+SPD_NEST_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-nest-lane.XXXXXX")"
+SPD_NEST_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-nest-calllog.XXXXXX")"
+SPD_NEST_STUB="$(spd_make_stub "$SPD_NEST_CALL_LOG")"
+
+mkdir -p "${SPD_NEST_SOURCE}/packages/app/node_modules"
+printf 'nested-marker\n' > "${SPD_NEST_SOURCE}/packages/app/node_modules/marker.txt"
+# レーン側にも <dir> の親ディレクトリ（packages/app）は既に存在する前提（実運用ではモノレポの
+# ソースツリーとしてコミット済み）。symlink 自体（node_modules）だけを本スクリプトが作る。
+mkdir -p "${SPD_NEST_LANE}/packages/app"
+
+SPD_NEST_OUT="$(spd_run "$SPD_NEST_LANE" "$SPD_NEST_STUB" --source "$SPD_NEST_SOURCE" \
+  --dir "packages/app/node_modules")"
+SPD_NEST_EXIT=$?
+assert_exit_code "ネストしたエントリ: exit 0（#115）" 0 "$SPD_NEST_EXIT"
+
+case "$SPD_NEST_OUT" in
+  *"linked"*"packages/app/node_modules"*)
+    pass "ネストしたエントリ: linked が出る（#115）" ;;
+  *)
+    fail "ネストしたエントリ: linked が出る（#115）" "output=[${SPD_NEST_OUT}]" ;;
+esac
+
+case "$SPD_NEST_OUT" in
+  *"prep=skip"*)
+    pass "ネストしたエントリ: linked のみのとき prep=skip（#115）" ;;
+  *)
+    fail "ネストしたエントリ: linked のみのとき prep=skip（#115）" "output=[${SPD_NEST_OUT}]" ;;
+esac
+
+# 本題: linked 後、共有元のファイルがレーン側から symlink を辿って実際に読める
+# （リンク位置基準にターゲットが補正されていないと dangling になり、ここが失敗する）
+assert_eq "ネストしたエントリ: linked 後、共有元のファイルがレーン側から読める（#115）" \
+  "nested-marker" \
+  "$(cat "${SPD_NEST_LANE}/packages/app/node_modules/marker.txt" 2>/dev/null || echo "READ_FAILED")"
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 

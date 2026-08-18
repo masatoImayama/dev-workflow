@@ -76,7 +76,10 @@
 #   1. <source>/<dir> が存在しない（ディレクトリでない）      -> no-source
 #   2. レーン側 <dir> が既に存在する（symlink・実体を問わない） -> exists
 #   3. フィンガープリントファイルの欠損・不一致が1つでもある   -> fingerprint-mismatch
-#   4. symlink を作る。成功なら linked、失敗なら              -> link-failed
+#   4. symlink を作り、作った symlink を辿った実体がディレクトリであることまで確認する
+#      （`ln -s` はターゲットが存在しなくても成功するため、作成成功だけでは
+#      dangling symlink を linked と誤報告しうる。#115）。成功なら linked、
+#      作成失敗または実体確認に失敗した場合は                -> link-failed
 #
 # フィンガープリントの比較は素のファイル読み取りだけで済むためホスト側で行う
 # （フィンガープリント未指定のエントリは検査しない）。
@@ -90,7 +93,11 @@
 # コンテナへの投入は1回にまとめる（エントリごとに docker exec を往復させない）。
 #
 # symlink のターゲットは、レーン worktree から共有元への相対パスで張る。絶対パスにすると
-# ホストとコンテナでパスが異なり解決できない。相対パスが計算できない場合（共有元がリポジトリ
+# ホストとコンテナでパスが異なり解決できない。symlink のターゲットはリンク自身の親ディレクトリ
+# 基準で解決されるため、<dir> がネストしている場合（例: packages/app/node_modules。行書式は
+# リポジトリルート相対であり、モノレポでは主要な用途）は、レーン worktree 基準の相対パスに
+# <dir> の "/" の個数ぶん "../" を追加で前置してリンク位置基準に補正する（#115）。
+# 相対パスが計算できない場合（共有元がリポジトリ
 # ルート外。実装上はカレントディレクトリと共有元が同じドライブ/ルートを共有しない場合）は
 # link-failed として扱う。
 #
@@ -369,7 +376,17 @@ for idx in "${!ENTRY_DIRS[@]}"; do
   fi
 
   if [ "$REL_SOURCE_OK" -eq 1 ]; then
-    target="${REL_SOURCE}/${dir}"
+    # symlink のターゲットは、リンク自身（$CWD/$dir）の親ディレクトリ基準で解決される。
+    # REL_SOURCE は $CWD 基準の相対パスのため、<dir> がネストしている場合
+    # （例: packages/app/node_modules）はリンクの親ディレクトリが $CWD より深い分だけ
+    # 余分に "../" を前置しないと誤ったターゲットになる（#115）。前置する数は <dir> に
+    # 含まれる "/" の個数（= リンクの親ディレクトリが $CWD から何段深いか）と一致する。
+    _dir_slashes="${dir//[^\/]/}"
+    _up_prefix=""
+    for ((_up_i = 0; _up_i < ${#_dir_slashes}; _up_i++)); do
+      _up_prefix+="../"
+    done
+    target="${_up_prefix}${REL_SOURCE}/${dir}"
   else
     target=""
   fi
@@ -406,7 +423,7 @@ if [ "${#CANDIDATE_DIR[@]}" -gt 0 ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
       CONTAINER_SCRIPT+='  printf "linked\t%s\t%s\n" "$d" "$t"'$'\n'
     else
-      CONTAINER_SCRIPT+='  if ln -s "$t" "$d" 2>/dev/null; then'$'\n'
+      CONTAINER_SCRIPT+='  if ln -s "$t" "$d" 2>/dev/null && [ -d "$d" ]; then'$'\n'
       CONTAINER_SCRIPT+='    printf "linked\t%s\t%s\n" "$d" "$t"'$'\n'
       CONTAINER_SCRIPT+='  else'$'\n'
       CONTAINER_SCRIPT+='    printf "linkfailed\t%s\n" "$d"'$'\n'
