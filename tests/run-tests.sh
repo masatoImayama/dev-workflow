@@ -9393,6 +9393,113 @@ else
 fi
 
 echo ""
+echo "== core/roles/generator.md: 共有ディレクトリ機構の結線（Task #113） =="
+
+# ---------------------------------------------------------------------------
+# Task #113: core/roles/generator.md に「run から共有ディレクトリの指定が渡された場合は
+# share-prepared-dirs.sh を1回だけ呼ぶ」「prep=run でも自前で準備コマンドを追加実行しない」
+# 「exit 3（ロック競合）は待たず2本目も起動せず停止する」「exit 4は実装に進まず報告する」
+# 「依存マニフェストを変更するタスクでは install 前に --detach する」「未指定時は後方互換」
+# が記載されていることを機械的に検査する。正本（core/roles/generator.md）と生成物
+# （agents/generator.md・codex-agents/generator.toml）の両方を対象にする。
+# ---------------------------------------------------------------------------
+
+GEN113_FILES=(
+  "core/roles/generator.md"
+  "agents/generator.md"
+  "codex-agents/generator.toml"
+)
+
+for f in "${GEN113_FILES[@]}"; do
+  GEN113_SECTION="$(awk '/^#### 共有ディレクトリの指定がある場合は share-prepared-dirs\.sh を呼ぶ/{f=1} /^### 1\. タスクの確認/{f=0} f' "${REPO_ROOT}/${f}")"
+
+  if [ -z "$GEN113_SECTION" ]; then
+    fail "${f}: 『共有ディレクトリの指定がある場合は share-prepared-dirs.sh を呼ぶ』節が見つかる（#113）" \
+      "節が空でした"
+    continue
+  fi
+  pass "${f}: 『共有ディレクトリの指定がある場合は share-prepared-dirs.sh を呼ぶ』節が見つかる（#113）"
+
+  case "$GEN113_SECTION" in
+    *'share-prepared-dirs.sh'*'自分の作業ディレクトリで1回だけ'*)
+      pass "${f}: 共有ディレクトリの指定がある場合 share-prepared-dirs.sh を1回だけ呼ぶ旨がある（#113）" ;;
+    *)
+      fail "${f}: 共有ディレクトリの指定がある場合 share-prepared-dirs.sh を1回だけ呼ぶ旨がある（#113）" \
+        "$GEN113_SECTION" ;;
+  esac
+
+  case "$GEN113_SECTION" in
+    *'prep=run'*'自前で準備コマンドを追加実行しない'*)
+      pass "${f}: prep=run でも自前で準備コマンドを追加実行しない旨がある（#113）" ;;
+    *)
+      fail "${f}: prep=run でも自前で準備コマンドを追加実行しない旨がある（#113）" \
+        "$GEN113_SECTION" ;;
+  esac
+
+  case "$GEN113_SECTION" in
+    *'exit 3'*'待ったり2本目を起動したりしない'*)
+      pass "${f}: exit 3（ロック競合）を受け取ったら待たず2本目も起動せず停止する旨がある（#113）" ;;
+    *)
+      fail "${f}: exit 3（ロック競合）を受け取ったら待たず2本目も起動せず停止する旨がある（#113）" \
+        "$GEN113_SECTION" ;;
+  esac
+
+  case "$GEN113_SECTION" in
+    *'exit 4'*'実装に進まず'*)
+      pass "${f}: exit 4（--run-prepの失敗）は実装に進まず報告する旨がある（#113）" ;;
+    *)
+      fail "${f}: exit 4（--run-prepの失敗）は実装に進まず報告する旨がある（#113）" \
+        "$GEN113_SECTION" ;;
+  esac
+
+  case "$GEN113_SECTION" in
+    *'依存マニフェスト'*'--detach --dir'*'install'*)
+      pass "${f}: 依存マニフェストを変更するタスクではinstall前に--detachする旨がある（#113）" ;;
+    *)
+      fail "${f}: 依存マニフェストを変更するタスクではinstall前に--detachする旨がある（#113）" \
+        "$GEN113_SECTION" ;;
+  esac
+
+  case "$GEN113_SECTION" in
+    *'完了報告にそのまま貼る'*)
+      pass "${f}: スクリプトの実出力を完了報告にそのまま貼る（自己申告にしない）旨がある（#113）" ;;
+    *)
+      fail "${f}: スクリプトの実出力を完了報告にそのまま貼る（自己申告にしない）旨がある（#113）" \
+        "$GEN113_SECTION" ;;
+  esac
+
+  case "$GEN113_SECTION" in
+    *'共有ディレクトリの指定が渡されていない場合'*'従来どおり'*)
+      pass "${f}: 共有ディレクトリの指定が渡されていない場合は従来どおり（後方互換）の旨がある（#113）" ;;
+    *)
+      fail "${f}: 共有ディレクトリの指定が渡されていない場合は従来どおり（後方互換）の旨がある（#113）" \
+        "$GEN113_SECTION" ;;
+  esac
+done
+
+# --- core/roles/generator.md: H2向け編集後も「## 作業フロー」節の 0. → プロジェクト固有の準備
+#     → 共有ディレクトリ節 → 1. の順序が保たれている（#100の並び順テストとの整合） ---
+GEN113_FLOW_SECTION="$(awk '/^## 作業フロー/{f=1;next} /^## コーディングルール/{f=0} f' "${REPO_ROOT}/core/roles/generator.md")"
+
+assert_order "core/roles/generator.md: 「## 作業フロー」節で 0. → プロジェクト固有の準備 → 共有ディレクトリ節 → 1. の順で並んでいる（#113）" \
+  "$GEN113_FLOW_SECTION" \
+  "### 0. 渡されたベースにHEADを合わせる" \
+  "### プロジェクト固有の準備は自分の作業ディレクトリで初回1回だけ実行する" \
+  "#### 共有ディレクトリの指定がある場合は share-prepared-dirs.sh を呼ぶ" \
+  "### 1. タスクの確認"
+
+# --- 既存の「初回1回だけ実行する」規約（Task #94由来）テストを壊していないことの前提確認 ---
+GEN113_PREP_SECTION="$(awk '/^### プロジェクト固有の準備/{f=1} /^### 1\. /{f=0} f' "${REPO_ROOT}/core/roles/generator.md")"
+
+case "$GEN113_PREP_SECTION" in
+  *'初回1回だけ'*'同一 worktree 内で2回目以降は実行しない'*)
+    pass "core/roles/generator.md: 既存の『初回1回だけ実行する』規約（#94）が壊れていない（#113）" ;;
+  *)
+    fail "core/roles/generator.md: 既存の『初回1回だけ実行する』規約（#94）が壊れていない（#113）" \
+      "$GEN113_PREP_SECTION" ;;
+esac
+
+echo ""
 echo "== share-prepared-dirs.sh（準備成果ディレクトリの共有・共有モード） =="
 
 SPD_SCRIPT="${REPO_ROOT}/scripts/share-prepared-dirs.sh"
