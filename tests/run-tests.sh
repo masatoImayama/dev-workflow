@@ -10064,6 +10064,121 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Task #112: run に「共有ディレクトリ」節の抽出とStep 3プロンプトの結線を入れる
+#
+# 「準備コマンド」節・「SKIPパターン」節と同じ流儀（#94・#97のテストと同種）で、
+# skills/run/SKILL.md に共有ディレクトリ節の抽出手順とStep 3の結線が入っていることを検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #112: run に『共有ディレクトリ』節の抽出とStep 3プロンプトの結線がある =="
+
+# --- skills/run/SKILL.md: Docker sandbox の準備節に「共有ディレクトリ」節の抽出手順と
+#     EPIC_WT_ABS の取得がある ---
+H112_RS_SHAREDIR_EXTRACT="$(awk '/^#### 共有ディレクトリ（Epic 本文の `## 共有ディレクトリ` 節/{f=1} /^#### SKIP件数の判定パターン/{f=0} f' \
+  "${REPO_ROOT}/skills/run/SKILL.md")"
+
+if [ -z "$H112_RS_SHAREDIR_EXTRACT" ]; then
+  fail "SKILL.md: 『#### 共有ディレクトリ』節が見つかる（#112）" "節が空でした"
+else
+  pass "SKILL.md: 『#### 共有ディレクトリ』節が見つかる（#112）"
+fi
+
+case "$H112_RS_SHAREDIR_EXTRACT" in
+  *'## 共有ディレクトリ'*'awk'*'sed -n'*'EPIC_WT_ABS'*)
+    pass "SKILL.md: 共有ディレクトリ節の抽出手順（awk/sed）とEPIC_WT_ABSの取得がある（#112）" ;;
+  *)
+    fail "SKILL.md: 共有ディレクトリ節の抽出手順（awk/sed）とEPIC_WT_ABSの取得がある（#112）" \
+      "$H112_RS_SHAREDIR_EXTRACT" ;;
+esac
+
+case "$H112_RS_SHAREDIR_EXTRACT" in
+  *'SHARED_DIRS'*'は空文字のまま'*'現行と完全に同じ'*)
+    pass "SKILL.md: 節が無ければSHARED_DIRSが空文字のままで現行と完全に同じ挙動になる旨が明記されている（#112）" ;;
+  *)
+    fail "SKILL.md: 節が無ければSHARED_DIRSが空文字のままで現行と完全に同じ挙動になる旨が明記されている（#112）" \
+      "$H112_RS_SHAREDIR_EXTRACT" ;;
+esac
+
+# --- skills/run/SKILL.md: Step 3 雛形が SHARED_DIRS の空／非空を分岐して明示している ---
+H112_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "${REPO_ROOT}/skills/run/SKILL.md")"
+
+case "$H112_RS_STEP3" in
+  *'$SHARED_DIRS'*'空でない'*'share-prepared-dirs.sh'*'--source'*'--spec'*)
+    pass "SKILL.md: Step 3 雛形が SHARED_DIRS 非空時に share-prepared-dirs.sh を --source/--spec 付きで呼ぶ行を明示している（#112）" ;;
+  *)
+    fail "SKILL.md: Step 3 雛形が SHARED_DIRS 非空時に share-prepared-dirs.sh を --source/--spec 付きで呼ぶ行を明示している（#112）" \
+      "$H112_RS_STEP3" ;;
+esac
+
+case "$H112_RS_STEP3" in
+  *'$PREP_CMD'*'空でない場合のみ'*'--run-prep'*)
+    pass "SKILL.md: Step 3 雛形が PREP_CMD が空でない場合のみ --run-prep を付ける旨を明示している（#112）" ;;
+  *)
+    fail "SKILL.md: Step 3 雛形が PREP_CMD が空でない場合のみ --run-prep を付ける旨を明示している（#112）" \
+      "$H112_RS_STEP3" ;;
+esac
+
+case "$H112_RS_STEP3" in
+  *'$SHARED_DIRS'*'空'*'場合は現行どおり'*)
+    pass "SKILL.md: Step 3 雛形が SHARED_DIRS 空時は現行どおり PREP_CMD を直接実行させる旨を明示している（#112）" ;;
+  *)
+    fail "SKILL.md: Step 3 雛形が SHARED_DIRS 空時は現行どおり PREP_CMD を直接実行させる旨を明示している（#112）" \
+      "$H112_RS_STEP3" ;;
+esac
+
+# --- skills/run/SKILL.md: exit 3 / exit 4 / prep=run のときの generator の振る舞いが明記 ---
+case "$H112_RS_STEP3" in
+  *'exit 3'*'ロック競合'*'2本目を起動せず'*)
+    pass "SKILL.md: Step 3 雛形に exit 3（ロック競合）時は2本目を起動せず報告して停止する旨がある（#112）" ;;
+  *)
+    fail "SKILL.md: Step 3 雛形に exit 3（ロック競合）時は2本目を起動せず報告して停止する旨がある（#112）" \
+      "$H112_RS_STEP3" ;;
+esac
+
+case "$H112_RS_STEP3" in
+  *'exit 4'*'--run-prep'*'失敗'*'実装に進まず'*)
+    pass "SKILL.md: Step 3 雛形に exit 4（--run-prepの失敗）時は実装に進まず報告する旨がある（#112）" ;;
+  *)
+    fail "SKILL.md: Step 3 雛形に exit 4（--run-prepの失敗）時は実装に進まず報告する旨がある（#112）" \
+      "$H112_RS_STEP3" ;;
+esac
+
+case "$H112_RS_STEP3" in
+  *'prep=run'*'共有できなかった'*'自前で準備コマンドを追加実行しないこと'*)
+    pass "SKILL.md: Step 3 雛形に prep=run 時でも自前で準備コマンドを追加実行しない旨がある（#112）" ;;
+  *)
+    fail "SKILL.md: Step 3 雛形に prep=run 時でも自前で準備コマンドを追加実行しない旨がある（#112）" \
+      "$H112_RS_STEP3" ;;
+esac
+
+# --- skills/run/SKILL.md: --detach を使う条件（依存マニフェストを変更するタスク）が明記 ---
+case "$H112_RS_STEP3" in
+  *'依存マニフェスト'*'package.json'*'lockfile'*'--detach'*)
+    pass "SKILL.md: Step 3 雛形に依存マニフェストを変更するタスクで --detach を使う条件が明記されている（#112）" ;;
+  *)
+    fail "SKILL.md: Step 3 雛形に依存マニフェストを変更するタスクで --detach を使う条件が明記されている（#112）" \
+      "$H112_RS_STEP3" ;;
+esac
+
+# --- skills/run/SKILL.md: Step 3 雛形に駆動先プロジェクト固有の値（共有ディレクトリ名・
+#     lockfile名等）をハードコードしていない（プレースホルダのみで表現されている） ---
+if printf '%s\n' "$H112_RS_STEP3" | grep -Fq -- 'yarn.lock'; then
+  fail "SKILL.md: Step 3 雛形に駆動先プロジェクト固有の値をハードコードしていない（#112）" \
+    "$H112_RS_STEP3"
+else
+  pass "SKILL.md: Step 3 雛形に駆動先プロジェクト固有の値をハードコードしていない（#112）"
+fi
+
+case "$H112_RS_STEP3" in
+  *'[EPIC_WT_ABSの内容]'*'[SHARED_DIRSの内容]'*)
+    pass "SKILL.md: Step 3 雛形が EPIC_WT_ABS/SHARED_DIRS の内容を汎用プレースホルダで埋め込んでいる（#112）" ;;
+  *)
+    fail "SKILL.md: Step 3 雛形が EPIC_WT_ABS/SHARED_DIRS の内容を汎用プレースホルダで埋め込んでいる（#112）" \
+      "$H112_RS_STEP3" ;;
+esac
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
