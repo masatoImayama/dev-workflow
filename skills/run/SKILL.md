@@ -154,6 +154,31 @@ fi
 - `$PREP_CMD` は変数として保持しておき、Step 3 で各レーンの generator プロンプトに
   そのまま埋め込む（レーンの作業ディレクトリで初回1回だけ実行させるため）
 
+#### 共有ディレクトリ（Epic 本文の `## 共有ディレクトリ` 節。任意）
+
+レーンごとに準備コマンドをフル実行すると、`node_modules` / `vendor` 等の大量のファイルを
+含むディレクトリ生成が支配的なコストになる（issue #104）。Epic 本文に `## 共有ディレクトリ`
+節があれば、Epic 専用 worktree（`$EPIC_WT`）の準備成果ディレクトリを、各レーンへ
+コンテナ内から張った symlink で共有させ、レーンでの準備コマンド実行そのものを不要にする。
+
+「準備コマンド」節・「SKIPパターン」節と**同じ位置・同じ方法**で抽出する:
+
+```bash
+# Epic本文に「## 共有ディレクトリ」節があれば、その中身（フェンスコードブロックの内容）を取り出す
+SHARED_DIRS="$(gh issue view $ARGUMENTS --json body -q '.body' \
+  | awk '/^## 共有ディレクトリ/{f=1; next} /^## /{f=0} f' \
+  | sed -n '/^```/,/^```/p' | sed '1d;$d')"
+
+# レーンから共有元（Epic専用worktree）を指すための絶対パス
+EPIC_WT_ABS="$(cd "$EPIC_WT" && pwd)"
+```
+
+- **節が無ければ `$SHARED_DIRS` は空文字のまま**で、以降の挙動は現行と完全に同じにする
+  （既存 Epic への後方互換。各レーンは従来どおり `$PREP_CMD` を直接実行する）
+- `$SHARED_DIRS` と `$EPIC_WT_ABS` は変数として保持しておき、Step 3 で各レーンの generator
+  プロンプトに埋め込む（`scripts/share-prepared-dirs.sh` の `--spec` / `--source` に渡すため）
+- 節の書き方は `core/roles/planner.md`「共有ディレクトリ（該当する場合のみ）」を参照
+
 #### SKIP件数の判定パターン（Epic 本文の `## SKIPパターン` 節。任意）
 
 `scripts/count-skips.sh`（SKIP件数を機械的に数えるスクリプト。詳細はREADME参照）は
@@ -430,9 +455,34 @@ Task #[番号A] を実装してください（レーン A）。
   `sandbox-exec.sh` は呼び出し元cwdから workdir を解決するため、`cd` はそれを上書きし、
   自分の変更を含まないツリーを検証してしまう（サブディレクトリだけを対象にしたい場合は
   `cd` ではなく `make -C sub test` のようにコマンド側の相対指定で行うこと）
-- （`$PREP_CMD` が空でない場合のみ、次の行を追加する。空の場合はこの行を出さない。
-  既存の Epic に後方互換）プロジェクト固有の準備コマンド（Epic本文の `## 準備コマンド` 節の
-  内容をそのまま埋め込む）:
+- （`$SHARED_DIRS` が**空でない**場合のみ、次のブロックを出す。準備コマンドを直接実行させる
+  現行の行の**代わり**に出すもので、下の「`$SHARED_DIRS` が空の場合」のブロックとは排他）
+  共有ディレクトリ（Epic本文の `## 共有ディレクトリ` 節）が宣言されているため、次を
+  **自分の作業ディレクトリで初回1回だけ**実行してから実装に入ること:
+  ```bash
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/share-prepared-dirs.sh" --epic "$EPIC_NUM" \
+    --source "[EPIC_WT_ABSの内容]" \
+    --spec '[SHARED_DIRSの内容]'
+  ```
+  （`$PREP_CMD` が空でない場合のみ、上のコマンドに `--run-prep '[PREP_CMDの内容]'` を追加する。
+  `$PREP_CMD` が空の場合は `--run-prep` 自体を付けない）
+  - 出力の各行と `prep=` 行を**そのまま完了報告に貼ること**（自己申告にしない）
+  - **exit 3**（ロック競合）が返った場合、2本目を起動せず、その事実を報告して停止すること
+  - **exit 4**（`--run-prep` に渡したコマンドの失敗）が返った場合、実装に進まず、その事実を
+    報告すること
+  - **`prep=run`**（共有できなかった）場合でも、**自前で準備コマンドを追加実行しないこと**
+    （`--run-prep` を渡していればスクリプトが既に実行している）
+  - **依存マニフェスト（`package.json` / lockfile 等）を変更するタスクでは**、install 系の
+    コマンドを実行する前に次を1回実行し、共有リンクを解除してから自前で install すること
+    （解除せずに install すると、共有元である Epic 専用 worktree と他レーンの成果を壊す）:
+    ```bash
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/share-prepared-dirs.sh" --detach --dir <共有ディレクトリ名>
+    ```
+  - 同一 worktree 内で2回目以降は実行しないこと（1レーンで複数タスクを扱う場合を含む）
+
+- （`$SHARED_DIRS` が**空**の場合は現行どおり。`$PREP_CMD` が空でない場合のみ、次の行を
+  追加する。空の場合はこの行を出さない。既存の Epic に後方互換）プロジェクト固有の準備コマンド
+  （Epic本文の `## 準備コマンド` 節の内容をそのまま埋め込む）:
   [PREP_CMDの内容をそのまま貼り付ける]
   これを**自分の作業ディレクトリで初回1回だけ**実行してから実装に入ること。Epic開始時に run が
   実行した1回は Epic 専用 worktree にしか効かず、レーンの作業ディレクトリ（isolation worktree）
@@ -1172,14 +1222,22 @@ fi
 渡して`scripts/cleanup-lane-worktrees.sh`を呼ぶ。Epicブランチへ取り込み済みであることの確認は
 スクリプト側が行うため、run側は対象を集めて渡すだけでよい。
 
+Epic本文に「共有ディレクトリ」節があり、共有対象のディレクトリ名（`node_modules`とは限らない。
+`vendor`・`.venv`等もありうる）が宣言されている場合は、その名前をすべて`--unlink-dir`として渡す。
+節が無い（宣言が無い）場合は`--unlink-dir`を付けず、現行どおり既定の`node_modules`のみで動かす。
+
 ```bash
 # 3) 本Epicで使ったレーンworktreeのうち、Epicブランチへ取り込み済みのものだけを削除する
 #    （削除失敗でrun全体を止めない。取り込み判定はスクリプト側が行う。
-#     --lane-branch は本runで使ったレーンの数だけ繰り返す）
+#     --lane-branch は本runで使ったレーンの数だけ繰り返す。
+#     --unlink-dir はEpic本文の「共有ディレクトリ」節が宣言されている場合のみ、
+#     宣言された名前の数だけ繰り返す。節が無ければ付けない（既定node_modulesのまま））
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/cleanup-lane-worktrees.sh" \
   --epic-branch "${EPIC_BRANCH}" \
   --lane-branch "[レーンAの作業ブランチ]" \
-  --lane-branch "[レーンBの作業ブランチ]" 2>&1 || true
+  --lane-branch "[レーンBの作業ブランチ]" \
+  --unlink-dir "[共有ディレクトリ節で宣言された名前A]" \
+  --unlink-dir "[共有ディレクトリ節で宣言された名前B]" 2>&1 || true
 
 # 4) 上記で保護された（=削除されなかった）worktree はそのまま残る。壊れた登録だけを掃除する
 git worktree prune

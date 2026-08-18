@@ -12,10 +12,15 @@
 #
 # 使い方:
 #   bash scripts/cleanup-lane-worktrees.sh --epic-branch <ブランチ> \
-#       --lane-branch <ブランチ> [--lane-branch <ブランチ> ...] [--dry-run]
+#       --lane-branch <ブランチ> [--lane-branch <ブランチ> ...] \
+#       [--unlink-dir <名前> ...] [--dry-run]
 #
 # --epic-branch: 取り込み済みかどうかの判定基準にする Epic ブランチ。
 # --lane-branch: 片付け対象のレーンブランチ。複数指定できる。
+# --unlink-dir: 削除前に symlink 解除の対象にするディレクトリ名（繰り返し可）。
+#   **1つも指定しない場合の既定は `node_modules` のみ。** 指定した場合は指定した名前
+#   すべてが対象になり、既定の `node_modules` とはマージしない（`node_modules` も
+#   解除したい場合は明示的に `--unlink-dir node_modules` を渡すこと）。
 # --dry-run: 削除せず、対象と判定理由だけを出力する。
 #
 # 出力（1行1件・機械可読。この順で標準出力へ）:
@@ -38,8 +43,9 @@
 #   3. `git merge-base --is-ancestor <レーンブランチ> <epic-branch>` で
 #      Epic ブランチへ取り込み済みであることを確認する。偽なら削除しない → skip reason not-merged
 #      （取り込めなかったレーンの成果を消さないための安全条件。R7 対策）
-#   4. `node_modules` 等の symlink を解除してから `git worktree remove --force` する。
-#      symlink を残したまま削除するとメインリポの実体ファイルが消える事故になる
+#   4. `--unlink-dir` で指定された名前（未指定なら `node_modules` のみ）の symlink を
+#      解除してから `git worktree remove --force` する。symlink を残したまま削除すると
+#      メインリポの実体ファイルが消える事故になる
 #      （既存の skills/run/SKILL.md・adapters/claude/overlays/generator.md と同じ手順）
 #   5. 全件処理後（--dry-run 以外）に `git worktree prune` を1回実行する
 #
@@ -57,6 +63,7 @@ set -u
 
 EPIC_BRANCH=""
 LANE_BRANCHES=()
+UNLINK_DIRS=()
 DRY_RUN=0
 
 while [ $# -gt 0 ]; do
@@ -73,11 +80,23 @@ while [ $# -gt 0 ]; do
         exit 2
       fi
       LANE_BRANCHES+=("$2"); shift 2 ;;
+    --unlink-dir)
+      if [ $# -lt 2 ]; then
+        echo "ERROR: --unlink-dir には値が必要です" >&2
+        exit 2
+      fi
+      UNLINK_DIRS+=("$2"); shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -*) echo "ERROR: 未知のオプション: $1" >&2; exit 2 ;;
     *)  echo "ERROR: 未知の引数: $1" >&2; exit 2 ;;
   esac
 done
+
+# --unlink-dir が1つも指定されなければ既定の node_modules のみを対象にする
+# （指定があった場合は既定とマージしない。上記ヘッダコメント参照）
+if [ "${#UNLINK_DIRS[@]}" -eq 0 ]; then
+  UNLINK_DIRS=("node_modules")
+fi
 
 if [ -z "$EPIC_BRANCH" ]; then
   echo "ERROR: --epic-branch は必須です" >&2
@@ -185,9 +204,12 @@ for LANE in "${LANE_BRANCHES[@]}"; do
     continue
   fi
 
-  # node_modules 等の symlink を解除してから削除する。symlink を残したまま
-  # `git worktree remove` すると、symlink 越しにメインリポの実体ファイルが消える事故になる。
-  find "$LANE_WT_PATH" -maxdepth 2 -type l -name "node_modules" -exec unlink {} \; 2>/dev/null || true
+  # --unlink-dir で指定された名前（未指定なら node_modules のみ）の symlink を
+  # 解除してから削除する。symlink を残したまま `git worktree remove` すると、
+  # symlink 越しにメインリポの実体ファイルが消える事故になる。
+  for UNLINK_NAME in "${UNLINK_DIRS[@]}"; do
+    find "$LANE_WT_PATH" -maxdepth 2 -type l -name "$UNLINK_NAME" -exec unlink {} \; 2>/dev/null || true
+  done
 
   if git worktree remove --force "$LANE_WT_PATH" 2>/dev/null; then
     printf 'removed\t%s\t%s\n' "$LANE" "$LANE_WT_PATH"

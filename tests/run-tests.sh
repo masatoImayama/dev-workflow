@@ -8353,6 +8353,90 @@ else
     "marker.txt が消えました: ${CLW_SYM_REAL_TARGET}"
 fi
 
+# --- ケース9b（Task #109）: --unlink-dir vendor を指定すると vendor の symlink が
+#     解除される（既定の node_modules とは別名でも動くこと） ---
+CLW_VENDOR_REPO="$(make_temp_repo)"
+CLW_VENDOR_DEFAULT_BRANCH="$(cd "$CLW_VENDOR_REPO" && git rev-parse --abbrev-ref HEAD)"
+CLW_VENDOR_EPIC_BRANCH="epic/testvendor/109"
+CLW_VENDOR_BASE="$(ml_head_of "$CLW_VENDOR_REPO" HEAD)"
+ml_branch_from "$CLW_VENDOR_REPO" "$CLW_VENDOR_EPIC_BRANCH" "$CLW_VENDOR_BASE"
+ml_commit_file "$CLW_VENDOR_REPO" "epic.txt" "epic base\n" "epic base commit"
+CLW_VENDOR_EPIC_TIP="$(ml_head_of "$CLW_VENDOR_REPO" "$CLW_VENDOR_EPIC_BRANCH")"
+ml_branch_from "$CLW_VENDOR_REPO" "lane-vendor" "$CLW_VENDOR_EPIC_TIP"
+ml_commit_file "$CLW_VENDOR_REPO" "vendor.txt" "vendor\n" "lane vendor change"
+(cd "$CLW_VENDOR_REPO" && git checkout -q "$CLW_VENDOR_EPIC_BRANCH" \
+  && git merge -q --no-edit lane-vendor \
+  && git checkout -q "$CLW_VENDOR_DEFAULT_BRANCH") >/dev/null 2>&1
+clw_add_worktree "$CLW_VENDOR_REPO" "${CLW_VENDOR_REPO}/.claude/worktrees/lane-vendor" "lane-vendor"
+
+CLW_VENDOR_REAL_TARGET="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-clw-vendordir.XXXXXX")"
+printf 'do not delete me\n' > "${CLW_VENDOR_REAL_TARGET}/marker.txt"
+(cd "${CLW_VENDOR_REPO}/.claude/worktrees/lane-vendor" && ln -s "$CLW_VENDOR_REAL_TARGET" vendor) >/dev/null 2>&1
+
+CLW_VENDOR_OUT="$(run_cleanup "$CLW_VENDOR_REPO" --epic-branch "$CLW_VENDOR_EPIC_BRANCH" \
+  --lane-branch lane-vendor --unlink-dir vendor)"
+CLW_VENDOR_EXIT=$?
+
+assert_exit_code "ケース9b: --unlink-dir vendor 指定時も exit 0" 0 "$CLW_VENDOR_EXIT"
+
+case "$CLW_VENDOR_OUT" in
+  *"removed"*"lane-vendor"*)
+    pass "ケース9b: --unlink-dir vendor 指定でも removed と報告される（出力契約は変わらない）" ;;
+  *)
+    fail "ケース9b: --unlink-dir vendor 指定でも removed と報告される（出力契約は変わらない）" \
+      "output=[${CLW_VENDOR_OUT}]" ;;
+esac
+
+assert_eq "ケース9b: --unlink-dir vendor 指定でレーンworktreeが削除される" \
+  "no" "$(clw_worktree_exists "$CLW_VENDOR_REPO" lane-vendor)"
+
+if [ -f "${CLW_VENDOR_REAL_TARGET}/marker.txt" ]; then
+  pass "ケース9b: --unlink-dir vendor の symlink解除により symlink先の実体ファイルは消えない"
+else
+  fail "ケース9b: --unlink-dir vendor の symlink解除により symlink先の実体ファイルは消えない" \
+    "marker.txt が消えました: ${CLW_VENDOR_REAL_TARGET}"
+fi
+
+# --- ケース9c（Task #109）: --unlink-dir を複数指定できる（vendor と .venv の両方を解除） ---
+CLW_MULTI_REPO="$(make_temp_repo)"
+CLW_MULTI_DEFAULT_BRANCH="$(cd "$CLW_MULTI_REPO" && git rev-parse --abbrev-ref HEAD)"
+CLW_MULTI_EPIC_BRANCH="epic/testmulti/109"
+CLW_MULTI_BASE="$(ml_head_of "$CLW_MULTI_REPO" HEAD)"
+ml_branch_from "$CLW_MULTI_REPO" "$CLW_MULTI_EPIC_BRANCH" "$CLW_MULTI_BASE"
+ml_commit_file "$CLW_MULTI_REPO" "epic.txt" "epic base\n" "epic base commit"
+CLW_MULTI_EPIC_TIP="$(ml_head_of "$CLW_MULTI_REPO" "$CLW_MULTI_EPIC_BRANCH")"
+ml_branch_from "$CLW_MULTI_REPO" "lane-multi" "$CLW_MULTI_EPIC_TIP"
+ml_commit_file "$CLW_MULTI_REPO" "multi.txt" "multi\n" "lane multi change"
+(cd "$CLW_MULTI_REPO" && git checkout -q "$CLW_MULTI_EPIC_BRANCH" \
+  && git merge -q --no-edit lane-multi \
+  && git checkout -q "$CLW_MULTI_DEFAULT_BRANCH") >/dev/null 2>&1
+clw_add_worktree "$CLW_MULTI_REPO" "${CLW_MULTI_REPO}/.claude/worktrees/lane-multi" "lane-multi"
+
+CLW_MULTI_VENDOR_TARGET="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-clw-multivendor.XXXXXX")"
+CLW_MULTI_VENV_TARGET="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-clw-multivenv.XXXXXX")"
+printf 'do not delete me (vendor)\n' > "${CLW_MULTI_VENDOR_TARGET}/marker.txt"
+printf 'do not delete me (venv)\n' > "${CLW_MULTI_VENV_TARGET}/marker.txt"
+(cd "${CLW_MULTI_REPO}/.claude/worktrees/lane-multi" \
+  && ln -s "$CLW_MULTI_VENDOR_TARGET" vendor \
+  && ln -s "$CLW_MULTI_VENV_TARGET" .venv) >/dev/null 2>&1
+
+run_cleanup "$CLW_MULTI_REPO" --epic-branch "$CLW_MULTI_EPIC_BRANCH" \
+  --lane-branch lane-multi --unlink-dir vendor --unlink-dir .venv >/dev/null
+CLW_MULTI_EXIT=$?
+
+assert_exit_code "ケース9c: --unlink-dir を複数指定しても exit 0" 0 "$CLW_MULTI_EXIT"
+
+assert_eq "ケース9c: --unlink-dir を複数指定するとレーンworktreeが削除される" \
+  "no" "$(clw_worktree_exists "$CLW_MULTI_REPO" lane-multi)"
+
+if [ -f "${CLW_MULTI_VENDOR_TARGET}/marker.txt" ] && [ -f "${CLW_MULTI_VENV_TARGET}/marker.txt" ]; then
+  pass "ケース9c: --unlink-dir を複数指定すると両方の symlink 先の実体ファイルが残る"
+else
+  fail "ケース9c: --unlink-dir を複数指定すると両方の symlink 先の実体ファイルが残る" \
+    "vendor marker exists=$([ -f "${CLW_MULTI_VENDOR_TARGET}/marker.txt" ] && echo yes || echo no), \
+venv marker exists=$([ -f "${CLW_MULTI_VENV_TARGET}/marker.txt" ] && echo yes || echo no)"
+fi
+
 # --- ケース10: 引数バリデーション（引数エラーは exit 2） ---
 CLW_REPO_ARGS="$(make_temp_repo)"
 
@@ -8373,6 +8457,9 @@ assert_exit_code "--lane-branch に値なしは exit 2" 2 "$?"
 
 run_cleanup "$CLW_REPO_ARGS" --epic-branch main --lane-branch dummy --unknown-option >/dev/null 2>&1
 assert_exit_code "未知のオプションは exit 2" 2 "$?"
+
+run_cleanup "$CLW_REPO_ARGS" --epic-branch main --lane-branch dummy --unlink-dir >/dev/null 2>&1
+assert_exit_code "--unlink-dir に値なしは exit 2（Task #109）" 2 "$?"
 
 # ---------------------------------------------------------------------------
 # H2（Task #94）: 準備コマンドをレーンの作業ディレクトリで初回1回だけ実行させる
@@ -8604,6 +8691,25 @@ if [ -z "$H6_RS_CLEANUP" ]; then
 else
   pass "SKILL.md: 『worktree クリーンアップ』節が見つかる（前提）（#95）"
 fi
+
+# --- クリーンアップ節が cleanup-lane-worktrees.sh を --unlink-dir 付きで呼ぶ手順を案内している
+#     （Task #109。Epic本文の「共有ディレクトリ」節で宣言された名前を渡す） ---
+case "$H6_RS_CLEANUP" in
+  *'cleanup-lane-worktrees.sh'*'--unlink-dir'*)
+    pass "SKILL.md: クリーンアップ節が cleanup-lane-worktrees.sh を --unlink-dir 付きで呼ぶ手順を案内している（#109）" ;;
+  *)
+    fail "SKILL.md: クリーンアップ節が cleanup-lane-worktrees.sh を --unlink-dir 付きで呼ぶ手順を案内している（#109）" \
+      "$H6_RS_CLEANUP" ;;
+esac
+
+# --- 「共有ディレクトリ」節が無い場合は --unlink-dir を付けない旨が明記されている（#109） ---
+case "$H6_RS_CLEANUP" in
+  *'節が無い'*'--unlink-dir'*'付けず'*)
+    pass "SKILL.md: 『共有ディレクトリ』節が無い場合は --unlink-dir を付けない旨が明記されている（#109）" ;;
+  *)
+    fail "SKILL.md: 『共有ディレクトリ』節が無い場合は --unlink-dir を付けない旨が明記されている（#109）" \
+      "$H6_RS_CLEANUP" ;;
+esac
 
 # --- クリーンアップ節が cleanup-lane-worktrees.sh を --epic-branch / --lane-branch 付きで呼ぶ ---
 case "$H6_RS_CLEANUP" in
@@ -9122,6 +9228,1184 @@ case "$RUN_SKILL_UNKNOWN" in
     fail "SKILL.md: skips=unknown時に次のrunまでに『## SKIPパターン』節を追加することが恒久対処として明記されている（#102）" \
       "$RUN_SKILL_UNKNOWN" ;;
 esac
+
+# ---------------------------------------------------------------------------
+# share-prepared-dirs.sh（準備成果ディレクトリの共有・共有モード、Task #106）
+#
+# 生成物（node_modules 等）の共有元・レーン側ともに一時ディレクトリ（mktemp -d）で組み立て、
+# `DEV_WORKFLOW_SANDBOX_EXEC` にフェイクの sandbox-exec.sh を刺して検証する（Docker 非依存）。
+# フェイクは「呼び出し回数を1行ずつ記録してから、最後の引数（コンテナ内スクリプト）を
+# 素の sh -c で実行する」だけの単純なスタブであり、共有元・レーン側とも host 上の
+# 通常ディレクトリなので `ln -s` はこの検証環境でも十分に動作する。
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Task #108: READMEに共有ディレクトリ節とcomposeのキャッシュvolume既知の限界を追記する
+#
+# 上記1〜5がすべてREADME.mdに記載されていることと、既存記述（container_name:/固定ホスト
+# ポートの既知の限界、symlink警告、cleanup-lane-worktrees.shの案内）が消えていないことを
+# 確認する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== README.md（共有ディレクトリ節・composeキャッシュvolumeの既知の限界。#108） =="
+
+DOC108_README="${REPO_ROOT}/README.md"
+
+# --- 1. Epicの「## 共有ディレクトリ」節の書き方が案内されている ---
+DOC108_SHARED_SECTION="$(awk '/^### Epic の `## 共有ディレクトリ` 節/{f=1} /^## YOLOモード/{f=0} f' \
+  "$DOC108_README")"
+
+if [ -z "$DOC108_SHARED_SECTION" ]; then
+  fail "README.md: 『Epic の \`## 共有ディレクトリ\` 節』が見つかる（#108）" "節が空でした"
+else
+  pass "README.md: 『Epic の \`## 共有ディレクトリ\` 節』が見つかる（#108）"
+fi
+
+case "$DOC108_SHARED_SECTION" in
+  *'## 共有ディレクトリ'*'node_modules'*'yarn.lock'*'フィンガープリント'*'--detach'*)
+    pass "README.md: 共有ディレクトリ節に書式例・フィンガープリントの必須化・--detachの案内がある（#108）" ;;
+  *)
+    fail "README.md: 共有ディレクトリ節に書式例・フィンガープリントの必須化・--detachの案内がある（#108）" \
+      "$DOC108_SHARED_SECTION" ;;
+esac
+
+case "$DOC108_SHARED_SECTION" in
+  *'節が無ければ何もしない'*)
+    pass "README.md: 共有ディレクトリ節が無ければ何もしない（後方互換）旨が明記されている（#108）" ;;
+  *)
+    fail "README.md: 共有ディレクトリ節が無ければ何もしない（後方互換）旨が明記されている（#108）" \
+      "$DOC108_SHARED_SECTION" ;;
+esac
+
+# --- 2. composeモードのキャッシュvolume既知の限界とサンプルが記載されている ---
+DOC108_COMPOSE_SECTION="$(awk '/^### compose モード/{f=1} /^### Windows の CRLF に注意/{f=0} f' \
+  "$DOC108_README")"
+
+if [ -z "$DOC108_COMPOSE_SECTION" ]; then
+  fail "README.md: 『compose モード』節が見つかる（前提）（#108）" "節が空でした"
+else
+  pass "README.md: 『compose モード』節が見つかる（前提）（#108）"
+fi
+
+case "$DOC108_COMPOSE_SECTION" in
+  *'dockerfile モード専用'*'compose モードでは一切マウントされません'*'named volume'*'介入しません'*)
+    pass "README.md: composeモードはキャッシュvolumeがdockerfile専用で介入しない旨が明記されている（#108）" ;;
+  *)
+    fail "README.md: composeモードはキャッシュvolumeがdockerfile専用で介入しない旨が明記されている（#108）" \
+      "$DOC108_COMPOSE_SECTION" ;;
+esac
+
+case "$DOC108_COMPOSE_SECTION" in
+  *'yarn-cache'*'volumes:'*)
+    pass "README.md: composeのキャッシュvolumeサンプルが記載されている（#108）" ;;
+  *)
+    fail "README.md: composeのキャッシュvolumeサンプルが記載されている（#108）" \
+      "$DOC108_COMPOSE_SECTION" ;;
+esac
+
+# --- 既存記述: container_name: / 固定ホストポートの既知の限界が消えていない ---
+case "$DOC108_COMPOSE_SECTION" in
+  *'container_name:'*'固定ホストポート'*'epic の並行実行ができません'*)
+    pass "README.md: 既存のcontainer_name:/固定ホストポートの既知の限界が壊れずに残っている（#108）" ;;
+  *)
+    fail "README.md: 既存のcontainer_name:/固定ホストポートの既知の限界が壊れずに残っている（#108）" \
+      "$DOC108_COMPOSE_SECTION" ;;
+esac
+
+# --- 3. 「Claude Code との差分」表に共有ディレクトリ機構がClaude Code固有である旨の1行がある ---
+DOC108_CODEX_DIFF="$(awk '/^### Claude Code との差分/{f=1} /^## このプラグイン自体を開発する場合/{f=0} f' \
+  "$DOC108_README")"
+
+if [ -z "$DOC108_CODEX_DIFF" ]; then
+  fail "README.md: 『Claude Code との差分』節が見つかる（前提）（#108）" "節が空でした"
+else
+  pass "README.md: 『Claude Code との差分』節が見つかる（前提）（#108）"
+fi
+
+case "$DOC108_CODEX_DIFF" in
+  *'準備成果ディレクトリの共有'*'なし'*'レーン worktree が存在せず'*)
+    pass "README.md: Claude Codeとの差分表に共有ディレクトリ機構がClaude Code固有である旨の行がある（#108）" ;;
+  *)
+    fail "README.md: Claude Codeとの差分表に共有ディレクトリ機構がClaude Code固有である旨の行がある（#108）" \
+      "$DOC108_CODEX_DIFF" ;;
+esac
+
+# --- 4. 「worktree運用の注意」節に共有symlinkとcleanup-lane-worktrees.shの関係が書かれている ---
+DOC108_WORKTREE_SECTION="$(awk '/^### worktree運用の注意/{f=1} /^## 並列実行/{f=0} f' \
+  "$DOC108_README")"
+
+if [ -z "$DOC108_WORKTREE_SECTION" ]; then
+  fail "README.md: 『worktree運用の注意』節が見つかる（前提）（#108）" "節が空でした"
+else
+  pass "README.md: 『worktree運用の注意』節が見つかる（前提）（#108）"
+fi
+
+case "$DOC108_WORKTREE_SECTION" in
+  *'共有 symlink'*'--unlink-dir'*'node_modules'*)
+    pass "README.md: worktree運用の注意に共有symlinkと--unlink-dirの関係が明記されている（#108）" ;;
+  *)
+    fail "README.md: worktree運用の注意に共有symlinkと--unlink-dirの関係が明記されている（#108）" \
+      "$DOC108_WORKTREE_SECTION" ;;
+esac
+
+# --- 既存記述: symlink警告（node_modules/git worktree remove --force）が消えていない ---
+case "$DOC108_WORKTREE_SECTION" in
+  *'git worktree remove --force'*'symlink越しにメインリポの実体ファイルを削除する'*)
+    pass "README.md: 既存のsymlink警告が壊れずに残っている（#108）" ;;
+  *)
+    fail "README.md: 既存のsymlink警告が壊れずに残っている（#108）" \
+      "$DOC108_WORKTREE_SECTION" ;;
+esac
+
+# --- 既存記述: cleanup-lane-worktrees.shの案内が消えていない ---
+case "$DOC108_WORKTREE_SECTION" in
+  *'scripts/cleanup-lane-worktrees.sh'*)
+    pass "README.md: 既存のcleanup-lane-worktrees.shの案内が壊れずに残っている（#108）" ;;
+  *)
+    fail "README.md: 既存のcleanup-lane-worktrees.shの案内が壊れずに残っている（#108）" \
+      "$DOC108_WORKTREE_SECTION" ;;
+esac
+
+# --- 5. 環境変数一覧にDEV_WORKFLOW_SANDBOX_EXECが追加されている ---
+DOC108_ENVLIST="$(awk '/^### 環境変数一覧/{f=1} /^## Slack通知/{f=0} f' "$DOC108_README")"
+
+if [ -z "$DOC108_ENVLIST" ]; then
+  fail "README.md: 『環境変数一覧』節が見つかる（前提）（#108）" "節が空でした"
+else
+  pass "README.md: 『環境変数一覧』節が見つかる（前提）（#108）"
+fi
+
+case "$DOC108_ENVLIST" in
+  *'DEV_WORKFLOW_SANDBOX_EXEC'*)
+    pass "README.md: 環境変数一覧にDEV_WORKFLOW_SANDBOX_EXECが追加されている（#108）" ;;
+  *)
+    fail "README.md: 環境変数一覧にDEV_WORKFLOW_SANDBOX_EXECが追加されている（#108）" \
+      "$DOC108_ENVLIST" ;;
+esac
+
+# --- 駆動先プロジェクト固有の値をハードコードしていない（汎用の例のみ。kikumemo等の固有名詞が無い） ---
+if grep -Eq 'kikumemo' "$DOC108_README"; then
+  fail "README.md: 駆動先プロジェクト固有の値をハードコードしていない（#108）" \
+    "$(grep -n -E 'kikumemo' "$DOC108_README")"
+else
+  pass "README.md: 駆動先プロジェクト固有の値をハードコードしていない（#108）"
+fi
+
+echo ""
+echo "== core/roles/generator.md: 共有ディレクトリ機構の結線（Task #113） =="
+
+# ---------------------------------------------------------------------------
+# Task #113: core/roles/generator.md に「run から共有ディレクトリの指定が渡された場合は
+# share-prepared-dirs.sh を1回だけ呼ぶ」「prep=run でも自前で準備コマンドを追加実行しない」
+# 「exit 3（ロック競合）は待たず2本目も起動せず停止する」「exit 4は実装に進まず報告する」
+# 「依存マニフェストを変更するタスクでは install 前に --detach する」「未指定時は後方互換」
+# が記載されていることを機械的に検査する。正本（core/roles/generator.md）と生成物
+# （agents/generator.md・codex-agents/generator.toml）の両方を対象にする。
+# ---------------------------------------------------------------------------
+
+GEN113_FILES=(
+  "core/roles/generator.md"
+  "agents/generator.md"
+  "codex-agents/generator.toml"
+)
+
+for f in "${GEN113_FILES[@]}"; do
+  GEN113_SECTION="$(awk '/^#### 共有ディレクトリの指定がある場合は share-prepared-dirs\.sh を呼ぶ/{f=1} /^### 1\. タスクの確認/{f=0} f' "${REPO_ROOT}/${f}")"
+
+  if [ -z "$GEN113_SECTION" ]; then
+    fail "${f}: 『共有ディレクトリの指定がある場合は share-prepared-dirs.sh を呼ぶ』節が見つかる（#113）" \
+      "節が空でした"
+    continue
+  fi
+  pass "${f}: 『共有ディレクトリの指定がある場合は share-prepared-dirs.sh を呼ぶ』節が見つかる（#113）"
+
+  case "$GEN113_SECTION" in
+    *'share-prepared-dirs.sh'*'自分の作業ディレクトリで1回だけ'*)
+      pass "${f}: 共有ディレクトリの指定がある場合 share-prepared-dirs.sh を1回だけ呼ぶ旨がある（#113）" ;;
+    *)
+      fail "${f}: 共有ディレクトリの指定がある場合 share-prepared-dirs.sh を1回だけ呼ぶ旨がある（#113）" \
+        "$GEN113_SECTION" ;;
+  esac
+
+  case "$GEN113_SECTION" in
+    *'prep=run'*'自前で準備コマンドを追加実行しない'*)
+      pass "${f}: prep=run でも自前で準備コマンドを追加実行しない旨がある（#113）" ;;
+    *)
+      fail "${f}: prep=run でも自前で準備コマンドを追加実行しない旨がある（#113）" \
+        "$GEN113_SECTION" ;;
+  esac
+
+  case "$GEN113_SECTION" in
+    *'exit 3'*'待ったり2本目を起動したりしない'*)
+      pass "${f}: exit 3（ロック競合）を受け取ったら待たず2本目も起動せず停止する旨がある（#113）" ;;
+    *)
+      fail "${f}: exit 3（ロック競合）を受け取ったら待たず2本目も起動せず停止する旨がある（#113）" \
+        "$GEN113_SECTION" ;;
+  esac
+
+  case "$GEN113_SECTION" in
+    *'exit 4'*'実装に進まず'*)
+      pass "${f}: exit 4（--run-prepの失敗）は実装に進まず報告する旨がある（#113）" ;;
+    *)
+      fail "${f}: exit 4（--run-prepの失敗）は実装に進まず報告する旨がある（#113）" \
+        "$GEN113_SECTION" ;;
+  esac
+
+  case "$GEN113_SECTION" in
+    *'依存マニフェスト'*'--detach --dir'*'install'*)
+      pass "${f}: 依存マニフェストを変更するタスクではinstall前に--detachする旨がある（#113）" ;;
+    *)
+      fail "${f}: 依存マニフェストを変更するタスクではinstall前に--detachする旨がある（#113）" \
+        "$GEN113_SECTION" ;;
+  esac
+
+  case "$GEN113_SECTION" in
+    *'完了報告にそのまま貼る'*)
+      pass "${f}: スクリプトの実出力を完了報告にそのまま貼る（自己申告にしない）旨がある（#113）" ;;
+    *)
+      fail "${f}: スクリプトの実出力を完了報告にそのまま貼る（自己申告にしない）旨がある（#113）" \
+        "$GEN113_SECTION" ;;
+  esac
+
+  case "$GEN113_SECTION" in
+    *'共有ディレクトリの指定が渡されていない場合'*'従来どおり'*)
+      pass "${f}: 共有ディレクトリの指定が渡されていない場合は従来どおり（後方互換）の旨がある（#113）" ;;
+    *)
+      fail "${f}: 共有ディレクトリの指定が渡されていない場合は従来どおり（後方互換）の旨がある（#113）" \
+        "$GEN113_SECTION" ;;
+  esac
+done
+
+# --- core/roles/generator.md: H2向け編集後も「## 作業フロー」節の 0. → プロジェクト固有の準備
+#     → 共有ディレクトリ節 → 1. の順序が保たれている（#100の並び順テストとの整合） ---
+GEN113_FLOW_SECTION="$(awk '/^## 作業フロー/{f=1;next} /^## コーディングルール/{f=0} f' "${REPO_ROOT}/core/roles/generator.md")"
+
+assert_order "core/roles/generator.md: 「## 作業フロー」節で 0. → プロジェクト固有の準備 → 共有ディレクトリ節 → 1. の順で並んでいる（#113）" \
+  "$GEN113_FLOW_SECTION" \
+  "### 0. 渡されたベースにHEADを合わせる" \
+  "### プロジェクト固有の準備は自分の作業ディレクトリで初回1回だけ実行する" \
+  "#### 共有ディレクトリの指定がある場合は share-prepared-dirs.sh を呼ぶ" \
+  "### 1. タスクの確認"
+
+# --- 既存の「初回1回だけ実行する」規約（Task #94由来）テストを壊していないことの前提確認 ---
+GEN113_PREP_SECTION="$(awk '/^### プロジェクト固有の準備/{f=1} /^### 1\. /{f=0} f' "${REPO_ROOT}/core/roles/generator.md")"
+
+case "$GEN113_PREP_SECTION" in
+  *'初回1回だけ'*'同一 worktree 内で2回目以降は実行しない'*)
+    pass "core/roles/generator.md: 既存の『初回1回だけ実行する』規約（#94）が壊れていない（#113）" ;;
+  *)
+    fail "core/roles/generator.md: 既存の『初回1回だけ実行する』規約（#94）が壊れていない（#113）" \
+      "$GEN113_PREP_SECTION" ;;
+esac
+
+echo ""
+echo "== share-prepared-dirs.sh（準備成果ディレクトリの共有・共有モード） =="
+
+SPD_SCRIPT="${REPO_ROOT}/scripts/share-prepared-dirs.sh"
+
+# --- bash -n が通る ---
+if bash -n "$SPD_SCRIPT" 2>/dev/null; then
+  pass "share-prepared-dirs.sh: bash -n の構文チェックが通る（#106）"
+else
+  fail "share-prepared-dirs.sh: bash -n の構文チェックが通る（#106）"
+fi
+
+# --- rm / rmdir によるディレクトリ削除が無い（安全ルール）。cleanup-lane-worktrees.sh と
+#     同じ検査方法（コメント行を除外し、単語境界での一致だけを見る） ---
+SPD_FORBIDDEN_HITS="$(grep -v '^[[:space:]]*#' "$SPD_SCRIPT" \
+  | grep -E '(^|[^A-Za-z0-9_])(rm|rmdir)([[:space:]]|$)' || true)"
+if [ -z "$SPD_FORBIDDEN_HITS" ]; then
+  pass "share-prepared-dirs.sh: rm / rmdir によるディレクトリ削除が無い（#106）"
+else
+  fail "share-prepared-dirs.sh: rm / rmdir によるディレクトリ削除が無い（#106）" "$SPD_FORBIDDEN_HITS"
+fi
+
+# --- スクリプト冒頭のコメントに背景（#104）・使い方・出力形式・終了コードが書かれている ---
+SPD_HEADER="$(awk '/^set -u/{exit} {print}' "$SPD_SCRIPT")"
+case "$SPD_HEADER" in
+  *'#104'*'使い方'*'出力'*'終了コード'*'prep='*)
+    pass "share-prepared-dirs.sh: 冒頭コメントに背景（#104）・使い方・出力・終了コードが書かれている（#106）" ;;
+  *)
+    fail "share-prepared-dirs.sh: 冒頭コメントに背景（#104）・使い方・出力・終了コードが書かれている（#106）" \
+      "見つかりませんでした" ;;
+esac
+
+# --- テスト用のフェイク sandbox-exec.sh（呼び出し回数を記録してから最後の引数を sh -c で実行する） ---
+spd_make_stub() {
+  # spd_make_stub <call_log>  スタブスクリプトのパスを出力する
+  local call_log="$1" stub
+  stub="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-stub.XXXXXX")"
+  {
+    echo '#!/bin/bash'
+    echo 'set -u'
+    printf 'echo 1 >> %q\n' "$call_log"
+    echo 'cmd="${@: -1}"'
+    echo 'sh -c "$cmd"'
+  } > "$stub"
+  printf '%s' "$stub"
+}
+
+spd_run() {
+  # spd_run <lane_dir> <stub> [share-prepared-dirs.shへの追加引数...]
+  local lane="$1" stub="$2"
+  shift 2
+  (cd "$lane" || exit 1; DEV_WORKFLOW_SANDBOX_EXEC="$stub" bash "$SPD_SCRIPT" "$@")
+}
+
+SPD_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-source.XXXXXX")"
+SPD_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-lane.XXXXXX")"
+SPD_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-calllog.XXXXXX")"
+SPD_STUB="$(spd_make_stub "$SPD_CALL_LOG")"
+
+mkdir -p "${SPD_SOURCE}/node_modules"
+printf 'lock-content\n'    > "${SPD_SOURCE}/yarn.lock"
+printf 'package-content\n' > "${SPD_SOURCE}/package.json"
+printf 'lock-content\n'    > "${SPD_LANE}/yarn.lock"
+printf 'package-content\n' > "${SPD_LANE}/package.json"
+
+# --- ケース1: フィンガープリント一致 → linked / 全件 linked なら prep=skip ---
+SPD_OUT1="$(spd_run "$SPD_LANE" "$SPD_STUB" --source "$SPD_SOURCE" \
+  --dir "node_modules yarn.lock package.json")"
+SPD_EXIT1=$?
+assert_exit_code "ケース1: フィンガープリント一致で exit 0" 0 "$SPD_EXIT1"
+
+case "$SPD_OUT1" in
+  *"linked"*"node_modules"*)
+    pass "ケース1: フィンガープリント一致で linked が出る（#106）" ;;
+  *)
+    fail "ケース1: フィンガープリント一致で linked が出る（#106）" "output=[${SPD_OUT1}]" ;;
+esac
+
+case "$SPD_OUT1" in
+  *"prep=skip"*)
+    pass "ケース1: 全件 linked のとき prep=skip（#106）" ;;
+  *)
+    fail "ケース1: 全件 linked のとき prep=skip（#106）" "output=[${SPD_OUT1}]" ;;
+esac
+
+assert_eq "ケース1: linked 後、レーン側に node_modules が実在する（#106）" \
+  "yes" "$([ -e "${SPD_LANE}/node_modules" ] && echo yes || echo no)"
+
+# --- ケース2: レーン側に既に存在する（ケース1の結果を再利用）→ skip reason exists /
+#     全件 exists なら prep=skip ---
+SPD_OUT2="$(spd_run "$SPD_LANE" "$SPD_STUB" --source "$SPD_SOURCE" \
+  --dir "node_modules yarn.lock package.json")"
+case "$SPD_OUT2" in
+  *"skip"*"node_modules"*"reason"*"exists"*)
+    pass "ケース2: レーン側に既に存在する場合 skip reason exists（#106）" ;;
+  *)
+    fail "ケース2: レーン側に既に存在する場合 skip reason exists（#106）" "output=[${SPD_OUT2}]" ;;
+esac
+case "$SPD_OUT2" in
+  *"prep=skip"*)
+    pass "ケース2: 全件 exists のとき prep=skip（#106）" ;;
+  *)
+    fail "ケース2: 全件 exists のとき prep=skip（#106）" "output=[${SPD_OUT2}]" ;;
+esac
+
+# --- ケース3: 共有元にディレクトリが無い → skip reason no-source / prep=run ---
+SPD_OUT3="$(spd_run "$SPD_LANE" "$SPD_STUB" --source "$SPD_SOURCE" \
+  --dir "does_not_exist_dir")"
+case "$SPD_OUT3" in
+  *"skip"*"does_not_exist_dir"*"reason"*"no-source"*)
+    pass "ケース3: 共有元にディレクトリが無い場合 skip reason no-source（#106）" ;;
+  *)
+    fail "ケース3: 共有元にディレクトリが無い場合 skip reason no-source（#106）" "output=[${SPD_OUT3}]" ;;
+esac
+case "$SPD_OUT3" in
+  *"prep=run"*)
+    pass "ケース3: no-source を含む場合 prep=run（#106）" ;;
+  *)
+    fail "ケース3: no-source を含む場合 prep=run（#106）" "output=[${SPD_OUT3}]" ;;
+esac
+
+# --- ケース4: フィンガープリント不一致・欠損 → skip reason fingerprint-mismatch / prep=run ---
+mkdir -p "${SPD_SOURCE}/mmdir" "${SPD_SOURCE}/mmdir2"
+printf 'source-value\n' > "${SPD_SOURCE}/mismatch.lock"
+printf 'lane-value\n'   > "${SPD_LANE}/mismatch.lock"
+
+SPD_OUT4="$(spd_run "$SPD_LANE" "$SPD_STUB" --source "$SPD_SOURCE" \
+  --dir "mmdir mismatch.lock")"
+case "$SPD_OUT4" in
+  *"skip"*"mmdir"*"reason"*"fingerprint-mismatch"*)
+    pass "ケース4: フィンガープリント不一致で skip reason fingerprint-mismatch（#106）" ;;
+  *)
+    fail "ケース4: フィンガープリント不一致で skip reason fingerprint-mismatch（#106）" "output=[${SPD_OUT4}]" ;;
+esac
+case "$SPD_OUT4" in
+  *"prep=run"*)
+    pass "ケース4: fingerprint-mismatch を含む場合 prep=run（#106）" ;;
+  *)
+    fail "ケース4: fingerprint-mismatch を含む場合 prep=run（#106）" "output=[${SPD_OUT4}]" ;;
+esac
+
+# 欠損（レーン側・共有元側ともにフィンガープリントファイルが無い）場合も同様に扱う
+SPD_OUT4B="$(spd_run "$SPD_LANE" "$SPD_STUB" --source "$SPD_SOURCE" \
+  --dir "mmdir2 missing.lock")"
+case "$SPD_OUT4B" in
+  *"skip"*"mmdir2"*"reason"*"fingerprint-mismatch"*)
+    pass "ケース4b: フィンガープリントファイルが欠損している場合も skip reason fingerprint-mismatch（#106）" ;;
+  *)
+    fail "ケース4b: フィンガープリントファイルが欠損している場合も skip reason fingerprint-mismatch（#106）" \
+      "output=[${SPD_OUT4B}]" ;;
+esac
+
+# --- ケース5: --spec の空行・# 始まりの行が無視される ---
+SPD_SPEC_TEXT="$(printf '# comment line\n\n   \nno_such_source_dir_for_spec_test\n#trailing comment\n')"
+SPD_OUT5="$(spd_run "$SPD_LANE" "$SPD_STUB" --source "$SPD_SOURCE" --spec "$SPD_SPEC_TEXT")"
+case "$SPD_OUT5" in
+  *"skip"*"no_such_source_dir_for_spec_test"*"reason"*"no-source"*)
+    pass "ケース5: --spec の空行・#始まりの行を挟んでも実体エントリは正しく解釈される（#106）" ;;
+  *)
+    fail "ケース5: --spec の空行・#始まりの行を挟んでも実体エントリは正しく解釈される（#106）" \
+      "output=[${SPD_OUT5}]" ;;
+esac
+SPD_OUT5_LINES="$(printf '%s\n' "$SPD_OUT5" | grep -c '.')"
+assert_eq "ケース5: --spec の空行・#始まりの行は実体エントリとして混入せず出力は2行（対象1件+prep）のみ（#106）" \
+  "2" "$SPD_OUT5_LINES"
+
+# --- ケース6: --dry-run で linked を出すが実際には symlink を作らない ---
+mkdir -p "${SPD_SOURCE}/dryrun_dir"
+SPD_OUT6="$(spd_run "$SPD_LANE" "$SPD_STUB" --source "$SPD_SOURCE" --dir "dryrun_dir" --dry-run)"
+case "$SPD_OUT6" in
+  *"linked"*"dryrun_dir"*)
+    pass "ケース6: --dry-run でも linked 行が出る（#106）" ;;
+  *)
+    fail "ケース6: --dry-run でも linked 行が出る（#106）" "output=[${SPD_OUT6}]" ;;
+esac
+assert_eq "ケース6: --dry-run では実際には symlink が作られない（#106）" \
+  "no" "$([ -e "${SPD_LANE}/dryrun_dir" ] && echo yes || echo no)"
+
+# --- ケース7: symlink 作成に失敗 → skip reason link-failed / prep=run
+#     （レーン側の親ディレクトリが存在しないため ln -s が実際に失敗する） ---
+mkdir -p "${SPD_SOURCE}/nopar/child"
+SPD_OUT7="$(spd_run "$SPD_LANE" "$SPD_STUB" --source "$SPD_SOURCE" --dir "nopar/child")"
+case "$SPD_OUT7" in
+  *"skip"*"nopar/child"*"reason"*"link-failed"*)
+    pass "ケース7: symlink 作成に失敗すると skip reason link-failed（#106）" ;;
+  *)
+    fail "ケース7: symlink 作成に失敗すると skip reason link-failed（#106）" "output=[${SPD_OUT7}]" ;;
+esac
+case "$SPD_OUT7" in
+  *"prep=run"*)
+    pass "ケース7: link-failed を含む場合 prep=run（#106）" ;;
+  *)
+    fail "ケース7: link-failed を含む場合 prep=run（#106）" "output=[${SPD_OUT7}]" ;;
+esac
+
+# --- ケース8: --source 欠落・値なしオプションで exit 2（無限ループしない） ---
+if command -v timeout >/dev/null 2>&1; then
+  SPD_NOSRC_OUT="$(timeout 5 bash "$SPD_SCRIPT" --dir "x" 2>&1)"
+  SPD_NOSRC_EXIT=$?
+  assert_no_hang "ケース8: --source 欠落は無限ループせず exit 2（#106）" \
+    2 "$SPD_NOSRC_EXIT" "$SPD_NOSRC_OUT" "--source は必須です"
+
+  SPD_NOVAL_OPTS=(--source --spec --dir --epic)
+  for SPD_NOVAL_OPT in "${SPD_NOVAL_OPTS[@]}"; do
+    SPD_NOVAL_OUT="$(timeout 5 bash "$SPD_SCRIPT" --source "$SPD_SOURCE" "$SPD_NOVAL_OPT" 2>&1)"
+    SPD_NOVAL_EXIT=$?
+    assert_no_hang "ケース8: ${SPD_NOVAL_OPT} が末尾で値なしでも無限ループせず exit 2（#106）" \
+      2 "$SPD_NOVAL_EXIT" "$SPD_NOVAL_OUT" "${SPD_NOVAL_OPT} には値が必要です"
+  done
+
+  SPD_UNKNOWN_OUT="$(timeout 5 bash "$SPD_SCRIPT" --source "$SPD_SOURCE" --unknown-option 2>&1)"
+  SPD_UNKNOWN_EXIT=$?
+  assert_no_hang "ケース8: 未知のオプションは無限ループせず exit 2（#106）" \
+    2 "$SPD_UNKNOWN_EXIT" "$SPD_UNKNOWN_OUT" "未知のオプション"
+else
+  skip "share-prepared-dirs.sh: --source 欠落・値なしオプションで無限ループしない（#106）" \
+    "timeout コマンドが利用できません"
+fi
+
+# --- ケース9: コンテナへの投入が1回にまとめられている（スタブの呼び出し回数で検証する） ---
+SPD_CALL_LOG9="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-calllog9.XXXXXX")"
+SPD_STUB9="$(spd_make_stub "$SPD_CALL_LOG9")"
+mkdir -p "${SPD_SOURCE}/multi_a" "${SPD_SOURCE}/multi_b"
+
+SPD_OUT9="$(spd_run "$SPD_LANE" "$SPD_STUB9" --source "$SPD_SOURCE" \
+  --dir "multi_a" --dir "multi_b" --dir "no_source_multi" --epic epic105)"
+SPD_EXIT9=$?
+assert_exit_code "ケース9: 複数エントリでも exit 0" 0 "$SPD_EXIT9"
+
+SPD_CALL_COUNT9="$(grep -c '.' "$SPD_CALL_LOG9" 2>/dev/null || echo 0)"
+assert_eq "ケース9: 複数エントリ（no-source混在）でもコンテナ呼び出しは1回にまとめられる（#106）" \
+  "1" "$SPD_CALL_COUNT9"
+
+case "$SPD_OUT9" in
+  *"linked"*"multi_a"*"linked"*"multi_b"*)
+    pass "ケース9: 1回の呼び出しでも複数エントリが正しくlinkedとして報告される（#106）" ;;
+  *)
+    fail "ケース9: 1回の呼び出しでも複数エントリが正しくlinkedとして報告される（#106）" \
+      "output=[${SPD_OUT9}]" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# share-prepared-dirs.sh --detach（共有リンクの解除、Task #110）
+#
+# 依存マニフェスト（package.json 等）を変更するタスクが install 前に共有リンクを
+# 解除するためのモード。共有モードと同じスタブ（DEV_WORKFLOW_SANDBOX_EXEC）を使い、
+# Docker 非依存に検証する。symlink の判定・解除もこの host 上の sh -c で実際に行われる
+# ため、判定には -L ではなく -e（存在有無）を使う（ホストが Windows の場合 test -L が
+# 誤判定しうるのは冒頭コメントに記載の既知の制約であり、-e はその影響を受けない）。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== share-prepared-dirs.sh --detach（共有リンクの解除） =="
+
+SPD_DETACH_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-detach-lane.XXXXXX")"
+SPD_DETACH_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-detach-calllog.XXXXXX")"
+SPD_DETACH_STUB="$(spd_make_stub "$SPD_DETACH_CALL_LOG")"
+
+# --- 準備: symlink 1件・実体ディレクトリ1件を用意する（absent は何も作らない） ---
+mkdir -p "${SPD_DETACH_LANE}/detach_real_target"
+(cd "${SPD_DETACH_LANE}" && ln -s "detach_real_target" "detach_link_dir")
+mkdir -p "${SPD_DETACH_LANE}/detach_entity_dir"
+
+# --- ケース1: symlink を解除して detached を出す ---
+SPD_DOUT1="$(spd_run "$SPD_DETACH_LANE" "$SPD_DETACH_STUB" --detach --dir "detach_link_dir")"
+SPD_DEXIT1=$?
+assert_exit_code "--detach ケース1: symlink 解除で exit 0" 0 "$SPD_DEXIT1"
+case "$SPD_DOUT1" in
+  *"detached"*"detach_link_dir"*)
+    pass "--detach ケース1: symlink を解除して detached を出す（#110）" ;;
+  *)
+    fail "--detach ケース1: symlink を解除して detached を出す（#110）" "output=[${SPD_DOUT1}]" ;;
+esac
+assert_eq "--detach ケース1: 解除後、レーン側の symlink は消える（#110）" \
+  "no" "$([ -e "${SPD_DETACH_LANE}/detach_link_dir" ] && echo yes || echo no)"
+
+# --- ケース2: 実体ディレクトリは skip reason not-a-link で保護され、削除されない ---
+SPD_DOUT2="$(spd_run "$SPD_DETACH_LANE" "$SPD_DETACH_STUB" --detach --dir "detach_entity_dir")"
+case "$SPD_DOUT2" in
+  *"skip"*"detach_entity_dir"*"reason"*"not-a-link"*)
+    pass "--detach ケース2: 実体ディレクトリは skip reason not-a-link で保護される（#110）" ;;
+  *)
+    fail "--detach ケース2: 実体ディレクトリは skip reason not-a-link で保護される（#110）" \
+      "output=[${SPD_DOUT2}]" ;;
+esac
+assert_eq "--detach ケース2: 実体ディレクトリは削除されない（#110）" \
+  "yes" "$([ -d "${SPD_DETACH_LANE}/detach_entity_dir" ] && echo yes || echo no)"
+
+# --- ケース3: 存在しない場合 skip reason absent ---
+SPD_DOUT3="$(spd_run "$SPD_DETACH_LANE" "$SPD_DETACH_STUB" --detach --dir "detach_missing_dir")"
+case "$SPD_DOUT3" in
+  *"skip"*"detach_missing_dir"*"reason"*"absent"*)
+    pass "--detach ケース3: 存在しない場合 skip reason absent（#110）" ;;
+  *)
+    fail "--detach ケース3: 存在しない場合 skip reason absent（#110）" "output=[${SPD_DOUT3}]" ;;
+esac
+
+# --- ケース4: --dir を複数指定できる／--detach では prep= 行を出さない／
+#     コンテナへの投入は1回にまとめられる（スタブの呼び出し回数で検証する） ---
+mkdir -p "${SPD_DETACH_LANE}/detach_multi_target_a" "${SPD_DETACH_LANE}/detach_multi_target_b"
+(cd "${SPD_DETACH_LANE}" && ln -s "detach_multi_target_a" "detach_multi_link_a")
+(cd "${SPD_DETACH_LANE}" && ln -s "detach_multi_target_b" "detach_multi_link_b")
+
+SPD_DETACH_CALL_LOG4="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-detach-calllog4.XXXXXX")"
+SPD_DETACH_STUB4="$(spd_make_stub "$SPD_DETACH_CALL_LOG4")"
+
+SPD_DOUT4="$(spd_run "$SPD_DETACH_LANE" "$SPD_DETACH_STUB4" --detach \
+  --dir "detach_multi_link_a" --dir "detach_multi_link_b" --dir "detach_missing_dir2")"
+SPD_DEXIT4=$?
+assert_exit_code "--detach ケース4: 複数エントリでも exit 0" 0 "$SPD_DEXIT4"
+
+case "$SPD_DOUT4" in
+  *"detached"*"detach_multi_link_a"*"detached"*"detach_multi_link_b"*)
+    pass "--detach ケース4: --dir を複数指定でき、それぞれ detached が出る（#110）" ;;
+  *)
+    fail "--detach ケース4: --dir を複数指定でき、それぞれ detached が出る（#110）" \
+      "output=[${SPD_DOUT4}]" ;;
+esac
+
+case "$SPD_DOUT4" in
+  *"prep="*)
+    fail "--detach ケース4: --detach では prep= 行を出さない（#110）" "output=[${SPD_DOUT4}]" ;;
+  *)
+    pass "--detach ケース4: --detach では prep= 行を出さない（#110）" ;;
+esac
+
+SPD_DETACH_CALL_COUNT4="$(grep -c '.' "$SPD_DETACH_CALL_LOG4" 2>/dev/null || echo 0)"
+assert_eq "--detach ケース4: 複数エントリ（absent混在）でもコンテナ呼び出しは1回にまとめられる（#110）" \
+  "1" "$SPD_DETACH_CALL_COUNT4"
+
+# --- ケース5: --dry-run では実際には解除しない ---
+mkdir -p "${SPD_DETACH_LANE}/detach_dryrun_target"
+(cd "${SPD_DETACH_LANE}" && ln -s "detach_dryrun_target" "detach_dryrun_link")
+
+SPD_DOUT5="$(spd_run "$SPD_DETACH_LANE" "$SPD_DETACH_STUB" --detach --dir "detach_dryrun_link" --dry-run)"
+case "$SPD_DOUT5" in
+  *"detached"*"detach_dryrun_link"*)
+    pass "--detach ケース5: --dry-run でも detached 行が出る（#110）" ;;
+  *)
+    fail "--detach ケース5: --dry-run でも detached 行が出る（#110）" "output=[${SPD_DOUT5}]" ;;
+esac
+assert_eq "--detach ケース5: --dry-run では実際には解除しない（#110）" \
+  "yes" "$([ -e "${SPD_DETACH_LANE}/detach_dryrun_link" ] && echo yes || echo no)"
+
+# --- ケース6: --detach 指定時に --dir が1つも無いと無限ループせず exit 2 ---
+if command -v timeout >/dev/null 2>&1; then
+  SPD_DETACH_NODIR_OUT="$(timeout 5 bash "$SPD_SCRIPT" --detach 2>&1)"
+  SPD_DETACH_NODIR_EXIT=$?
+  assert_no_hang "--detach ケース6: --dir 皆無は無限ループせず exit 2（#110）" \
+    2 "$SPD_DETACH_NODIR_EXIT" "$SPD_DETACH_NODIR_OUT" "--dir が1つ以上必要です"
+else
+  skip "share-prepared-dirs.sh --detach: --dir 皆無で無限ループしない（#110）" \
+    "timeout コマンドが利用できません"
+fi
+
+# ---------------------------------------------------------------------------
+# Task #107: Epic本文の「## 共有ディレクトリ」節がplanner・共通ルールに定義されている
+#
+# レーンごとのフル install（#104）を避けるための共有宣言。既存の「## 準備コマンド」節・
+# 「## SKIPパターン」節と対称な位置・対称な書き方であることを検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #107: Epic本文の『## 共有ディレクトリ』節がplanner・共通ルールに定義されている =="
+
+# --- core/roles/planner.md: 「プロジェクト固有の準備コマンド」と「SKIPパターン」の間に
+#     共有ディレクトリ節の書き方がある ---
+PLANNER_SHAREDIR_SECTION="$(awk '/^#### 共有ディレクトリ（該当する場合のみ）/{f=1} /^#### SKIPパターン（該当する場合のみ）/{f=0} f' \
+  "${REPO_ROOT}/core/roles/planner.md")"
+
+if [ -z "$PLANNER_SHAREDIR_SECTION" ]; then
+  fail "core/roles/planner.md: 『#### 共有ディレクトリ（該当する場合のみ）』節が見つかる（#107）" "節が空でした"
+else
+  pass "core/roles/planner.md: 『#### 共有ディレクトリ（該当する場合のみ）』節が見つかる（#107）"
+fi
+
+case "$PLANNER_SHAREDIR_SECTION" in
+  *'## 共有ディレクトリ'*'<共有するディレクトリ>'*'<フィンガープリントファイル>'*)
+    pass "core/roles/planner.md: 共有ディレクトリ節の見出し・行書式（空白区切り・リポジトリルート相対）が明記されている（#107）" ;;
+  *)
+    fail "core/roles/planner.md: 共有ディレクトリ節の見出し・行書式（空白区切り・リポジトリルート相対）が明記されている（#107）" \
+      "$PLANNER_SHAREDIR_SECTION" ;;
+esac
+
+case "$PLANNER_SHAREDIR_SECTION" in
+  *'node_modules'*'yarn.lock'*'package.json'*)
+    pass "core/roles/planner.md: 共有ディレクトリ節の例（node_modules  yarn.lock package.json）がある（#107）" ;;
+  *)
+    fail "core/roles/planner.md: 共有ディレクトリ節の例（node_modules  yarn.lock package.json）がある（#107）" \
+      "$PLANNER_SHAREDIR_SECTION" ;;
+esac
+
+case "$PLANNER_SHAREDIR_SECTION" in
+  *'フィンガープリントには lockfile を必ず書く'*)
+    pass "core/roles/planner.md: フィンガープリントにlockfileを必ず書く旨が明記されている（#107）" ;;
+  *)
+    fail "core/roles/planner.md: フィンガープリントにlockfileを必ず書く旨が明記されている（#107）" \
+      "$PLANNER_SHAREDIR_SECTION" ;;
+esac
+
+case "$PLANNER_SHAREDIR_SECTION" in
+  *'Task issue 側にはこの節を書かない'*)
+    pass "core/roles/planner.md: Task issue側には書かない旨が明記されている（#107）" ;;
+  *)
+    fail "core/roles/planner.md: Task issue側には書かない旨が明記されている（#107）" \
+      "$PLANNER_SHAREDIR_SECTION" ;;
+esac
+
+# --- core/instructions.md: 「Epic 本文の『## SKIPパターン』節」と対称な位置に
+#     「Epic 本文の『## 共有ディレクトリ』節」がある ---
+INSTR_SHAREDIR_SECTION="$(awk '/^### Epic 本文の `## 共有ディレクトリ` 節/{f=1} /^### Epic 本文の `## SKIPパターン` 節/{f=0} f' \
+  "${REPO_ROOT}/core/instructions.md")"
+
+if [ -z "$INSTR_SHAREDIR_SECTION" ]; then
+  fail "core/instructions.md: 『### Epic 本文の \`## 共有ディレクトリ\` 節』が見つかる（#107）" "節が空でした"
+else
+  pass "core/instructions.md: 『### Epic 本文の \`## 共有ディレクトリ\` 節』が見つかる（#107）"
+fi
+
+case "$INSTR_SHAREDIR_SECTION" in
+  *'#104'*'Step 3'*'generator プロンプトへ渡す'*)
+    pass "core/instructions.md: runがEpic開始時に節を読みStep 3のgeneratorプロンプトへ渡す旨が明記されている（#107）" ;;
+  *)
+    fail "core/instructions.md: runがEpic開始時に節を読みStep 3のgeneratorプロンプトへ渡す旨が明記されている（#107）" \
+      "$INSTR_SHAREDIR_SECTION" ;;
+esac
+
+case "$INSTR_SHAREDIR_SECTION" in
+  *'節を書くかどうかの判断は planner が行う'*)
+    pass "core/instructions.md: 節を書くかどうかの判断はplannerが行う旨が明記されている（#107）" ;;
+  *)
+    fail "core/instructions.md: 節を書くかどうかの判断はplannerが行う旨が明記されている（#107）" \
+      "$INSTR_SHAREDIR_SECTION" ;;
+esac
+
+# --- 生成物（agents/*.md・codex-agents/*.toml）にもcore/instructions.mdの共有ディレクトリ節が
+#     伝播している（build.shの再生成漏れを検知する） ---
+for f in agents/planner.md agents/generator.md agents/evaluator.md \
+         codex-agents/planner.toml codex-agents/generator.toml codex-agents/evaluator.toml; do
+  if grep -Fq -- '### Epic 本文の `## 共有ディレクトリ` 節' "${REPO_ROOT}/${f}"; then
+    pass "${f}: core/instructions.mdの共有ディレクトリ節が生成物に反映されている（#107）"
+  else
+    fail "${f}: core/instructions.mdの共有ディレクトリ節が生成物に反映されている（#107）" \
+      "節が見つかりませんでした"
+  fi
+done
+
+# --- 生成物（agents/planner.md・codex-agents/planner.toml）にもcore/roles/planner.mdの
+#     共有ディレクトリ節が伝播している ---
+for f in agents/planner.md codex-agents/planner.toml; do
+  if grep -Fq -- '#### 共有ディレクトリ（該当する場合のみ）' "${REPO_ROOT}/${f}"; then
+    pass "${f}: core/roles/planner.mdの共有ディレクトリ節が生成物に反映されている（#107）"
+  else
+    fail "${f}: core/roles/planner.mdの共有ディレクトリ節が生成物に反映されている（#107）" \
+      "節が見つかりませんでした"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# share-prepared-dirs.sh のロック兼完了マーカーと --run-prep（Task #111）
+#
+# 対象はレーンの作業ディレクトリ単位（git rev-parse --git-dir 配下）のため、レーンは
+# 実際に git init したディレクトリを使う（共有モードの既存テストブロックが使う SPD_LANE は
+# 非 git ディレクトリのままにしておく。既存ブロック内部は無変更）。
+# 共有モードと同じスタブ（DEV_WORKFLOW_SANDBOX_EXEC）を使い、Docker 非依存に検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== share-prepared-dirs.sh（ロック兼完了マーカー・--run-prep、Task #111） =="
+
+# --- 冒頭コメントに、ロックを削除しない理由・--force の用途・done を書くタイミングが
+#     書かれている ---
+SPD_LOCK_HEADER="$(awk '/^set -u/{exit} {print}' "$SPD_SCRIPT")"
+
+case "$SPD_LOCK_HEADER" in
+  *'ロックディレクトリは削除しない'*)
+    pass "share-prepared-dirs.sh: 冒頭コメントにロックを削除しない理由が書かれている（#111）" ;;
+  *)
+    fail "share-prepared-dirs.sh: 冒頭コメントにロックを削除しない理由が書かれている（#111）" \
+      "見つかりませんでした" ;;
+esac
+
+case "$SPD_LOCK_HEADER" in
+  *'--force'*'残存ロック'*)
+    pass "share-prepared-dirs.sh: 冒頭コメントに--forceの用途が書かれている（#111）" ;;
+  *)
+    fail "share-prepared-dirs.sh: 冒頭コメントに--forceの用途が書かれている（#111）" \
+      "見つかりませんでした" ;;
+esac
+
+case "$SPD_LOCK_HEADER" in
+  *'成功したときだけ'*'done'*'を書く'*)
+    pass "share-prepared-dirs.sh: 冒頭コメントにdoneを書くタイミングが書かれている（#111）" ;;
+  *)
+    fail "share-prepared-dirs.sh: 冒頭コメントにdoneを書くタイミングが書かれている（#111）" \
+      "見つかりませんでした" ;;
+esac
+
+# --- テスト用の共有元・呼び出しヘルパー（spd_run / spd_make_stub は既存ブロックで定義済み） ---
+SPD_LOCK_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-lock-source.XXXXXX")"
+mkdir -p "${SPD_LOCK_SOURCE}/lock_shared_dir"
+
+spd_lock_make_lane() {
+  # spd_lock_make_lane  git init 済みの一時レーンディレクトリのパスを出力する
+  local lane
+  lane="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-lock-lane.XXXXXX")"
+  (cd "$lane" && git init -q) >/dev/null 2>&1
+  printf '%s' "$lane"
+}
+
+spd_count_lines() {
+  # spd_count_lines <file>  行数を出力する（0行のときも "0" を1行だけ出す。
+  # `grep -c '.' file || echo 0` は grep がマッチ0件で非0終了するため
+  # 両方の出力が連結される事故が起きる。wc -l は件数に関わらず必ず0終了するため使わない）
+  wc -l < "$1" | tr -d '[:space:]'
+}
+
+# --- ケース1: 初回実行でロックが取得され、成功時に done が作られる。
+#     ロックは作業ツリーではなく git rev-parse --git-dir 配下（git status --porcelain は空のまま。
+#     レーン側に共有対象を事前に置き exists 判定にすることで、共有そのものによる
+#     working tree の変化を排除し、ロックだけの影響を検証する） ---
+SPD_LOCK_LANE1="$(spd_lock_make_lane)"
+mkdir -p "${SPD_LOCK_LANE1}/lock_shared_dir"
+SPD_LOCK_CALL_LOG1="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-lock-calllog1.XXXXXX")"
+SPD_LOCK_STUB1="$(spd_make_stub "$SPD_LOCK_CALL_LOG1")"
+
+SPD_LOCK_OUT1="$(spd_run "$SPD_LOCK_LANE1" "$SPD_LOCK_STUB1" --source "$SPD_LOCK_SOURCE" --dir "lock_shared_dir")"
+SPD_LOCK_EXIT1=$?
+assert_exit_code "ロック ケース1: 初回実行は exit 0（#111）" 0 "$SPD_LOCK_EXIT1"
+
+assert_eq "ロック ケース1: 成功時に done マーカーが作られる（#111）" \
+  "yes" "$([ -f "${SPD_LOCK_LANE1}/.git/dev-workflow-prep.lock/done" ] && echo yes || echo no)"
+
+SPD_LOCK_STATUS1="$(cd "$SPD_LOCK_LANE1" && git status --porcelain)"
+assert_eq "ロック ケース1: ロックは .git 配下にあり git status --porcelain は空のまま（#111）" \
+  "" "$SPD_LOCK_STATUS1"
+
+# --- ケース2: done がある状態で再実行すると prep=done-already / exit 0 で、
+#     symlink 作成（コンテナ呼び出し）も準備コマンド実行も行われない ---
+SPD_LOCK_CALL_COUNT1_BEFORE="$(spd_count_lines "$SPD_LOCK_CALL_LOG1")"
+SPD_LOCK_MARKER2="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-lock-marker2.XXXXXX")"
+
+SPD_LOCK_OUT2="$(spd_run "$SPD_LOCK_LANE1" "$SPD_LOCK_STUB1" --source "$SPD_LOCK_SOURCE" --dir "lock_shared_dir" \
+  --run-prep "printf x >> $(printf '%q' "$SPD_LOCK_MARKER2")")"
+SPD_LOCK_EXIT2=$?
+assert_exit_code "ロック ケース2: done ありの再実行は exit 0（#111）" 0 "$SPD_LOCK_EXIT2"
+
+case "$SPD_LOCK_OUT2" in
+  *"prep=done-already"*)
+    pass "ロック ケース2: done がある場合 prep=done-already（#111）" ;;
+  *)
+    fail "ロック ケース2: done がある場合 prep=done-already（#111）" "output=[${SPD_LOCK_OUT2}]" ;;
+esac
+
+SPD_LOCK_CALL_COUNT1_AFTER="$(spd_count_lines "$SPD_LOCK_CALL_LOG1")"
+assert_eq "ロック ケース2: done-already 時は symlink 作成（コンテナ呼び出し）が行われない（#111）" \
+  "$SPD_LOCK_CALL_COUNT1_BEFORE" "$SPD_LOCK_CALL_COUNT1_AFTER"
+
+assert_eq "ロック ケース2: done-already 時は --run-prep のコマンドも実行されない（#111）" \
+  "no" "$([ -s "$SPD_LOCK_MARKER2" ] && echo yes || echo no)"
+
+# --- ケース3: done の無いロックがある状態で実行すると exit 3 で停止し、
+#     stderr にロックパスが出る ---
+SPD_LOCK_LANE3="$(spd_lock_make_lane)"
+mkdir -p "${SPD_LOCK_LANE3}/.git/dev-workflow-prep.lock"
+SPD_LOCK_CALL_LOG3="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-lock-calllog3.XXXXXX")"
+SPD_LOCK_STUB3="$(spd_make_stub "$SPD_LOCK_CALL_LOG3")"
+
+SPD_LOCK_OUT3="$(spd_run "$SPD_LOCK_LANE3" "$SPD_LOCK_STUB3" --source "$SPD_LOCK_SOURCE" --dir "lock_shared_dir" 2>&1)"
+SPD_LOCK_EXIT3=$?
+assert_exit_code "ロック ケース3: 残存ロック（done無し）は exit 3（#111）" 3 "$SPD_LOCK_EXIT3"
+
+case "$SPD_LOCK_OUT3" in
+  *"同一 worktree で準備が既に実行中です"*"dev-workflow-prep.lock"*)
+    pass "ロック ケース3: stderr にロックパスを含むエラーが出る（#111）" ;;
+  *)
+    fail "ロック ケース3: stderr にロックパスを含むエラーが出る（#111）" "output=[${SPD_LOCK_OUT3}]" ;;
+esac
+
+SPD_LOCK_CALL_COUNT3="$(spd_count_lines "$SPD_LOCK_CALL_LOG3")"
+assert_eq "ロック ケース3: 競合時は symlink 作成（コンテナ呼び出し）が行われない（#111）" \
+  "0" "$SPD_LOCK_CALL_COUNT3"
+
+# --- ケース4: --force を付けると done の無い残存ロックがあっても続行する
+#     （ケース3と同じ残存ロックを再利用する） ---
+SPD_LOCK_OUT4="$(spd_run "$SPD_LOCK_LANE3" "$SPD_LOCK_STUB3" --source "$SPD_LOCK_SOURCE" --dir "lock_shared_dir" --force)"
+SPD_LOCK_EXIT4=$?
+assert_exit_code "ロック ケース4: --force を付けると続行し exit 0（#111）" 0 "$SPD_LOCK_EXIT4"
+
+case "$SPD_LOCK_OUT4" in
+  *"prep="*)
+    pass "ロック ケース4: --force で通常どおり prep= 行が出る（#111）" ;;
+  *)
+    fail "ロック ケース4: --force で通常どおり prep= 行が出る（#111）" "output=[${SPD_LOCK_OUT4}]" ;;
+esac
+
+assert_eq "ロック ケース4: --force での成功後は done マーカーが作られる（#111）" \
+  "yes" "$([ -f "${SPD_LOCK_LANE3}/.git/dev-workflow-prep.lock/done" ] && echo yes || echo no)"
+
+# --- ケース5: prep=skip のときは --run-prep のコマンドが実行されない
+#     （レーン側に実体ディレクトリを事前に置き、skip reason exists で prep=skip にする） ---
+SPD_LOCK_LANE5="$(spd_lock_make_lane)"
+mkdir -p "${SPD_LOCK_LANE5}/lock_shared_dir"
+SPD_LOCK_CALL_LOG5="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-lock-calllog5.XXXXXX")"
+SPD_LOCK_STUB5="$(spd_make_stub "$SPD_LOCK_CALL_LOG5")"
+SPD_LOCK_MARKER5="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-lock-marker5.XXXXXX")"
+
+SPD_LOCK_OUT5="$(spd_run "$SPD_LOCK_LANE5" "$SPD_LOCK_STUB5" --source "$SPD_LOCK_SOURCE" --dir "lock_shared_dir" \
+  --run-prep "printf x >> $(printf '%q' "$SPD_LOCK_MARKER5")")"
+SPD_LOCK_EXIT5=$?
+assert_exit_code "ロック ケース5: prep=skip のときも exit 0（#111）" 0 "$SPD_LOCK_EXIT5"
+
+case "$SPD_LOCK_OUT5" in
+  *"prep=skip"*)
+    pass "ロック ケース5: レーン側に実体がある場合 prep=skip（#111）" ;;
+  *)
+    fail "ロック ケース5: レーン側に実体がある場合 prep=skip（#111）" "output=[${SPD_LOCK_OUT5}]" ;;
+esac
+
+assert_eq "ロック ケース5: prep=skip のときは --run-prep のコマンドが実行されない（#111）" \
+  "no" "$([ -s "$SPD_LOCK_MARKER5" ] && echo yes || echo no)"
+
+# --- ケース6: prep=run のときは --run-prep のコマンドが実行される
+#     （共有元に存在しないディレクトリを指定し no-source で prep=run にする） ---
+SPD_LOCK_LANE6="$(spd_lock_make_lane)"
+SPD_LOCK_CALL_LOG6="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-lock-calllog6.XXXXXX")"
+SPD_LOCK_STUB6="$(spd_make_stub "$SPD_LOCK_CALL_LOG6")"
+SPD_LOCK_MARKER6="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-lock-marker6.XXXXXX")"
+
+SPD_LOCK_OUT6="$(spd_run "$SPD_LOCK_LANE6" "$SPD_LOCK_STUB6" --source "$SPD_LOCK_SOURCE" --dir "no_such_lock_dir" \
+  --run-prep "printf x >> $(printf '%q' "$SPD_LOCK_MARKER6")")"
+SPD_LOCK_EXIT6=$?
+assert_exit_code "ロック ケース6: prep=run で --run-prep が成功すると exit 0（#111）" 0 "$SPD_LOCK_EXIT6"
+
+case "$SPD_LOCK_OUT6" in
+  *"prep=run"*)
+    pass "ロック ケース6: 共有元に無い場合 prep=run（#111）" ;;
+  *)
+    fail "ロック ケース6: 共有元に無い場合 prep=run（#111）" "output=[${SPD_LOCK_OUT6}]" ;;
+esac
+
+assert_eq "ロック ケース6: prep=run のときは --run-prep のコマンドが実行される（#111）" \
+  "yes" "$([ -s "$SPD_LOCK_MARKER6" ] && echo yes || echo no)"
+
+assert_eq "ロック ケース6: --run-prep 成功後は done マーカーが作られる（#111）" \
+  "yes" "$([ -f "${SPD_LOCK_LANE6}/.git/dev-workflow-prep.lock/done" ] && echo yes || echo no)"
+
+# --- ケース7: --run-prep のコマンドが失敗すると exit 4 になり、done が作られない ---
+SPD_LOCK_LANE7="$(spd_lock_make_lane)"
+SPD_LOCK_CALL_LOG7="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-lock-calllog7.XXXXXX")"
+SPD_LOCK_STUB7="$(spd_make_stub "$SPD_LOCK_CALL_LOG7")"
+
+SPD_LOCK_OUT7="$(spd_run "$SPD_LOCK_LANE7" "$SPD_LOCK_STUB7" --source "$SPD_LOCK_SOURCE" --dir "no_such_lock_dir7" \
+  --run-prep "exit 1" 2>&1)"
+SPD_LOCK_EXIT7=$?
+assert_exit_code "ロック ケース7: --run-prep のコマンドが失敗すると exit 4（#111）" 4 "$SPD_LOCK_EXIT7"
+
+assert_eq "ロック ケース7: --run-prep 失敗時は done マーカーが作られない（#111）" \
+  "no" "$([ -f "${SPD_LOCK_LANE7}/.git/dev-workflow-prep.lock/done" ] && echo yes || echo no)"
+
+# --- ケース8: --run-prep が末尾で値なしでも無限ループせず exit 2 ---
+if command -v timeout >/dev/null 2>&1; then
+  SPD_LOCK_NOVAL_OUT="$(timeout 5 bash "$SPD_SCRIPT" --source "$SPD_LOCK_SOURCE" --run-prep 2>&1)"
+  SPD_LOCK_NOVAL_EXIT=$?
+  assert_no_hang "ロック ケース8: --run-prep が末尾で値なしでも無限ループせず exit 2（#111）" \
+    2 "$SPD_LOCK_NOVAL_EXIT" "$SPD_LOCK_NOVAL_OUT" "--run-prep には値が必要です"
+else
+  skip "share-prepared-dirs.sh: --run-prep 値なしで無限ループしない（#111）" \
+    "timeout コマンドが利用できません"
+fi
+
+# ---------------------------------------------------------------------------
+# Task #112: run に「共有ディレクトリ」節の抽出とStep 3プロンプトの結線を入れる
+#
+# 「準備コマンド」節・「SKIPパターン」節と同じ流儀（#94・#97のテストと同種）で、
+# skills/run/SKILL.md に共有ディレクトリ節の抽出手順とStep 3の結線が入っていることを検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #112: run に『共有ディレクトリ』節の抽出とStep 3プロンプトの結線がある =="
+
+# --- skills/run/SKILL.md: Docker sandbox の準備節に「共有ディレクトリ」節の抽出手順と
+#     EPIC_WT_ABS の取得がある ---
+H112_RS_SHAREDIR_EXTRACT="$(awk '/^#### 共有ディレクトリ（Epic 本文の `## 共有ディレクトリ` 節/{f=1} /^#### SKIP件数の判定パターン/{f=0} f' \
+  "${REPO_ROOT}/skills/run/SKILL.md")"
+
+if [ -z "$H112_RS_SHAREDIR_EXTRACT" ]; then
+  fail "SKILL.md: 『#### 共有ディレクトリ』節が見つかる（#112）" "節が空でした"
+else
+  pass "SKILL.md: 『#### 共有ディレクトリ』節が見つかる（#112）"
+fi
+
+case "$H112_RS_SHAREDIR_EXTRACT" in
+  *'## 共有ディレクトリ'*'awk'*'sed -n'*'EPIC_WT_ABS'*)
+    pass "SKILL.md: 共有ディレクトリ節の抽出手順（awk/sed）とEPIC_WT_ABSの取得がある（#112）" ;;
+  *)
+    fail "SKILL.md: 共有ディレクトリ節の抽出手順（awk/sed）とEPIC_WT_ABSの取得がある（#112）" \
+      "$H112_RS_SHAREDIR_EXTRACT" ;;
+esac
+
+case "$H112_RS_SHAREDIR_EXTRACT" in
+  *'SHARED_DIRS'*'は空文字のまま'*'現行と完全に同じ'*)
+    pass "SKILL.md: 節が無ければSHARED_DIRSが空文字のままで現行と完全に同じ挙動になる旨が明記されている（#112）" ;;
+  *)
+    fail "SKILL.md: 節が無ければSHARED_DIRSが空文字のままで現行と完全に同じ挙動になる旨が明記されている（#112）" \
+      "$H112_RS_SHAREDIR_EXTRACT" ;;
+esac
+
+# --- skills/run/SKILL.md: Step 3 雛形が SHARED_DIRS の空／非空を分岐して明示している ---
+H112_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "${REPO_ROOT}/skills/run/SKILL.md")"
+
+case "$H112_RS_STEP3" in
+  *'$SHARED_DIRS'*'空でない'*'share-prepared-dirs.sh'*'--source'*'--spec'*)
+    pass "SKILL.md: Step 3 雛形が SHARED_DIRS 非空時に share-prepared-dirs.sh を --source/--spec 付きで呼ぶ行を明示している（#112）" ;;
+  *)
+    fail "SKILL.md: Step 3 雛形が SHARED_DIRS 非空時に share-prepared-dirs.sh を --source/--spec 付きで呼ぶ行を明示している（#112）" \
+      "$H112_RS_STEP3" ;;
+esac
+
+case "$H112_RS_STEP3" in
+  *'$PREP_CMD'*'空でない場合のみ'*'--run-prep'*)
+    pass "SKILL.md: Step 3 雛形が PREP_CMD が空でない場合のみ --run-prep を付ける旨を明示している（#112）" ;;
+  *)
+    fail "SKILL.md: Step 3 雛形が PREP_CMD が空でない場合のみ --run-prep を付ける旨を明示している（#112）" \
+      "$H112_RS_STEP3" ;;
+esac
+
+case "$H112_RS_STEP3" in
+  *'$SHARED_DIRS'*'空'*'場合は現行どおり'*)
+    pass "SKILL.md: Step 3 雛形が SHARED_DIRS 空時は現行どおり PREP_CMD を直接実行させる旨を明示している（#112）" ;;
+  *)
+    fail "SKILL.md: Step 3 雛形が SHARED_DIRS 空時は現行どおり PREP_CMD を直接実行させる旨を明示している（#112）" \
+      "$H112_RS_STEP3" ;;
+esac
+
+# --- skills/run/SKILL.md: exit 3 / exit 4 / prep=run のときの generator の振る舞いが明記 ---
+case "$H112_RS_STEP3" in
+  *'exit 3'*'ロック競合'*'2本目を起動せず'*)
+    pass "SKILL.md: Step 3 雛形に exit 3（ロック競合）時は2本目を起動せず報告して停止する旨がある（#112）" ;;
+  *)
+    fail "SKILL.md: Step 3 雛形に exit 3（ロック競合）時は2本目を起動せず報告して停止する旨がある（#112）" \
+      "$H112_RS_STEP3" ;;
+esac
+
+case "$H112_RS_STEP3" in
+  *'exit 4'*'--run-prep'*'失敗'*'実装に進まず'*)
+    pass "SKILL.md: Step 3 雛形に exit 4（--run-prepの失敗）時は実装に進まず報告する旨がある（#112）" ;;
+  *)
+    fail "SKILL.md: Step 3 雛形に exit 4（--run-prepの失敗）時は実装に進まず報告する旨がある（#112）" \
+      "$H112_RS_STEP3" ;;
+esac
+
+case "$H112_RS_STEP3" in
+  *'prep=run'*'共有できなかった'*'自前で準備コマンドを追加実行しないこと'*)
+    pass "SKILL.md: Step 3 雛形に prep=run 時でも自前で準備コマンドを追加実行しない旨がある（#112）" ;;
+  *)
+    fail "SKILL.md: Step 3 雛形に prep=run 時でも自前で準備コマンドを追加実行しない旨がある（#112）" \
+      "$H112_RS_STEP3" ;;
+esac
+
+# --- skills/run/SKILL.md: --detach を使う条件（依存マニフェストを変更するタスク）が明記 ---
+case "$H112_RS_STEP3" in
+  *'依存マニフェスト'*'package.json'*'lockfile'*'--detach'*)
+    pass "SKILL.md: Step 3 雛形に依存マニフェストを変更するタスクで --detach を使う条件が明記されている（#112）" ;;
+  *)
+    fail "SKILL.md: Step 3 雛形に依存マニフェストを変更するタスクで --detach を使う条件が明記されている（#112）" \
+      "$H112_RS_STEP3" ;;
+esac
+
+# --- skills/run/SKILL.md: Step 3 雛形に駆動先プロジェクト固有の値（共有ディレクトリ名・
+#     lockfile名等）をハードコードしていない（プレースホルダのみで表現されている） ---
+if printf '%s\n' "$H112_RS_STEP3" | grep -Fq -- 'yarn.lock'; then
+  fail "SKILL.md: Step 3 雛形に駆動先プロジェクト固有の値をハードコードしていない（#112）" \
+    "$H112_RS_STEP3"
+else
+  pass "SKILL.md: Step 3 雛形に駆動先プロジェクト固有の値をハードコードしていない（#112）"
+fi
+
+case "$H112_RS_STEP3" in
+  *'[EPIC_WT_ABSの内容]'*'[SHARED_DIRSの内容]'*)
+    pass "SKILL.md: Step 3 雛形が EPIC_WT_ABS/SHARED_DIRS の内容を汎用プレースホルダで埋め込んでいる（#112）" ;;
+  *)
+    fail "SKILL.md: Step 3 雛形が EPIC_WT_ABS/SHARED_DIRS の内容を汎用プレースホルダで埋め込んでいる（#112）" \
+      "$H112_RS_STEP3" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# share-prepared-dirs.sh: ネストしたエントリのsymlinkターゲット計算（Review #115）
+#
+# symlink のターゲットはリンク自身の親ディレクトリ基準で解決されるため、
+# `packages/app/node_modules` のようにネストしたエントリ（行書式はリポジトリルート相対で
+# あり、モノレポでは主要な用途）ではレーン worktree 基準の相対パスをそのまま使うと誤った
+# ターゲットになり dangling symlink になる（#115）。linked 後に共有元のファイルが実際に
+# レーン側から読めることまで確認する（symlink が正しく解決できていることの検証）。
+# 既存のフィクスチャ（SPD_SCRIPT / spd_make_stub / spd_run）を再利用する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== share-prepared-dirs.sh: ネストしたエントリのsymlinkターゲット計算（Review #115） =="
+
+SPD_NEST_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-nest-source.XXXXXX")"
+SPD_NEST_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-nest-lane.XXXXXX")"
+SPD_NEST_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-nest-calllog.XXXXXX")"
+SPD_NEST_STUB="$(spd_make_stub "$SPD_NEST_CALL_LOG")"
+
+mkdir -p "${SPD_NEST_SOURCE}/packages/app/node_modules"
+printf 'nested-marker\n' > "${SPD_NEST_SOURCE}/packages/app/node_modules/marker.txt"
+# レーン側にも <dir> の親ディレクトリ（packages/app）は既に存在する前提（実運用ではモノレポの
+# ソースツリーとしてコミット済み）。symlink 自体（node_modules）だけを本スクリプトが作る。
+mkdir -p "${SPD_NEST_LANE}/packages/app"
+
+SPD_NEST_OUT="$(spd_run "$SPD_NEST_LANE" "$SPD_NEST_STUB" --source "$SPD_NEST_SOURCE" \
+  --dir "packages/app/node_modules")"
+SPD_NEST_EXIT=$?
+assert_exit_code "ネストしたエントリ: exit 0（#115）" 0 "$SPD_NEST_EXIT"
+
+case "$SPD_NEST_OUT" in
+  *"linked"*"packages/app/node_modules"*)
+    pass "ネストしたエントリ: linked が出る（#115）" ;;
+  *)
+    fail "ネストしたエントリ: linked が出る（#115）" "output=[${SPD_NEST_OUT}]" ;;
+esac
+
+case "$SPD_NEST_OUT" in
+  *"prep=skip"*)
+    pass "ネストしたエントリ: linked のみのとき prep=skip（#115）" ;;
+  *)
+    fail "ネストしたエントリ: linked のみのとき prep=skip（#115）" "output=[${SPD_NEST_OUT}]" ;;
+esac
+
+# 本題: linked 後、共有元のファイルがレーン側から symlink を辿って実際に読める
+# （リンク位置基準にターゲットが補正されていないと dangling になり、ここが失敗する）
+assert_eq "ネストしたエントリ: linked 後、共有元のファイルがレーン側から読める（#115）" \
+  "nested-marker" \
+  "$(cat "${SPD_NEST_LANE}/packages/app/node_modules/marker.txt" 2>/dev/null || echo "READ_FAILED")"
+
+# ---------------------------------------------------------------------------
+# share-prepared-dirs.sh: 混在ケース（linked 1件 + no-source 1件）+ --run-prep で
+# 共有元が書き換えられない（Review #116）
+#
+# エントリが複数あり一部だけ linked・残りが no-source になると prep=run になり、
+# --run-prep のコマンド（yarn install 等）が「linked 済みの symlink を張ったまま」
+# レーンで実行されうる。install はレーンの <dir>（= 共有元への symlink）へ書き込むため、
+# 対策が無いと共有元と他レーンが参照している実体を書き換えてしまう（issue #104 と同種の
+# 破損をレーンをまたいで再現しうる）。--run-prep 実行直前に linked 済みエントリの共有symlink
+# を解除する修正により、準備コマンドが共有元へ書き込まないことを検証する。
+# 既存のフィクスチャ（SPD_SCRIPT / spd_make_stub / spd_run）を再利用する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== share-prepared-dirs.sh: 混在ケース + --run-prep で共有元が書き換えられない（Review #116） =="
+
+SPD116_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-116-source.XXXXXX")"
+SPD116_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-116-lane.XXXXXX")"
+SPD116_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-116-calllog.XXXXXX")"
+SPD116_STUB="$(spd_make_stub "$SPD116_CALL_LOG")"
+
+mkdir -p "${SPD116_SOURCE}/shared_ok"
+printf 'source-content\n' > "${SPD116_SOURCE}/shared_ok/original.txt"
+
+SPD116_MARKER="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-116-marker.XXXXXX")"
+SPD116_PREP_CMD="mkdir -p shared_ok && printf 'lane-write\n' > shared_ok/newfile.txt && printf x >> $(printf '%q' "$SPD116_MARKER")"
+
+SPD116_OUT="$(spd_run "$SPD116_LANE" "$SPD116_STUB" --source "$SPD116_SOURCE" \
+  --dir "shared_ok" --dir "no_source_entry" --run-prep "$SPD116_PREP_CMD")"
+SPD116_EXIT=$?
+assert_exit_code "混在+--run-prep ケース: 準備コマンド成功で exit 0（#116）" 0 "$SPD116_EXIT"
+
+case "$SPD116_OUT" in
+  *"linked"*"shared_ok"*)
+    pass "混在+--run-prep ケース: shared_ok は linked と報告される（#116）" ;;
+  *)
+    fail "混在+--run-prep ケース: shared_ok は linked と報告される（#116）" "output=[${SPD116_OUT}]" ;;
+esac
+
+case "$SPD116_OUT" in
+  *"skip"*"no_source_entry"*"reason"*"no-source"*)
+    pass "混在+--run-prep ケース: no_source_entry は skip reason no-source（#116）" ;;
+  *)
+    fail "混在+--run-prep ケース: no_source_entry は skip reason no-source（#116）" "output=[${SPD116_OUT}]" ;;
+esac
+
+case "$SPD116_OUT" in
+  *"prep=run"*)
+    pass "混在+--run-prep ケース: 一部が no-source のため prep=run（#116）" ;;
+  *)
+    fail "混在+--run-prep ケース: 一部が no-source のため prep=run（#116）" "output=[${SPD116_OUT}]" ;;
+esac
+
+assert_eq "混在+--run-prep ケース: --run-prep のコマンドが実行される（#116）" \
+  "yes" "$([ -s "$SPD116_MARKER" ] && echo yes || echo no)"
+
+# 本題1: 共有元の shared_ok に、レーンで実行された準備コマンドの書き込みが入り込んでいない
+assert_eq "混在+--run-prep ケース: 共有元の shared_ok に newfile.txt が書き込まれていない（#116）" \
+  "no" "$([ -e "${SPD116_SOURCE}/shared_ok/newfile.txt" ] && echo yes || echo no)"
+
+# 共有元の既存ファイルも変化していない
+assert_eq "混在+--run-prep ケース: 共有元の既存ファイルが変化していない（#116）" \
+  "source-content" "$(cat "${SPD116_SOURCE}/shared_ok/original.txt" 2>/dev/null || echo "READ_FAILED")"
+
+# 本題2: --run-prep 実行前に共有symlinkが解除され、レーン側 shared_ok は実体ディレクトリに
+# なっており、準備コマンドの書き込みはレーン側だけに反映されている
+assert_eq "混在+--run-prep ケース: --run-prep 前に共有symlinkが解除されレーン側は実体ディレクトリになる（#116）" \
+  "no" "$([ -L "${SPD116_LANE}/shared_ok" ] && echo yes || echo no)"
+
+assert_eq "混在+--run-prep ケース: レーン側 shared_ok に準備コマンドの書き込みが反映されている（#116）" \
+  "lane-write" "$(cat "${SPD116_LANE}/shared_ok/newfile.txt" 2>/dev/null || echo "READ_FAILED")"
 
 # ---------------------------------------------------------------------------
 # 結果集計

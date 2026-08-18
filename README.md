@@ -222,6 +222,13 @@ bash scripts/cleanup-lane-worktrees.sh --epic-branch <ブランチ> \
   --lane-branch <ブランチ> [--lane-branch <ブランチ> ...] --dry-run   # 削除対象と判定理由だけ確認
 ```
 
+**共有 symlink と `cleanup-lane-worktrees.sh` の関係**: Epic の `## 共有ディレクトリ` 節で
+`node_modules` 以外（`vendor` 等）を共有した場合、既定の `--unlink-dir node_modules` だけでは
+その symlink が解除されないまま `git worktree remove --force` が走り、symlink 越しに共有元
+（Epic 専用 worktree）の実体を削除してしまう。`--unlink-dir <名前>`（繰り返し可、既定
+`node_modules`）で共有対象の名前を明示的に渡すこと。`## 共有ディレクトリ` 節が宣言する
+ディレクトリ名は、run のクリーンアップ処理からそのまま `--unlink-dir` として渡される。
+
 ## 並列実行（ウェーブ実行）
 
 `/dev-workflow:run` は Task issue が宣言した依存関係だけを根拠に、依存の無いタスクを**ウェーブ単位で並列実行**する。1タスクずつ直列に流していた従来方式に対し、独立したタスクの待ち時間を短縮する。
@@ -415,6 +422,39 @@ built-in ランナー（go/jest/pytest）と異なる出力形式のプロジェ
 ````
 
 節があれば run がその内容を `DEV_WORKFLOW_SKIP_PATTERN` として読み取り、Step 3 の各 generator プロンプトと統合ゲートの両方に渡す（`## 準備コマンド` 節と同じ抽出方法）。節が無ければ何も設定されず、built-in ランナーの判定だけが行われる。`skips=unknown` は「0件」を意味しない。built-in ランナー以外の形式で run を止めずに進めるための既定の逃げ道であり、正しい件数を知るには本節でパターンを明記する必要がある。
+
+### Epic の `## 共有ディレクトリ` 節
+
+`/dev-workflow:run` の並列レーンでは、generator の isolation worktree がタスクごとに新規作成
+されるため、`## 準備コマンド` 節が `node_modules` / `vendor` 等の**大量のファイルを含む
+ディレクトリ**を生成する場合、レーンごとにフル実行すると支配的なコストになる（issue #104。
+Windows + Docker Desktop のバインドマウント上で `yarn install` 単独実行が約20分、
+5ウェーブ構成の run 全体で install 待ちが総所要時間の半分以上を占めた実測がある）。
+
+`## 共有ディレクトリ` 節は、Epic 専用 worktree に1回だけ作った準備成果ディレクトリを、
+各レーンへ**コンテナ内から張った symlink** で共有するための宣言である。書式は空白区切りで
+1行に「共有するディレクトリ」と「フィンガープリントファイル」を並べる（すべて
+リポジトリルート相対）。
+
+````markdown
+## 共有ディレクトリ
+
+```
+node_modules  yarn.lock package.json
+```
+````
+
+- **フィンガープリントには lockfile を必ず書くこと。** 書かないと、依存が変わった後も
+  古い成果を共有し続けてしまう
+- 節があれば run がその内容を Step 3 の各 generator プロンプトへ渡し、`scripts/share-prepared-dirs.sh`
+  が Epic 専用 worktree の成果ディレクトリへの symlink 作成を試みる
+- **節が無ければ何もしない**（共有せず、現行どおり各レーンで準備コマンドをフル実行する。
+  既存 Epic に完全後方互換）
+- symlink 作成に失敗した場合（共有元が無い・フィンガープリント不一致等）は、フォールバックとして
+  `## 準備コマンド` 節の内容が実行される
+- 依存を追加・更新するタスク（`package.json` / lockfile 等を変更するタスク）では、install 系
+  コマンドの前に `share-prepared-dirs.sh --detach` で共有リンクを解除してから install する
+  必要がある（generator へは run が指示するが、人間が挙動を追えるようここにも明記する）
 
 ## YOLOモード（完全自律動作）
 
@@ -685,6 +725,34 @@ project 名の両方が epic 共有のものと分離されます。既存サー
 `sandbox-exec.sh` はこれを検出して stderr に警告しますが、自動では直せません。
 `container_name:` を使わない・ホストポートは固定せずコンテナ側ポートのみ指定する、で回避してください。
 
+**既知の限界（キャッシュ volume）**: `DEV_WORKFLOW_CACHE_PATHS` によるビルドキャッシュの
+volume 化は **dockerfile モード専用**であり、compose モードでは一切マウントされません
+（`sandbox-exec.sh` の `cache_mount_args` は `docker run` を使う dockerfile 分岐でしか
+呼ばれていません）。compose で同等のキャッシュを効かせるには、compose ファイル側で
+named volume を定義する必要があります。**`sandbox-exec.sh` は利用者の compose ファイルへ
+介入しません。** そのままコピーして使えるサンプルは以下のとおりです。
+
+```yaml
+# docker-compose.dev.yml の例（app サービスにキャッシュ用 named volume を並べる）
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/workspace
+      - yarn-cache:/usr/local/share/.cache/yarn
+      - npm-cache:/root/.npm
+      - pip-cache:/root/.cache/pip
+    working_dir: /workspace
+    command: sleep infinity
+
+volumes:
+  yarn-cache:
+  npm-cache:
+  pip-cache:
+```
+
 **後片付け**: compose モードで起動されたコンテナは通常の `dw-sandbox-*` という名前を持たないため、
 `--down` / `--down --all` / `--ls` はいずれも `docker compose ... down`（`-p` / `--project-directory` 付き）
 を使って対応します。詳細は上記「ライフサイクル操作」を参照してください。
@@ -726,6 +794,8 @@ DEV_WORKFLOW_EPIC=epic259                    # --epic 未指定時に参照す�
 DEV_WORKFLOW_COMPOSE_SERVICE=app             # composeモードでexecするサービス名
 DEV_WORKFLOW_COMPOSE_WORKDIR=/workspace      # composeモードでのコンテナ内マウント先の基点
 READABILITY_STDIN_TIMEOUT=5                  # 可読性ガードが引数なし・非tty時にstdinを待つ上限秒数
+DEV_WORKFLOW_SANDBOX_EXEC=path/to/sandbox-exec.sh  # share-prepared-dirs.shが使うsandbox-exec.shのパス
+                                                    # （既定: share-prepared-dirs.shと同じディレクトリ。テストでスタブに差し替える口）
 ```
 
 ## Slack通知
@@ -941,6 +1011,7 @@ generator に委ねると一部しか実行されず回帰を見逃すため（#
 | 判定JSONの強制 | なし（本文から読み取り） | `--output-schema` でスキーマ強制 |
 | 「入力待ち」Slack通知 | `Notification` フック | **なし**（Codexに該当イベントがない） |
 | `watchdog.sh --abort` のブロック | `PreToolUse`が`exit 2`でハードブロック（ツール呼び出しは確実に拒否される） | **ソフトな打ち切り依頼のみ。**`PreToolUse`は`systemMessage`のみ対応で`continue`は読まれないため、ツール呼び出し自体は実行される。確実に止めるにはセッション（`codex exec`／`run-loop.sh`）を人間が中断する |
+| 準備成果ディレクトリの共有（`## 共有ディレクトリ` 節） | 対応（`scripts/share-prepared-dirs.sh`） | **なし。** generator を Epic 専用 worktree 上で直接動かすためレーン worktree が存在せず、そもそも問題が発生しない |
 
 ## このプラグイン自体を開発する場合
 
