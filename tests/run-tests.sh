@@ -10408,6 +10408,179 @@ assert_eq "混在+--run-prep ケース: レーン側 shared_ok に準備コマ�
   "lane-write" "$(cat "${SPD116_LANE}/shared_ok/newfile.txt" 2>/dev/null || echo "READ_FAILED")"
 
 # ---------------------------------------------------------------------------
+# resolve-sandbox.sh: 規約パスのフォールバックとビルドコンテキスト解決（Task #123, Epic #122）
+#
+# ここでは resolve-sandbox.sh を sandbox-exec.sh 経由ではなく直接呼び出す
+# （eval 用の key=value 出力をそのまま plan_value で読む）。
+# ---------------------------------------------------------------------------
+
+echo "== resolve-sandbox.sh: 規約パスのフォールバックとビルドコンテキスト解決（#123） =="
+
+RESOLVE_SANDBOX_SCRIPT="${REPO_ROOT}/scripts/resolve-sandbox.sh"
+
+normalize_test_path() {
+  # normalize_test_path <dir>  resolve-sandbox.sh 内の normalize_dir と同じ作法で正規化する
+  ( cd "$1" 2>/dev/null && { pwd -W 2>/dev/null || pwd; } )
+}
+
+# --- 受け入れ条件1・2: リポジトリ内に何も無く規約パスの Dockerfile.dev だけがある ---
+RS1_REPO="$(make_temp_repo)"
+RS1_NAME="$(basename "$RS1_REPO")"
+RS1_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-sandboxhome.XXXXXX")"
+mkdir -p "${RS1_HOME}/${RS1_NAME}"
+cat > "${RS1_HOME}/${RS1_NAME}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+
+RS1_OUTPUT="$(
+  cd "$RS1_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$RS1_HOME" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "規約パス: Dockerfile.devのみ -> mode=dockerfile（受け入れ条件1）" \
+  "dockerfile" "$(plan_value DEV_WORKFLOW_SANDBOX_MODE "$RS1_OUTPUT")"
+assert_eq "規約パス: DEV_WORKFLOW_SANDBOX_DOCKERFILEが規約パスのフルパスになる（受け入れ条件1）" \
+  "${RS1_HOME}/${RS1_NAME}/Dockerfile.dev" "$(plan_value DEV_WORKFLOW_SANDBOX_DOCKERFILE "$RS1_OUTPUT")"
+assert_eq "規約パス: build contextがリポジトリルートになる（受け入れ条件2）" \
+  "$(normalize_test_path "$RS1_REPO")" "$(plan_value DEV_WORKFLOW_SANDBOX_CONTEXT "$RS1_OUTPUT")"
+
+# --- 受け入れ条件3: リポジトリ内に何も無く規約パスの docker-compose.dev.yml だけがある ---
+RS3_REPO="$(make_temp_repo)"
+RS3_NAME="$(basename "$RS3_REPO")"
+RS3_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-sandboxhome.XXXXXX")"
+mkdir -p "${RS3_HOME}/${RS3_NAME}"
+cat > "${RS3_HOME}/${RS3_NAME}/docker-compose.dev.yml" <<'EOF'
+services:
+  app:
+    image: alpine
+EOF
+
+RS3_OUTPUT="$(
+  cd "$RS3_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$RS3_HOME" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "規約パス: composeのみ -> mode=compose（受け入れ条件3）" \
+  "compose" "$(plan_value DEV_WORKFLOW_SANDBOX_MODE "$RS3_OUTPUT")"
+assert_eq "規約パス: DEV_WORKFLOW_SANDBOX_COMPOSEが規約パスのフルパスになる（受け入れ条件3）" \
+  "${RS3_HOME}/${RS3_NAME}/docker-compose.dev.yml" "$(plan_value DEV_WORKFLOW_SANDBOX_COMPOSE "$RS3_OUTPUT")"
+
+# --- 受け入れ条件4: リポジトリ内に Dockerfile.dev がある場合、規約パスにもファイルがあっても
+#     リポジトリ内が勝つ（フォールバックであることの確認） ---
+RS4_REPO="$(make_temp_repo)"
+cat > "${RS4_REPO}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+(
+  cd "$RS4_REPO" || exit 1
+  git add Dockerfile.dev
+  git commit -q -m "add local dockerfile"
+) >/dev/null 2>&1
+RS4_NAME="$(basename "$RS4_REPO")"
+RS4_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-sandboxhome.XXXXXX")"
+mkdir -p "${RS4_HOME}/${RS4_NAME}"
+cat > "${RS4_HOME}/${RS4_NAME}/Dockerfile.dev" <<'EOF'
+FROM alpine
+# convention should be ignored
+EOF
+
+RS4_OUTPUT="$(
+  cd "$RS4_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$RS4_HOME" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "規約パス: リポジトリ内Dockerfile.devが規約パスより優先される（受け入れ条件4）" \
+  "Dockerfile.dev" "$(plan_value DEV_WORKFLOW_SANDBOX_DOCKERFILE "$RS4_OUTPUT")"
+
+# --- 受け入れ条件5: リポジトリ内 Dockerfile がサブディレクトリにある場合、build context は
+#     従来どおり dirname(Dockerfile) のまま（リポジトリルート直下では判定できないため
+#     サブディレクトリに置いて確認する。後方互換） ---
+RS5_REPO="$(make_temp_repo)"
+mkdir -p "${RS5_REPO}/sub"
+cat > "${RS5_REPO}/sub/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+(
+  cd "$RS5_REPO" || exit 1
+  git add sub/Dockerfile.dev
+  git commit -q -m "add sub dockerfile"
+) >/dev/null 2>&1
+
+RS5_OUTPUT="$(
+  cd "$RS5_REPO" || exit 1
+  DEV_WORKFLOW_DOCKERFILE="sub/Dockerfile.dev" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "リポジトリ内Dockerfile: build contextは従来どおりdirname(Dockerfile)のまま（受け入れ条件5）" \
+  "$(normalize_test_path "${RS5_REPO}/sub")" "$(plan_value DEV_WORKFLOW_SANDBOX_CONTEXT "$RS5_OUTPUT")"
+
+# --- 受け入れ条件6: DEV_WORKFLOW_DOCKER_BUILD_CONTEXT を指定すると、リポジトリ内 Dockerfile
+#     でもその値が採用される ---
+RS6_REPO="$(make_temp_repo)"
+cat > "${RS6_REPO}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+(
+  cd "$RS6_REPO" || exit 1
+  git add Dockerfile.dev
+  git commit -q -m "add dockerfile"
+) >/dev/null 2>&1
+RS6_CUSTOM_CONTEXT="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-buildctx.XXXXXX")"
+
+RS6_OUTPUT="$(
+  cd "$RS6_REPO" || exit 1
+  DEV_WORKFLOW_DOCKER_BUILD_CONTEXT="$RS6_CUSTOM_CONTEXT" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "DEV_WORKFLOW_DOCKER_BUILD_CONTEXT指定時はその値が採用される（受け入れ条件6）" \
+  "$(normalize_test_path "$RS6_CUSTOM_CONTEXT")" "$(plan_value DEV_WORKFLOW_SANDBOX_CONTEXT "$RS6_OUTPUT")"
+
+# --- 受け入れ条件7: 規約パスにも何も無ければ mode=none のまま ---
+RS7_REPO="$(make_temp_repo)"
+RS7_NAME="$(basename "$RS7_REPO")"
+RS7_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-sandboxhome.XXXXXX")"
+mkdir -p "${RS7_HOME}/${RS7_NAME}"
+
+RS7_OUTPUT="$(
+  cd "$RS7_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$RS7_HOME" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "規約パスにも何も無ければmode=noneのまま（受け入れ条件7）" \
+  "none" "$(plan_value DEV_WORKFLOW_SANDBOX_MODE "$RS7_OUTPUT")"
+
+# --- 受け入れ条件8: worktree から呼んでも規約パスの <repo> 部分が変わらない
+#     （既存の「hash が worktree で変わらない」テストと同じ作り方で確認する） ---
+RS8_REPO="$(make_temp_repo)"
+RS8_NAME="$(basename "$RS8_REPO")"
+RS8_WT="${RS8_REPO}/.claude/worktrees/agent-rs8"
+make_worktree "$RS8_REPO" "$RS8_WT" "rs8-branch"
+RS8_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-sandboxhome.XXXXXX")"
+mkdir -p "${RS8_HOME}/${RS8_NAME}"
+cat > "${RS8_HOME}/${RS8_NAME}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+
+RS8_ROOT_OUTPUT="$(
+  cd "$RS8_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$RS8_HOME" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+RS8_WT_OUTPUT="$(
+  cd "$RS8_WT" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$RS8_HOME" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "規約パス: worktreeから呼んでもmode=dockerfileになる（受け入れ条件8）" \
+  "dockerfile" "$(plan_value DEV_WORKFLOW_SANDBOX_MODE "$RS8_WT_OUTPUT")"
+assert_eq "規約パス: worktreeから呼んでもDockerfileのフルパスがリポジトリルートから呼んだ場合と一致する（受け入れ条件8）" \
+  "$(plan_value DEV_WORKFLOW_SANDBOX_DOCKERFILE "$RS8_ROOT_OUTPUT")" "$(plan_value DEV_WORKFLOW_SANDBOX_DOCKERFILE "$RS8_WT_OUTPUT")"
+assert_eq "規約パス: worktreeから呼んでもイメージタグ(hash含む)がリポジトリルートから呼んだ場合と一致する（受け入れ条件8）" \
+  "$(plan_value DEV_WORKFLOW_SANDBOX_IMAGE "$RS8_ROOT_OUTPUT")" "$(plan_value DEV_WORKFLOW_SANDBOX_IMAGE "$RS8_WT_OUTPUT")"
+
+# 受け入れ条件9（shellcheck / bash -n）は冒頭の全 scripts/*.sh 走査で resolve-sandbox.sh も
+# 対象になっているため、ここでの追加テストは不要。
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
