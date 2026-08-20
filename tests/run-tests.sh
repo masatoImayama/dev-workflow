@@ -10986,6 +10986,63 @@ assert_eq "規約パス: worktreeから呼んでもイメージタグ(hash含む
 # 対象になっているため、ここでの追加テストは不要。
 
 # ---------------------------------------------------------------------------
+# skills/run/SKILL.md・skills-codex/dev-workflow-run/SKILL.md:
+# mode=none 時の案内が供給経路3択になっている（Task #128）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== mode=none 時の案内メッセージ（供給経路3択、#128） =="
+
+MODE_NONE_OLD_MSG="プロジェクトルートに開発用Dockerfileまたはcomposeファイルを配置してください"
+
+for f in "skills/run/SKILL.md" "skills-codex/dev-workflow-run/SKILL.md"; do
+  MN_TARGET="${REPO_ROOT}/${f}"
+
+  if grep -qF "$MODE_NONE_OLD_MSG" "$MN_TARGET"; then
+    fail "${f}: mode=none 案内から旧文言（プロジェクトルートに配置一択）が消えている（#128）" \
+      "旧文言がまだ見つかりました"
+  else
+    pass "${f}: mode=none 案内から旧文言（プロジェクトルートに配置一択）が消えている（#128）"
+  fi
+
+  MN_BLOCK="$(awk '/mode=none\$.;/{f=1} f{print} f&&/^fi$/{exit}' "$MN_TARGET")"
+
+  case "$MN_BLOCK" in
+    *'規約パスに置く（推奨）'*'~/.claude/dev-workflow/sandbox/'*)
+      pass "${f}: mode=none 案内に選択肢1（規約パス）がある（#128）" ;;
+    *)
+      fail "${f}: mode=none 案内に選択肢1（規約パス）がある（#128）" "$MN_BLOCK" ;;
+  esac
+
+  case "$MN_BLOCK" in
+    *'環境変数で渡す'*'DEV_WORKFLOW_DOCKERFILE'*'DEV_WORKFLOW_DOCKER_COMPOSE_FILE'*'DEV_WORKFLOW_DOCKER_IMAGE'*)
+      pass "${f}: mode=none 案内に選択肢2（環境変数）がある（#128）" ;;
+    *)
+      fail "${f}: mode=none 案内に選択肢2（環境変数）がある（#128）" "$MN_BLOCK" ;;
+  esac
+
+  case "$MN_BLOCK" in
+    *'リポジトリ直下に置いてコミットする'*)
+      pass "${f}: mode=none 案内に選択肢3（リポジトリ直下）がある（#128）" ;;
+    *)
+      fail "${f}: mode=none 案内に選択肢3（リポジトリ直下）がある（#128）" "$MN_BLOCK" ;;
+  esac
+
+  MN_SYNTAX_TMP="$(mktemp "${TMPDIR:-/tmp}/dw-test-mode-none.XXXXXX")"
+  {
+    echo 'PLAN="mode=none"'
+    printf '%s\n' "$MN_BLOCK"
+  } > "$MN_SYNTAX_TMP"
+  if bash -n "$MN_SYNTAX_TMP" 2>/dev/null; then
+    pass "${f}: mode=none 案内ブロックが bash として構文的に妥当である（#128）"
+  else
+    fail "${f}: mode=none 案内ブロックが bash として構文的に妥当である（#128）" \
+      "$(bash -n "$MN_SYNTAX_TMP" 2>&1)"
+  fi
+  rm -f "$MN_SYNTAX_TMP"
+done
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
