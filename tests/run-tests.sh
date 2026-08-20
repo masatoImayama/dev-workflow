@@ -10484,6 +10484,47 @@ assert_eq "check-repo-hygiene.sh: リポジトリ外を明示指定したDockerf
 # （bash -n（構文チェック）／shellcheck（利用可能な場合のみ）」の各セクション）で
 # check-repo-hygiene.sh も対象に含まれているため、ここでは重複させない。
 
+# ---------------------------------------------------------------------------
+# Task #134: README.mdのSlack設定節が.gitignore追記を指示し続け非注入原則と
+# 矛盾していた点の回帰テスト（#122一括レビュー指摘、由来: #130）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #134: README.mdのSlack設定節に.gitignore追記案内が残っていない =="
+
+# --- README.md に「.claude/slack-webhook」を.gitignoreへ追記する案内が残っていない ---
+if grep -Fq -- 'echo ".claude/slack-webhook" >> .gitignore' "${REPO_ROOT}/README.md"; then
+  fail "README.md: Slack設定節に『.claude/slack-webhookを.gitignoreに追記する』案内が残っていない（#134）" \
+    "$(grep -n -- 'echo ".claude/slack-webhook" >> .gitignore' "${REPO_ROOT}/README.md")"
+else
+  pass "README.md: Slack設定節に『.claude/slack-webhookを.gitignoreに追記する』案内が残っていない（#134）"
+fi
+
+# --- README.md のSlack設定節が.git/info/excludeによる自動除外を案内している ---
+README_SLACK_SECTION="$(awk '/^## Slack通知/{f=1} /^### 通知されるタイミング/{f=0} f' "${REPO_ROOT}/README.md")"
+if [ -z "$README_SLACK_SECTION" ]; then
+  fail "README.md: 『## Slack通知』節が見つかる（前提）（#134）" "節が空でした"
+else
+  pass "README.md: 『## Slack通知』節が見つかる（前提）（#134）"
+fi
+
+case "$README_SLACK_SECTION" in
+  *'.git/info/exclude'*'check-repo-hygiene.sh'*)
+    pass "README.md: Slack設定節が.git/info/excludeによる自動除外とcheck-repo-hygiene.shでの整備を案内している（#134）" ;;
+  *)
+    fail "README.md: Slack設定節が.git/info/excludeによる自動除外とcheck-repo-hygiene.shでの整備を案内している（#134）" \
+      "$README_SLACK_SECTION" ;;
+esac
+
+# --- README.md のSlack設定節にWebhook URLが秘密情報である旨の注意が残っている ---
+case "$README_SLACK_SECTION" in
+  *'秘密情報'*)
+    pass "README.md: Slack設定節にWebhook URLが秘密情報である旨の注意が残っている（#134）" ;;
+  *)
+    fail "README.md: Slack設定節にWebhook URLが秘密情報である旨の注意が残っている（#134）" \
+      "$README_SLACK_SECTION" ;;
+esac
+
 echo ""
 echo "== Task #107: Epic本文の『## 共有ディレクトリ』節がplanner・共通ルールに定義されている =="
 
