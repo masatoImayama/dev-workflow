@@ -11424,6 +11424,58 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# resolve-sandbox.sh: 出力を%qでシェルクォートし、eval呼び出し側で空白入りパスが
+# 分割・誤解釈されないこと（Task #132, Epic #122 レビュー指摘 #132）
+#
+# $HOME・リポジトリルートの双方に空白を含む規約パス構成で mode=dockerfile を解決させ、
+# 出力を eval で取り込んだ後、DEV_WORKFLOW_SANDBOX_DOCKERFILE と
+# DEV_WORKFLOW_SANDBOX_CONTEXT が分割されず完全なパスとして復元されることを確認する。
+# ---------------------------------------------------------------------------
+
+echo "== resolve-sandbox.sh: 空白を含むパスでもevalで値が分割されない（#132） =="
+
+RS9_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-space-repo.XXXXXX")"
+RS9_REPO="${RS9_PARENT}/repo with space"
+mkdir -p "$RS9_REPO"
+(
+  cd "$RS9_REPO" || exit 1
+  git init -q
+  git config user.email "dev-workflow-test@example.com"
+  git config user.name "dev-workflow test"
+  printf 'test repo\n' > README.md
+  git add README.md
+  git commit -q -m "init"
+) >/dev/null 2>&1
+
+RS9_NAME="$(basename "$RS9_REPO")"
+RS9_HOME_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-space-home.XXXXXX")"
+RS9_HOME="${RS9_HOME_PARENT}/home with space"
+mkdir -p "${RS9_HOME}/${RS9_NAME}"
+cat > "${RS9_HOME}/${RS9_NAME}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+
+RS9_OUTPUT="$(
+  cd "$RS9_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$RS9_HOME" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+# eval で取り込んだ後の値を確認する（呼び出し側 sandbox-exec.sh / check-repo-hygiene.sh と
+# 同じ作法。空白で分割されていれば以下は途中で切れた値になる）
+RS9_EVAL_RESULT="$(
+  eval "$RS9_OUTPUT"
+  printf 'RS9_MODE=%s\nRS9_DOCKERFILE=%s\nRS9_CONTEXT=%s\n' \
+    "$DEV_WORKFLOW_SANDBOX_MODE" "$DEV_WORKFLOW_SANDBOX_DOCKERFILE" "$DEV_WORKFLOW_SANDBOX_CONTEXT"
+)"
+
+assert_eq "空白入りHOME/リポジトリルート: eval後もmode=dockerfileになる（#132）" \
+  "dockerfile" "$(plan_value RS9_MODE "$RS9_EVAL_RESULT")"
+assert_eq "空白入りHOME/リポジトリルート: eval後もDEV_WORKFLOW_SANDBOX_DOCKERFILEが完全なパスとして復元される（#132）" \
+  "${RS9_HOME}/${RS9_NAME}/Dockerfile.dev" "$(plan_value RS9_DOCKERFILE "$RS9_EVAL_RESULT")"
+assert_eq "空白入りHOME/リポジトリルート: eval後もDEV_WORKFLOW_SANDBOX_CONTEXTが完全なパスとして復元される（#132）" \
+  "$(normalize_test_path "$RS9_REPO")" "$(plan_value RS9_CONTEXT "$RS9_EVAL_RESULT")"
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 

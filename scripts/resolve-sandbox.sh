@@ -198,8 +198,11 @@ if [ "$PRINT" -eq 1 ]; then
   exit 0
 fi
 
-printf 'DEV_WORKFLOW_SANDBOX_MODE=%s\n'       "$MODE"
-printf 'DEV_WORKFLOW_SANDBOX_IMAGE=%s\n'      "$IMAGE"
-printf 'DEV_WORKFLOW_SANDBOX_COMPOSE=%s\n'    "$USE_COMPOSE"
-printf 'DEV_WORKFLOW_SANDBOX_DOCKERFILE=%s\n' "$USE_DOCKERFILE"
-printf 'DEV_WORKFLOW_SANDBOX_CONTEXT=%s\n'    "$BUILD_CONTEXT"
+# eval で取り込む呼び出し側（sandbox-exec.sh, check-repo-hygiene.sh）が空白等を
+# 含む値（$HOME や リポジトリルートに空白がある環境の規約パス等）で分割・誤解釈
+# しないよう、%q でシェルクォートして出力する（issue #132）。
+printf 'DEV_WORKFLOW_SANDBOX_MODE=%q\n'       "$MODE"
+printf 'DEV_WORKFLOW_SANDBOX_IMAGE=%q\n'      "$IMAGE"
+printf 'DEV_WORKFLOW_SANDBOX_COMPOSE=%q\n'    "$USE_COMPOSE"
+printf 'DEV_WORKFLOW_SANDBOX_DOCKERFILE=%q\n' "$USE_DOCKERFILE"
+printf 'DEV_WORKFLOW_SANDBOX_CONTEXT=%q\n'    "$BUILD_CONTEXT"
