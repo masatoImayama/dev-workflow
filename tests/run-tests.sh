@@ -9954,6 +9954,134 @@ else
     "いずれかの見出しが見つかりません"
 fi
 
+# ---------------------------------------------------------------------------
+# check-repo-hygiene.sh（孤立START_MARKER・複数START_MARKER・書き込み失敗時の回帰）（#133）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== check-repo-hygiene.sh（孤立START_MARKER・複数START_MARKER・書き込み失敗の回帰） =="
+
+HYG_MARKER_START='# >>> dev-workflow: ハーネス生成物のローカル除外（自動生成。コミットされません） >>>'
+HYG_MARKER_END='# <<< dev-workflow <<<'
+
+# --- 完了条件(#133): START_MARKERはあるが対応するEND_MARKERが無い（孤立マーカー）場合、
+#     そのマーカー行1行だけが差し替えられ、以降のユーザー行は保持される。
+#     （修正前は末尾に丸ごと追記していたため START_MARKER が2つになり、2回目の実行で
+#      「最初のSTART_MARKER〜追記ブロックのEND_MARKER」が一括差し替えされ、間の
+#      ユーザー行が失われていた） ---
+HYG_REPO6="$(make_temp_repo)"
+HYG_EXCLUDE6="${HYG_REPO6}/.git/info/exclude"
+{
+  echo "user-before-orphan-marker"
+  echo "$HYG_MARKER_START"
+  echo "user-after-orphan-marker-1"
+  echo "user-after-orphan-marker-2"
+} > "$HYG_EXCLUDE6"
+
+( cd "$HYG_REPO6" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1
+HYG_EXCLUDE6_CONTENT="$(cat -- "$HYG_EXCLUDE6")"
+
+case "$HYG_EXCLUDE6_CONTENT" in
+  *'user-before-orphan-marker'*'user-after-orphan-marker-1'*'user-after-orphan-marker-2'*)
+    pass "check-repo-hygiene.sh: 孤立START_MARKER修正時にユーザー行（前後とも）が保持される（#133）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 孤立START_MARKER修正時にユーザー行（前後とも）が保持される（#133）" \
+      "$HYG_EXCLUDE6_CONTENT" ;;
+esac
+
+HYG_EXCLUDE6_START_COUNT="$(grep -Fc -- "$HYG_MARKER_START" "$HYG_EXCLUDE6")"
+assert_eq "check-repo-hygiene.sh: 孤立START_MARKER修正後はSTART_MARKERが1つだけになる（複製されない）（#133）" \
+  "1" "$HYG_EXCLUDE6_START_COUNT"
+
+case "$HYG_EXCLUDE6_CONTENT" in
+  *"$HYG_MARKER_START"*'/.claude/settings.local.json'*"$HYG_MARKER_END"*)
+    pass "check-repo-hygiene.sh: 孤立START_MARKER修正時に正しいブロックへ差し替わる（#133）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 孤立START_MARKER修正時に正しいブロックへ差し替わる（#133）" \
+      "$HYG_EXCLUDE6_CONTENT" ;;
+esac
+
+# 2回目実行しても内容は変わらず（冪等）、ユーザー行も引き続き失われない
+HYG_EXCLUDE6_BEFORE2="$(cat -- "$HYG_EXCLUDE6")"
+( cd "$HYG_REPO6" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1
+HYG_EXCLUDE6_AFTER2="$(cat -- "$HYG_EXCLUDE6")"
+assert_eq "check-repo-hygiene.sh: 孤立START_MARKER修正後は2回目実行しても内容が変わらない（冪等）（#133）" \
+  "$HYG_EXCLUDE6_BEFORE2" "$HYG_EXCLUDE6_AFTER2"
+case "$HYG_EXCLUDE6_AFTER2" in
+  *'user-after-orphan-marker-1'*'user-after-orphan-marker-2'*)
+    pass "check-repo-hygiene.sh: 2回目実行後もユーザー行が消えない（レビュー#133指摘の回帰）（#133）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 2回目実行後もユーザー行が消えない（レビュー#133指摘の回帰）（#133）" \
+      "$HYG_EXCLUDE6_AFTER2" ;;
+esac
+
+# --- 完了条件(#133): START_MARKERが複数（完全なブロックが2つ）存在する場合、
+#     最初のブロックだけが正として差し替えられ、2つめ以降のブロックには一切触れない ---
+HYG_REPO7="$(make_temp_repo)"
+HYG_EXCLUDE7="${HYG_REPO7}/.git/info/exclude"
+{
+  echo "outer-before"
+  echo "$HYG_MARKER_START"
+  echo "/.claude/tampered-first-block"
+  echo "$HYG_MARKER_END"
+  echo "user-line-between-blocks"
+  echo "$HYG_MARKER_START"
+  echo "/.claude/second-block-should-be-untouched"
+  echo "$HYG_MARKER_END"
+  echo "outer-after"
+} > "$HYG_EXCLUDE7"
+
+( cd "$HYG_REPO7" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1
+HYG_EXCLUDE7_CONTENT="$(cat -- "$HYG_EXCLUDE7")"
+
+case "$HYG_EXCLUDE7_CONTENT" in
+  *'/.claude/tampered-first-block'*)
+    fail "check-repo-hygiene.sh: 複数START_MARKER時、最初のブロックは期待値に復元される（#133）" \
+      "$HYG_EXCLUDE7_CONTENT" ;;
+  *)
+    pass "check-repo-hygiene.sh: 複数START_MARKER時、最初のブロックは期待値に復元される（#133）" ;;
+esac
+
+case "$HYG_EXCLUDE7_CONTENT" in
+  *'/.claude/second-block-should-be-untouched'*)
+    pass "check-repo-hygiene.sh: 複数START_MARKER時、2つめ以降のブロックには触れない（#133）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 複数START_MARKER時、2つめ以降のブロックには触れない（#133）" \
+      "$HYG_EXCLUDE7_CONTENT" ;;
+esac
+
+case "$HYG_EXCLUDE7_CONTENT" in
+  *'outer-before'*'user-line-between-blocks'*'outer-after'*)
+    pass "check-repo-hygiene.sh: 複数START_MARKER時もマーカー外のユーザー行は保持される（#133）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 複数START_MARKER時もマーカー外のユーザー行は保持される（#133）" \
+      "$HYG_EXCLUDE7_CONTENT" ;;
+esac
+
+HYG_EXCLUDE7_START_COUNT="$(grep -Fc -- "$HYG_MARKER_START" "$HYG_EXCLUDE7")"
+assert_eq "check-repo-hygiene.sh: 複数START_MARKER時、2つめのSTART_MARKERは意図的に残る（仕様どおり）（#133）" \
+  "2" "$HYG_EXCLUDE7_START_COUNT"
+
+# --- 完了条件(low, #133): .git/info/exclude への書き込みに失敗しても異常終了せず、
+#     警告を出すだけで済ませる（ファイルシステム構造上の失敗を使い、root権限下でも
+#     決定論的に再現できるようにする。permission ビットには依存しない） ---
+HYG_REPO8="$(make_temp_repo)"
+HYG_GITDIR8="${HYG_REPO8}/.git"
+rm -rf -- "${HYG_GITDIR8}/info" 2>/dev/null
+printf 'not-a-directory\n' > "${HYG_GITDIR8}/info"
+
+HYG_FAILWRITE_OUT="$( cd "$HYG_REPO8" && bash "$HYG_SCRIPT" 2>&1 )"
+HYG_FAILWRITE_EXIT=$?
+assert_exit_code "check-repo-hygiene.sh: exclude書き込み失敗時もexitコードは0のまま（#133）" 0 "$HYG_FAILWRITE_EXIT"
+case "$HYG_FAILWRITE_OUT" in
+  *'警告'*'書き込みに失敗しました'*)
+    pass "check-repo-hygiene.sh: exclude書き込み失敗時に警告メッセージを出す（#133）" ;;
+  *)
+    fail "check-repo-hygiene.sh: exclude書き込み失敗時に警告メッセージを出す（#133）" "$HYG_FAILWRITE_OUT" ;;
+esac
+assert_eq "check-repo-hygiene.sh: exclude書き込み失敗時も対象パスは変質しない（in-place破壊を避ける）（#133）" \
+  "not-a-directory" "$(cat -- "${HYG_GITDIR8}/info" 2>/dev/null)"
+
 echo ""
 echo "== share-prepared-dirs.sh（準備成果ディレクトリの共有・共有モード） =="
 
