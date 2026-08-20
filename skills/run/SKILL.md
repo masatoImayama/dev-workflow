@@ -111,8 +111,12 @@ PLAN="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" 
 echo "$PLAN"
 
 if printf '%s\n' "$PLAN" | grep -q '^mode=none$'; then
-  echo "ERROR: Dockerfile.dev または docker-compose.dev.yml が見つかりません"
-  echo "プロジェクトルートに開発用Dockerfileまたはcomposeファイルを配置してください"
+  echo "ERROR: サンドボックス定義が見つかりません（mode=none）"
+  echo "次のいずれかで供給してください（1・2 は駆動先リポジトリを汚しません）:"
+  echo "  1. 規約パスに置く（推奨）: ~/.claude/dev-workflow/sandbox/<リポジトリ名>/Dockerfile.dev"
+  echo "     （または同ディレクトリの docker-compose.dev.yml）"
+  echo "  2. 環境変数で渡す: DEV_WORKFLOW_DOCKERFILE / DEV_WORKFLOW_DOCKER_COMPOSE_FILE / DEV_WORKFLOW_DOCKER_IMAGE"
+  echo "  3. リポジトリ直下に置いてコミットする（チームで run を共有する場合のみ）"
   exit 1
 fi
 
