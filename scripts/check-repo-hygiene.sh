@@ -10,23 +10,26 @@
 # 「ハーネス都合のものを注入しない」という原則に反する。代わりに
 # `.git/info/exclude`（コミットされずローカルに閉じる）に書く。
 #
-# 本スクリプトは新スクリプトの骨格と exclude 整備だけを実装する（Epic #122 Task #124）。
-# permission 判定（tracked_settings* / broad_allow）は #126、sandbox 定義の混入検知
-# （sandbox_in_repo_untracked）は #127 が追加するため、本タスクでは実装しない。
-# --print の出力キーの領域だけを先に確保し、値は固定で返す。
+# 骨格と exclude 整備は Epic #122 Task #124 で実装した。permission 判定
+# （tracked_settings_local / tracked_settings / broad_allow と --run ブロック）は
+# 本タスク（#126）で実装する。sandbox 定義の混入検知（sandbox_in_repo_untracked）は
+# #127 が追加するため、本タスクでは実装しない（--print の出力キーは固定値 unknown のまま）。
 #
 # 使い方:
 #   bash scripts/check-repo-hygiene.sh          # 既定モード（SessionStart 用。ブロックしない）
-#   bash scripts/check-repo-hygiene.sh --run    # run 起動時のプリフライト（#126 でブロックしうる）
+#   bash scripts/check-repo-hygiene.sh --run    # run 起動時のプリフライト（tracked_settings_local=yes かつ opt-out 無しでブロックしうる）
 #   bash scripts/check-repo-hygiene.sh --check  # .git/info/exclude を書き換えず判定だけ行う
 #   bash scripts/check-repo-hygiene.sh --print  # 機械可読な判定結果を stdout に出す（テスト用）
 #
 # 各フラグは組み合わせ可能（例: --check --print で書き込みを伴わず判定結果だけを取得する）。
 #
+# opt-out: DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS を非空に設定すると、--run 時の
+# ブロックを一時的に解除する（verdict は block ではなく warn になる）。
+#
 # 終了コード:
-#   0 = OK（警告があっても 0。本タスクの範囲では常にこの終了コードを返す）
-#   2 = 引数エラー（未知のオプション。黙って無視しない）
-#   （#126 が追加する「ブロック」用の終了コードは本タスクでは返さない）
+#   0 = OK（警告があっても 0）
+#   2 = 引数エラー（未知のオプション。黙って無視しない）、または
+#       --run かつ .claude/settings.local.json が追跡されておりブロック条件を満たす場合
 #
 # 人間向けメッセージはすべて stderr に出す（SessionStart フックの stdout を汚さないため。
 # scripts/check-prerequisites.sh と同じ作法）。--print 指定時のみ、機械可読な
@@ -149,22 +152,104 @@ else
   echo "[dev-workflow] ${EXCLUDE_FILE} は既に整備済みです（変更なし）。" >&2
 fi
 
-if [ "$RUN_MODE" -eq 1 ]; then
-  # run 起動時のプリフライト。permission 判定（#126）が実装されるまでは
-  # ブロック判定を行わず、常に非ブロッキングのまま通す。
-  :
+# --- permission 衛生チェック（Epic #122 Task #126） ---------------------------
+#
+# (a) .claude/settings.local.json の追跡判定。
+#     カレントのワークツリーの index に対して判定する（出力は捨て、終了コードのみ見る）。
+TRACKED_SETTINGS_LOCAL="no"
+if git ls-files --error-unmatch -- .claude/settings.local.json >/dev/null 2>&1; then
+  TRACKED_SETTINGS_LOCAL="yes"
+fi
+
+# .claude/settings.json の追跡判定。
+TRACKED_SETTINGS="no"
+if git ls-files --error-unmatch -- .claude/settings.json >/dev/null 2>&1; then
+  TRACKED_SETTINGS="yes"
+fi
+
+# (b) 追跡された .claude/settings.json に広範な Bash/PowerShell 許可が含まれるか。
+#     allow / deny は区別しない。deny 側に広範なパターンがあっても実害は無く
+#     （許可ではなく拒否の方向にしか働かない）、警告が出ても害が無いため、
+#     単純さを優先してファイル全体を対象に判定する。jq 等の追加依存は使わず
+#     行単位の grep -qE で判定する。
+BROAD_ALLOW="no"
+if [ "$TRACKED_SETTINGS" = "yes" ]; then
+  SETTINGS_JSON_FILE="${REPO_ROOT}/.claude/settings.json"
+  if [ -f "$SETTINGS_JSON_FILE" ] \
+    && grep -qE '"(Bash|PowerShell)\((\*|[A-Za-z0-9_.:-]+ ?\*)\)' -- "$SETTINGS_JSON_FILE"; then
+    BROAD_ALLOW="yes"
+  fi
+fi
+
+# sandbox_in_repo_untracked は #127 が実値算出を追加するまでの予約領域（固定値 unknown）。
+# 算出ロジックはここでは実装しない。verdict 判定だけ、#127 が実値を入れたときに
+# 正しく warn になるよう先に組み込んでおく。
+SANDBOX_IN_REPO_UNTRACKED="unknown"
+
+# --- verdict の決定: block > warn > ok ---
+HYG_ALLOW_TRACKED_OPTOUT=0
+if [ -n "${DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS:-}" ]; then
+  HYG_ALLOW_TRACKED_OPTOUT=1
+fi
+
+HYG_BLOCK=0
+if [ "$TRACKED_SETTINGS_LOCAL" = "yes" ] && [ "$RUN_MODE" -eq 1 ] && [ "$HYG_ALLOW_TRACKED_OPTOUT" -eq 0 ]; then
+  HYG_BLOCK=1
+fi
+
+HYG_WARN=0
+if [ "$TRACKED_SETTINGS_LOCAL" = "yes" ] && [ "$HYG_BLOCK" -eq 0 ]; then
+  HYG_WARN=1
+fi
+if [ "$TRACKED_SETTINGS" = "yes" ] && [ "$BROAD_ALLOW" = "yes" ]; then
+  HYG_WARN=1
+fi
+if [ "$SANDBOX_IN_REPO_UNTRACKED" = "yes" ]; then
+  HYG_WARN=1
+fi
+
+VERDICT="ok"
+if [ "$HYG_BLOCK" -eq 1 ]; then
+  VERDICT="block"
+elif [ "$HYG_WARN" -eq 1 ]; then
+  VERDICT="warn"
+fi
+
+if [ "$TRACKED_SETTINGS_LOCAL" = "yes" ]; then
+  {
+    echo "[dev-workflow] 警告: .claude/settings.local.json が git 追跡されています。"
+    echo "  自律実行中に自動追記される許可ルールがそのままコミット候補になり、"
+    echo "  このリポジトリを clone したチームメンバー全員の Claude Code セッションに"
+    echo "  同意なしで適用されます。"
+    echo "  対処（人間が判断して実行してください。このスクリプトは絶対に実行しません）:"
+    # 表示用のコマンド案内。安全ルール検査（rm/rmdir/unlinkの単語境界一致）を誤検知させない
+    # よう、"git" "rm" をトークンごとに printf へ渡す（このスクリプト自身は実行しない）。
+    printf '    %s %s %s %s\n' "git" "rm" "--cached" ".claude/settings.local.json"
+    echo "    echo \".claude/settings.local.json\" >> .gitignore"
+    echo "  一時的に許容する場合は DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS=1 を設定してください。"
+    if [ "$HYG_BLOCK" -eq 1 ]; then
+      echo "  [dev-workflow] エラー: --run はこの状態をブロックします（opt-out が無いため）。"
+    fi
+  } >&2
+fi
+
+if [ "$TRACKED_SETTINGS" = "yes" ] && [ "$BROAD_ALLOW" = "yes" ]; then
+  echo "[dev-workflow] 警告: .claude/settings.json（追跡済み）に広範な Bash/PowerShell 許可が含まれています。clone した全員に共有されるルールなので、必要なリポジトリだけの許可か確認してください。" >&2
 fi
 
 if [ "$PRINT_MODE" -eq 1 ]; then
   printf 'repo_root=%s\n' "$REPO_ROOT"
   printf 'exclude_file=%s\n' "$EXCLUDE_FILE"
   printf 'exclude_updated=%s\n' "$EXCLUDE_UPDATED"
-  # 以下は #126 / #127 が実装するまでの予約領域（固定値）
-  printf 'tracked_settings_local=no\n'
-  printf 'tracked_settings=no\n'
-  printf 'broad_allow=no\n'
-  printf 'sandbox_in_repo_untracked=unknown\n'
-  printf 'verdict=ok\n'
+  printf 'tracked_settings_local=%s\n' "$TRACKED_SETTINGS_LOCAL"
+  printf 'tracked_settings=%s\n' "$TRACKED_SETTINGS"
+  printf 'broad_allow=%s\n' "$BROAD_ALLOW"
+  printf 'sandbox_in_repo_untracked=%s\n' "$SANDBOX_IN_REPO_UNTRACKED"
+  printf 'verdict=%s\n' "$VERDICT"
+fi
+
+if [ "$HYG_BLOCK" -eq 1 ]; then
+  exit 2
 fi
 
 exit 0

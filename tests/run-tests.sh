@@ -9702,6 +9702,115 @@ assert_eq "check-repo-hygiene.sh: --print出力でsandbox_in_repo_untracked=unkn
 assert_eq "check-repo-hygiene.sh: --print出力でverdict=ok（#124）" \
   "ok" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | sed -n 's/^verdict=//p')"
 
+# ---------------------------------------------------------------------------
+# check-repo-hygiene.sh（permission 衛生チェックと --run ブロック）（#126）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== check-repo-hygiene.sh（permission 衛生チェックと --run ブロック） =="
+
+make_hyg_perm_repo() {
+  # make_hyg_perm_repo <dir> <settings_local_json追跡有無:yes|no> <settings_json内容(空なら未作成)> <settings_json追跡有無:yes|no>
+  # 一時 git リポジトリを作り、必要に応じて .claude/settings.local.json /
+  # .claude/settings.json を配置・追跡してパスを返す。
+  local dir="$1" track_local="$2" settings_content="$3" track_settings="$4"
+  (
+    cd "$dir" || exit 1
+    git init -q
+    git config user.email "dev-workflow-test@example.com"
+    git config user.name "dev-workflow test"
+    printf 'test repo\n' > README.md
+    git add README.md
+    git commit -q -m "init"
+    mkdir -p .claude
+    if [ "$track_local" = "yes" ]; then
+      printf '{}\n' > .claude/settings.local.json
+      git add .claude/settings.local.json
+    fi
+    if [ -n "$settings_content" ]; then
+      printf '%s\n' "$settings_content" > .claude/settings.json
+      if [ "$track_settings" = "yes" ]; then
+        git add .claude/settings.json
+      fi
+    fi
+    if [ "$track_local" = "yes" ] || { [ -n "$settings_content" ] && [ "$track_settings" = "yes" ]; }; then
+      git commit -q -m "add .claude settings"
+    fi
+  ) >/dev/null 2>&1
+}
+
+# --- 完了条件1: settings.local.json を追跡した状態で --run すると exit 2、verdict=block ---
+HYG_PERM1="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-perm1.XXXXXX")"
+make_hyg_perm_repo "$HYG_PERM1" "yes" "" "no"
+HYG_PERM1_OUT="$( cd "$HYG_PERM1" && bash "$HYG_SCRIPT" --run --print 2>/dev/null )"
+HYG_PERM1_EXIT=$?
+HYG_PERM1_STDERR="$( cd "$HYG_PERM1" && bash "$HYG_SCRIPT" --run --print 2>&1 1>/dev/null )"
+assert_exit_code "check-repo-hygiene.sh: settings.local.json追跡＋--runでexit 2（#126完了条件1）" 2 "$HYG_PERM1_EXIT"
+assert_eq "check-repo-hygiene.sh: settings.local.json追跡＋--runでverdict=block（#126完了条件1）" \
+  "block" "$(printf '%s\n' "$HYG_PERM1_OUT" | sed -n 's/^verdict=//p')"
+assert_eq "check-repo-hygiene.sh: settings.local.json追跡＋--runでtracked_settings_local=yes（#126完了条件1）" \
+  "yes" "$(printf '%s\n' "$HYG_PERM1_OUT" | sed -n 's/^tracked_settings_local=//p')"
+
+# --- 完了条件2: DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS=1 を付けると exit 0、verdict=warn ---
+HYG_PERM2_OUT="$( cd "$HYG_PERM1" && DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS=1 bash "$HYG_SCRIPT" --run --print 2>/dev/null )"
+HYG_PERM2_EXIT=$?
+assert_exit_code "check-repo-hygiene.sh: opt-out付き--runでexit 0（#126完了条件2）" 0 "$HYG_PERM2_EXIT"
+assert_eq "check-repo-hygiene.sh: opt-out付き--runでverdict=warn（#126完了条件2）" \
+  "warn" "$(printf '%s\n' "$HYG_PERM2_OUT" | sed -n 's/^verdict=//p')"
+
+# --- 完了条件3: --run なし（既定モード）なら exit 0、verdict=warn ---
+HYG_PERM3_OUT="$( cd "$HYG_PERM1" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+HYG_PERM3_EXIT=$?
+assert_exit_code "check-repo-hygiene.sh: 既定モードはexit 0（#126完了条件3）" 0 "$HYG_PERM3_EXIT"
+assert_eq "check-repo-hygiene.sh: 既定モードはverdict=warn（#126完了条件3）" \
+  "warn" "$(printf '%s\n' "$HYG_PERM3_OUT" | sed -n 's/^verdict=//p')"
+
+# --- 完了条件4: settings.local.json が未追跡なら tracked_settings_local=no、--runでもexit 0 ---
+HYG_PERM4="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-perm4.XXXXXX")"
+make_hyg_perm_repo "$HYG_PERM4" "no" "" "no"
+HYG_PERM4_OUT="$( cd "$HYG_PERM4" && bash "$HYG_SCRIPT" --run --print 2>/dev/null )"
+HYG_PERM4_EXIT=$?
+assert_eq "check-repo-hygiene.sh: settings.local.json未追跡でtracked_settings_local=no（#126完了条件4）" \
+  "no" "$(printf '%s\n' "$HYG_PERM4_OUT" | sed -n 's/^tracked_settings_local=//p')"
+assert_exit_code "check-repo-hygiene.sh: settings.local.json未追跡なら--runでもexit 0（#126完了条件4）" 0 "$HYG_PERM4_EXIT"
+
+# --- 完了条件5: settings.json を追跡し "Bash(*)" を含めるとbroad_allow=yesだがexit 0（ブロックしない） ---
+HYG_PERM5="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-perm5.XXXXXX")"
+make_hyg_perm_repo "$HYG_PERM5" "no" '{"permissions":{"allow":["Bash(*)"]}}' "yes"
+HYG_PERM5_OUT="$( cd "$HYG_PERM5" && bash "$HYG_SCRIPT" --run --print 2>/dev/null )"
+HYG_PERM5_EXIT=$?
+assert_eq "check-repo-hygiene.sh: Bash(*)を含む追跡済みsettings.jsonでbroad_allow=yes（#126完了条件5）" \
+  "yes" "$(printf '%s\n' "$HYG_PERM5_OUT" | sed -n 's/^broad_allow=//p')"
+assert_exit_code "check-repo-hygiene.sh: broad_allow=yesでもexit 0（ブロックしない）（#126完了条件5）" 0 "$HYG_PERM5_EXIT"
+
+# --- 完了条件6: "Bash(npm run test:*)" だけを含む追跡済みsettings.jsonではbroad_allow=no（誤検知しない） ---
+HYG_PERM6="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-perm6.XXXXXX")"
+make_hyg_perm_repo "$HYG_PERM6" "no" '{"permissions":{"allow":["Bash(npm run test:*)"]}}' "yes"
+HYG_PERM6_OUT="$( cd "$HYG_PERM6" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: 狭い許可のみの追跡済みsettings.jsonではbroad_allow=no（#126完了条件6）" \
+  "no" "$(printf '%s\n' "$HYG_PERM6_OUT" | sed -n 's/^broad_allow=//p')"
+
+# --- 完了条件7: settings.json が未追跡なら、広範な allow を含んでいてもbroad_allow=no ---
+HYG_PERM7="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-perm7.XXXXXX")"
+make_hyg_perm_repo "$HYG_PERM7" "no" '{"permissions":{"allow":["Bash(*)"]}}' "no"
+HYG_PERM7_OUT="$( cd "$HYG_PERM7" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: settings.json未追跡ならbroad_allow=no（#126完了条件7）" \
+  "no" "$(printf '%s\n' "$HYG_PERM7_OUT" | sed -n 's/^broad_allow=//p')"
+assert_eq "check-repo-hygiene.sh: settings.json未追跡ならtracked_settings=no（#126完了条件7）" \
+  "no" "$(printf '%s\n' "$HYG_PERM7_OUT" | sed -n 's/^tracked_settings=//p')"
+
+# --- 完了条件8: stderrにgit rm --cachedの案内が含まれるが、実際にはgit rmを実行していない
+#     （テスト後もファイルが追跡されたまま） ---
+case "$HYG_PERM1_STDERR" in
+  *'git rm --cached .claude/settings.local.json'*)
+    pass "check-repo-hygiene.sh: stderrにgit rm --cachedの案内が含まれる（#126完了条件8）" ;;
+  *)
+    fail "check-repo-hygiene.sh: stderrにgit rm --cachedの案内が含まれる（#126完了条件8）" "$HYG_PERM1_STDERR" ;;
+esac
+HYG_PERM1_STILL_TRACKED="$( cd "$HYG_PERM1" && git ls-files -- .claude/settings.local.json )"
+assert_eq "check-repo-hygiene.sh: 案内後もsettings.local.jsonは実際には削除されず追跡されたまま（#126完了条件8）" \
+  ".claude/settings.local.json" "$HYG_PERM1_STILL_TRACKED"
+
 echo ""
 echo "== share-prepared-dirs.sh（準備成果ディレクトリの共有・共有モード） =="
 
