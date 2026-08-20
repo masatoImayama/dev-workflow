@@ -9499,6 +9499,209 @@ case "$GEN113_PREP_SECTION" in
       "$GEN113_PREP_SECTION" ;;
 esac
 
+# ---------------------------------------------------------------------------
+# check-repo-hygiene.sh（.git/info/exclude の冪等整備・骨格）（#124）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== check-repo-hygiene.sh（.git/info/exclude の冪等整備） =="
+
+HYG_SCRIPT="${REPO_ROOT}/scripts/check-repo-hygiene.sh"
+
+# --- bash -n が通る ---
+if bash -n "$HYG_SCRIPT" 2>/dev/null; then
+  pass "check-repo-hygiene.sh: bash -n の構文チェックが通る（#124）"
+else
+  fail "check-repo-hygiene.sh: bash -n の構文チェックが通る（#124）"
+fi
+
+# --- rm / rmdir / unlink によるファイル削除が無い（安全ルール）。
+#     share-prepared-dirs.sh のテストと同じ検査方法（コメント行を除外し、単語境界での一致だけを見る） ---
+HYG_FORBIDDEN_HITS="$(grep -v '^[[:space:]]*#' "$HYG_SCRIPT" \
+  | grep -E '(^|[^A-Za-z0-9_])(rm|rmdir|unlink)([[:space:]]|$)' || true)"
+if [ -z "$HYG_FORBIDDEN_HITS" ]; then
+  pass "check-repo-hygiene.sh: rm / rmdir / unlink によるファイル削除が無い（#124）"
+else
+  fail "check-repo-hygiene.sh: rm / rmdir / unlink によるファイル削除が無い（#124）" "$HYG_FORBIDDEN_HITS"
+fi
+
+# --- 未知のオプションで exit 2（完了条件8） ---
+HYG_UNKNOWN_OUT="$(bash "$HYG_SCRIPT" --bogus 2>&1)"
+HYG_UNKNOWN_EXIT=$?
+assert_exit_code "check-repo-hygiene.sh: 未知のオプションで exit 2（#124）" 2 "$HYG_UNKNOWN_EXIT"
+case "$HYG_UNKNOWN_OUT" in
+  *"ERROR:"*"--bogus"*)
+    pass "check-repo-hygiene.sh: 未知のオプションはエラーメッセージ付きで拒否される（黙って無視しない）（#124）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 未知のオプションはエラーメッセージ付きで拒否される（黙って無視しない）（#124）" "$HYG_UNKNOWN_OUT" ;;
+esac
+
+# --- git 管理外のディレクトリで実行しても exit 0、何も書き込まない（完了条件7） ---
+HYG_NONGIT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-nongit.XXXXXX")"
+HYG_NONGIT_EXIT=0
+( cd "$HYG_NONGIT_DIR" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1 || HYG_NONGIT_EXIT=$?
+assert_exit_code "check-repo-hygiene.sh: git管理外ディレクトリで exit 0（#124）" 0 "$HYG_NONGIT_EXIT"
+assert_eq "check-repo-hygiene.sh: git管理外ディレクトリでは .git が作られない（#124）" \
+  "no" "$([ -e "${HYG_NONGIT_DIR}/.git" ] && echo yes || echo no)"
+
+# --- 既定モードは stdout に何も出さない・exit 0（SessionStart 用。stdoutを汚さない） ---
+HYG_REPO_DEFAULT="$(make_temp_repo)"
+HYG_DEFAULT_EXIT=0
+HYG_DEFAULT_OUT="$( (cd "$HYG_REPO_DEFAULT" && bash "$HYG_SCRIPT") 2>/dev/null)" || HYG_DEFAULT_EXIT=$?
+assert_eq "check-repo-hygiene.sh: 既定モードはstdoutに何も出さない（#124）" "" "$HYG_DEFAULT_OUT"
+assert_exit_code "check-repo-hygiene.sh: 既定モードは exit 0（#124）" 0 "$HYG_DEFAULT_EXIT"
+
+# --- --run も本タスクの範囲ではブロックせず exit 0 ---
+HYG_RUN_EXIT=0
+( cd "$HYG_REPO_DEFAULT" && bash "$HYG_SCRIPT" --run ) >/dev/null 2>&1 || HYG_RUN_EXIT=$?
+assert_exit_code "check-repo-hygiene.sh: --run は本タスクの範囲ではブロックせず exit 0（#124）" 0 "$HYG_RUN_EXIT"
+
+# --- 完了条件1: 空の一時 git リポジトリで実行すると .git/info/exclude にブロックが追記される ---
+HYG_REPO1="$(make_temp_repo)"
+( cd "$HYG_REPO1" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1
+HYG_EXCLUDE1="${HYG_REPO1}/.git/info/exclude"
+assert_eq "check-repo-hygiene.sh: 空のリポジトリで .git/info/exclude が作られる（#124）" \
+  "yes" "$([ -f "$HYG_EXCLUDE1" ] && echo yes || echo no)"
+
+HYG_EXCLUDE1_CONTENT="$(cat -- "$HYG_EXCLUDE1" 2>/dev/null)"
+case "$HYG_EXCLUDE1_CONTENT" in
+  *'# >>> dev-workflow: ハーネス生成物のローカル除外（自動生成。コミットされません） >>>'*'/.claude/.dev-workflow-*'*'/.claude/worktrees/'*'/.claude/agent-tokens.tsv'*'/.claude/slack-webhook'*'/.claude/settings.local.json'*'# <<< dev-workflow <<<'*)
+    pass "check-repo-hygiene.sh: 期待されるブロック内容が書き込まれる（#124）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 期待されるブロック内容が書き込まれる（#124）" "$HYG_EXCLUDE1_CONTENT" ;;
+esac
+
+# --- 完了条件2: 2回連続で実行しても内容は1度しか変わらない（冪等）。2回目は exclude_updated=no ---
+HYG_CONTENT_BEFORE="$(cat -- "$HYG_EXCLUDE1")"
+HYG_PRINT2="$( cd "$HYG_REPO1" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+HYG_CONTENT_AFTER="$(cat -- "$HYG_EXCLUDE1")"
+assert_eq "check-repo-hygiene.sh: 2回目実行後も .git/info/exclude の内容は変わらない（冪等）（#124）" \
+  "$HYG_CONTENT_BEFORE" "$HYG_CONTENT_AFTER"
+assert_eq "check-repo-hygiene.sh: 2回目実行時は exclude_updated=no（#124）" \
+  "no" "$(printf '%s\n' "$HYG_PRINT2" | sed -n 's/^exclude_updated=//p')"
+
+# --- 完了条件3: ユーザーが事前に書いた既存行（マーカー外）が1行も失われない ---
+HYG_REPO2="$(make_temp_repo)"
+HYG_EXCLUDE2="${HYG_REPO2}/.git/info/exclude"
+printf 'existing-line-1\nexisting-line-2\n' > "$HYG_EXCLUDE2"
+( cd "$HYG_REPO2" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1
+HYG_EXCLUDE2_CONTENT="$(cat -- "$HYG_EXCLUDE2")"
+case "$HYG_EXCLUDE2_CONTENT" in
+  *'existing-line-1'*'existing-line-2'*)
+    pass "check-repo-hygiene.sh: 事前に書かれた既存行が保持される（#124）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 事前に書かれた既存行が保持される（#124）" "$HYG_EXCLUDE2_CONTENT" ;;
+esac
+case "$HYG_EXCLUDE2_CONTENT" in
+  *'# >>> dev-workflow: ハーネス生成物のローカル除外（自動生成。コミットされません） >>>'*)
+    pass "check-repo-hygiene.sh: 既存行があってもブロックが追記される（#124）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 既存行があってもブロックが追記される（#124）" "$HYG_EXCLUDE2_CONTENT" ;;
+esac
+
+# --- 完了条件4: ブロック内容が改変されている状態で実行すると、ブロック内だけが期待値に
+#     復元され、マーカー外の行（前方・後方とも）は変更されない ---
+HYG_REPO3="$(make_temp_repo)"
+HYG_EXCLUDE3="${HYG_REPO3}/.git/info/exclude"
+{
+  echo "outer-line-kept"
+  echo "# >>> dev-workflow: ハーネス生成物のローカル除外（自動生成。コミットされません） >>>"
+  echo "/.claude/tampered-line"
+  echo "# <<< dev-workflow <<<"
+  echo "outer-line-after"
+} > "$HYG_EXCLUDE3"
+
+( cd "$HYG_REPO3" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1
+HYG_EXCLUDE3_CONTENT="$(cat -- "$HYG_EXCLUDE3")"
+
+case "$HYG_EXCLUDE3_CONTENT" in
+  *'outer-line-kept'*)
+    pass "check-repo-hygiene.sh: ブロック改変時もマーカー外の前方行は保持される（#124）" ;;
+  *)
+    fail "check-repo-hygiene.sh: ブロック改変時もマーカー外の前方行は保持される（#124）" "$HYG_EXCLUDE3_CONTENT" ;;
+esac
+case "$HYG_EXCLUDE3_CONTENT" in
+  *'outer-line-after'*)
+    pass "check-repo-hygiene.sh: ブロック改変時もマーカー外の後方行は保持される（#124）" ;;
+  *)
+    fail "check-repo-hygiene.sh: ブロック改変時もマーカー外の後方行は保持される（#124）" "$HYG_EXCLUDE3_CONTENT" ;;
+esac
+case "$HYG_EXCLUDE3_CONTENT" in
+  *'/.claude/tampered-line'*)
+    fail "check-repo-hygiene.sh: 改変されたブロック内容は期待値に復元される（#124）" "$HYG_EXCLUDE3_CONTENT" ;;
+  *)
+    pass "check-repo-hygiene.sh: 改変されたブロック内容は期待値に復元される（#124）" ;;
+esac
+case "$HYG_EXCLUDE3_CONTENT" in
+  *'/.claude/worktrees/'*'/.claude/agent-tokens.tsv'*'/.claude/slack-webhook'*'/.claude/settings.local.json'*)
+    pass "check-repo-hygiene.sh: 復元後のブロックに期待される全エントリが含まれる（#124）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 復元後のブロックに期待される全エントリが含まれる（#124）" "$HYG_EXCLUDE3_CONTENT" ;;
+esac
+
+# --- 完了条件5: worktree から実行しても、書き込み先はメインリポの .git/info/exclude になる ---
+HYG_REPO4="$(make_temp_repo)"
+HYG_WT4_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-wt.XXXXXX")"
+make_worktree "$HYG_REPO4" "$HYG_WT4_DIR" "hyg-worktree-branch"
+
+HYG_WT4_GITDIR="$(cd "$HYG_WT4_DIR" && git rev-parse --path-format=absolute --git-dir)"
+HYG_WT4_COMMONDIR="$(cd "$HYG_WT4_DIR" && git rev-parse --path-format=absolute --git-common-dir)"
+assert_eq "check-repo-hygiene.sh: worktreeのgit-common-dirはメインリポの.gitと一致する（前提確認）（#124）" \
+  "${HYG_REPO4}/.git" "$HYG_WT4_COMMONDIR"
+
+( cd "$HYG_WT4_DIR" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1
+
+case "$(cat -- "${HYG_WT4_COMMONDIR}/info/exclude" 2>/dev/null)" in
+  *'# >>> dev-workflow'*)
+    pass "check-repo-hygiene.sh: worktreeから実行してもgit-common-dir配下のinfo/excludeに書き込まれる（#124）" ;;
+  *)
+    fail "check-repo-hygiene.sh: worktreeから実行してもgit-common-dir配下のinfo/excludeに書き込まれる（#124）" ;;
+esac
+assert_eq "check-repo-hygiene.sh: worktree専用git-dir配下にはinfo/excludeが作られない（#124）" \
+  "no" "$([ -e "${HYG_WT4_GITDIR}/info/exclude" ] && echo yes || echo no)"
+
+# --- 完了条件6: --check では書き込みが発生しない（ファイルの内容が変わらない）が、
+#     exclude_updated は必要性を正しく報告する。
+#     `git init` は既定のテンプレートから .git/info/exclude を作るため、実行前から
+#     ファイルが存在すること自体は前提にできない（内容がブロックを含まないことだけを前提にする）。 ---
+HYG_REPO5="$(make_temp_repo)"
+HYG_EXCLUDE5="${HYG_REPO5}/.git/info/exclude"
+HYG_EXCLUDE5_BEFORE="$(cat -- "$HYG_EXCLUDE5" 2>/dev/null)"
+case "$HYG_EXCLUDE5_BEFORE" in
+  *'# >>> dev-workflow'*)
+    fail "check-repo-hygiene.sh: --check前提: 実行前はまだブロックが含まれていない（#124）" "$HYG_EXCLUDE5_BEFORE" ;;
+  *)
+    pass "check-repo-hygiene.sh: --check前提: 実行前はまだブロックが含まれていない（#124）" ;;
+esac
+
+HYG_CHECK1_OUT="$( cd "$HYG_REPO5" && bash "$HYG_SCRIPT" --check --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: --check時、更新が必要なら exclude_updated=yes（#124）" \
+  "yes" "$(printf '%s\n' "$HYG_CHECK1_OUT" | sed -n 's/^exclude_updated=//p')"
+assert_eq "check-repo-hygiene.sh: --check時は実際には書き込まれない（ファイル内容が変わらない）（#124）" \
+  "$HYG_EXCLUDE5_BEFORE" "$(cat -- "$HYG_EXCLUDE5" 2>/dev/null)"
+
+( cd "$HYG_REPO5" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1
+HYG_CHECK2_OUT="$( cd "$HYG_REPO5" && bash "$HYG_SCRIPT" --check --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: 整備済み後の --check では exclude_updated=no（#124）" \
+  "no" "$(printf '%s\n' "$HYG_CHECK2_OUT" | sed -n 's/^exclude_updated=//p')"
+
+# --- --print の予約領域キー（#126 / #127 が値を埋めるまでの固定値。完了条件の前提整備） ---
+HYG_PRINT_KEYS_OUT="$( cd "$HYG_REPO1" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: --print出力にrepo_rootキーがある（#124）" \
+  "yes" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | grep -q '^repo_root=' && echo yes || echo no)"
+assert_eq "check-repo-hygiene.sh: --print出力にexclude_fileキーがある（#124）" \
+  "yes" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | grep -q '^exclude_file=' && echo yes || echo no)"
+assert_eq "check-repo-hygiene.sh: --print出力でtracked_settings_local=no（#126予約領域）" \
+  "no" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | sed -n 's/^tracked_settings_local=//p')"
+assert_eq "check-repo-hygiene.sh: --print出力でtracked_settings=no（#126予約領域）" \
+  "no" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | sed -n 's/^tracked_settings=//p')"
+assert_eq "check-repo-hygiene.sh: --print出力でbroad_allow=no（#126予約領域）" \
+  "no" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | sed -n 's/^broad_allow=//p')"
+assert_eq "check-repo-hygiene.sh: --print出力でsandbox_in_repo_untracked=unknown（#127予約領域）" \
+  "unknown" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | sed -n 's/^sandbox_in_repo_untracked=//p')"
+assert_eq "check-repo-hygiene.sh: --print出力でverdict=ok（#124）" \
+  "ok" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | sed -n 's/^verdict=//p')"
+
 echo ""
 echo "== share-prepared-dirs.sh（準備成果ディレクトリの共有・共有モード） =="
 
