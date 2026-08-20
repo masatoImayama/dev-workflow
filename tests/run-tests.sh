@@ -10067,7 +10067,9 @@ assert_eq "check-repo-hygiene.sh: 複数START_MARKER時、2つめのSTART_MARKER
 #     決定論的に再現できるようにする。permission ビットには依存しない） ---
 HYG_REPO8="$(make_temp_repo)"
 HYG_GITDIR8="${HYG_REPO8}/.git"
-rm -rf -- "${HYG_GITDIR8}/info" 2>/dev/null
+# 削除コマンドは使わず mv で横へ退避する（このファイル冒頭の make_temp_repo の規約に従う）。
+# git init 直後の .git/info には exclude しか無く、退避しても以降の検証に影響しない。
+mv -- "${HYG_GITDIR8}/info" "${HYG_GITDIR8}/info.orig" 2>/dev/null
 printf 'not-a-directory\n' > "${HYG_GITDIR8}/info"
 
 HYG_FAILWRITE_OUT="$( cd "$HYG_REPO8" && bash "$HYG_SCRIPT" 2>&1 )"
@@ -11328,6 +11330,24 @@ assert_eq "DEV_WORKFLOW_DOCKER_BUILD_CONTEXT指定時はその値が採用され
   "$(normalize_test_path "$RS6_CUSTOM_CONTEXT")" "$(plan_value DEV_WORKFLOW_SANDBOX_CONTEXT "$RS6_OUTPUT")"
 
 # --- 受け入れ条件7: 規約パスにも何も無ければ mode=none のまま ---
+# --- リポジトリ外に作られた兄弟 worktree 内の Dockerfile では、build context を
+#     リポジトリルートではなくその worktree にする（sandbox-exec.sh がカレントを
+#     マウント元にするフォールバック経路と揃える。#122一括レビュー指摘、由来: #123） ---
+RS6B_REPO="$(make_temp_repo)"
+RS6B_OUTSIDE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-sibling.XXXXXX")/wt"
+make_worktree "$RS6B_REPO" "$RS6B_OUTSIDE" "sibling-wt"
+cat > "${RS6B_OUTSIDE}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+
+RS6B_OUTPUT="$(
+  cd "$RS6B_OUTSIDE" || exit 1
+  bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "リポジトリ外の兄弟worktree内Dockerfile: build contextはその worktree になる（マウント元と一致）" \
+  "$(normalize_test_path "$RS6B_OUTSIDE")" "$(plan_value DEV_WORKFLOW_SANDBOX_CONTEXT "$RS6B_OUTPUT")"
+
 RS7_REPO="$(make_temp_repo)"
 RS7_NAME="$(basename "$RS7_REPO")"
 RS7_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-sandboxhome.XXXXXX")"

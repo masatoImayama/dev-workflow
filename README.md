@@ -928,10 +928,11 @@ https://hooks.slack.com/services/XXX/YYY/ZZZ
 | `none` | メンションなし |
 | `<@U123ABC>` | 特定ユーザーへのメンション（SlackのメンバーID） |
 
-3. `.claude/slack-webhook` はWebhook URLという秘密情報を含むため、`.gitignore` には追加しない。
-   `.git/info/exclude`（コミットされないローカル除外設定）で自動的に除外される。**`.gitignore`
-   は駆動先チームの共有ファイルなので触らない**（上記「ハーネス非注入原則」参照）。この整備は
-   `scripts/check-repo-hygiene.sh` が SessionStart のたびに冪等に行う
+3. `.claude/slack-webhook` は `.gitignore` に追加しない。ハーネス生成物の除外は、コミットされない
+   ローカル設定である `.git/info/exclude` で行う（**`.gitignore` は駆動先チームの共有ファイルなので
+   触らない** — 上記「ハーネス非注入原則」参照）。この整備は `scripts/check-repo-hygiene.sh` が
+   SessionStart のたびに冪等に行うため、手作業は不要である。なお Webhook URL は秘密情報なので、
+   除外方法にかかわらずコミットしないこと
 
 環境変数 `SLACK_WEBHOOK_URL` / `DEV_WORKFLOW_PROJECT_NAME` でも指定できる（ファイル設定が優先）。メンションは `DEV_WORKFLOW_SLACK_MENTION` で上書きでき、こちらはファイル設定より優先される。
 

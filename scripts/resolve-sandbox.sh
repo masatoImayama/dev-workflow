@@ -41,8 +41,10 @@
 #
 # ビルドコンテキストの解決順（仕様書 4.2）:
 #   1. DEV_WORKFLOW_DOCKER_BUILD_CONTEXT が非空 -> その値（正規化して採用）
-#   2. 解決した Dockerfile がリポジトリルート配下に無い -> リポジトリルート
-#   3. それ以外 -> dirname(Dockerfile)（既存挙動）
+#   2. 解決した Dockerfile がリポジトリルート配下にある -> dirname(Dockerfile)（既存挙動）
+#   3. リポジトリルート配下に無いがカレントディレクトリ配下にある -> dirname(Dockerfile)
+#      （sandbox-exec.sh がカレントをマウント元にするフォールバック経路と揃える）
+#   4. それ以外（規約パス等） -> リポジトリルート
 #
 # イメージタグの hash について（仕様書 4.7）:
 #   Dockerfile.dev からビルドする場合、タグは dev-sandbox:<repo>-<hash8> とする。
@@ -122,7 +124,20 @@ resolve_build_context() {
         return 0
         ;;
       *)
-        # リポジトリルート配下に無い（規約パス等）-> リポジトリルートを使う
+        # リポジトリルート配下に無い。ただしカレントディレクトリ配下にある場合は
+        # そちらを使う。sandbox-exec.sh はカレントがリポジトリルート外のとき
+        # （リポジトリ外に作られた兄弟 worktree 等）カレントをマウント元にするため、
+        # ここでリポジトリルートを返すとマウント元とビルドコンテキストが食い違い、
+        # COPY がメインリポ側の内容を拾ってしまう。
+        local cur_norm
+        cur_norm="$(normalize_dir "$(pwd)")"
+        case "$dockerfile_dir" in
+          "$cur_norm"|"${cur_norm}"/*)
+            printf '%s' "$dockerfile_dir"
+            return 0
+            ;;
+        esac
+        # カレント配下でもない（規約パス等）-> リポジトリルートを使う
         printf '%s' "$repo_root_norm"
         return 0
         ;;

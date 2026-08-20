@@ -170,12 +170,18 @@ if [ "$NEW_CONTENT" != "$OLD_CONTENT" ]; then
       :
     else
       EXCLUDE_WRITE_FAILED=1
+      # mv が失敗した場合に限り一時ファイルが残る。削除コマンドは使えないので、
+      # 中身を空にして紛らわしい複製を残さず、パスを警告に載せて人間に委ねる。
+      [ -f "$EXCLUDE_TMP" ] && : > "$EXCLUDE_TMP" 2>/dev/null
     fi
   fi
 fi
 
 if [ "$EXCLUDE_WRITE_FAILED" -eq 1 ]; then
   echo "[dev-workflow] 警告: ${EXCLUDE_FILE} への書き込みに失敗しました。手動で整備してください。" >&2
+  if [ -f "${EXCLUDE_TMP:-}" ]; then
+    echo "[dev-workflow]   空の一時ファイルが残っています（不要なら削除してください）: ${EXCLUDE_TMP}" >&2
+  fi
 elif [ "$EXCLUDE_UPDATED" = "yes" ]; then
   if [ "$CHECK_MODE" -eq 1 ]; then
     echo "[dev-workflow] 情報: ${EXCLUDE_FILE} の更新が必要です（--check のため書き込みません）。" >&2
