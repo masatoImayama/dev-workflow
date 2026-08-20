@@ -46,12 +46,16 @@
 #   開始/終了マーカー行の間だけを対象に置換し、マーカー外の既存行は1行も変更しない。
 #   既存ブロックの内容が期待値と完全一致していれば書き込まない（冪等。mtime も変えない）。
 #   マーカーが無ければファイル末尾に追記する。ファイル/ディレクトリが無ければ作成する。
+#   最初に見つかったSTART_MARKERだけを正として扱い、対応するEND_MARKERが無い（孤立）
+#   場合はそのSTART_MARKER行1行だけを差し替える（末尾への丸ごと追記はしない。次回実行時に
+#   間のユーザー行が失われる回帰を防ぐため）。2つめ以降のSTART_MARKER/END_MARKERには触れない。
+#   書き込みは一時ファイルへ書いてから mv で置き換える（失敗時は警告し、元ファイルは壊さない）。
 #
 #   `.claude/settings.local.json` を含めるのは、まだ追跡されていない場合に追跡候補に
 #   しないため。既に追跡されている場合 exclude は効かないが、それは #126 の判定で扱う。
 #
 # 安全ルール: 削除コマンド（rm / rmdir / unlink 等）は絶対に使わない。
-# 新しい内容を組み立てて `>` で書き出すだけで冪等整備を実現する。
+# 新しい内容を組み立てて一時ファイル経由で書き出すだけで冪等整備を実現する。
 
 set -u
 
@@ -94,9 +98,17 @@ EOF
 
 build_desired_content() {
   # build_desired_content <既存の.git/info/excludeの内容>
-  # 望ましい全文を stdout に出す。マーカー行が両方見つかれば、その行の範囲だけを
-  # BLOCK_CONTENT に差し替える（マーカー外の行はそのまま残す）。マーカーが無ければ
-  # 末尾に追記する。
+  # 望ましい全文を stdout に出す。最初に見つかった START_MARKER だけを正として扱う
+  # （複数の START_MARKER が存在する場合、2つめ以降には一切触れない）。
+  #
+  #   - 最初の START_MARKER に対応する END_MARKER が見つかれば、その範囲だけを
+  #     BLOCK_CONTENT に差し替える（マーカー外の行はそのまま残す）。
+  #   - 最初の START_MARKER に対応する END_MARKER が見つからない（孤立マーカー。
+  #     書き込み中断や手作業編集で起こりうる）場合は、その1行だけを BLOCK_CONTENT に
+  #     差し替える。ファイル末尾に丸ごと追記すると START_MARKER が2つになり、次回実行時に
+  #     「最初のSTART_MARKER〜追記ブロックのEND_MARKER」が一括差し替えされて間のユーザー行が
+  #     失われる回帰を招くため、孤立マーカーの1行だけを対象にしてそれ以降の行は保持する。
+  #   - START_MARKER が1つも無ければ末尾に追記する。
   local existing="$1"
   local -a lines=()
   if [ -n "$existing" ]; then
@@ -116,10 +128,19 @@ build_desired_content() {
 
   local -a out=()
   if [ "$start_idx" -ge 0 ] && [ "$end_idx" -ge "$start_idx" ]; then
+    # 最初のブロックが完全（開始・終了マーカーが揃っている）。その範囲だけを差し替える。
     for ((i = 0; i < start_idx; i++)); do out+=("${lines[$i]}"); done
     while IFS= read -r _bline; do out+=("$_bline"); done <<< "$BLOCK_CONTENT"
     for ((i = end_idx + 1; i < ${#lines[@]}; i++)); do out+=("${lines[$i]}"); done
+  elif [ "$start_idx" -ge 0 ]; then
+    # 開始マーカーはあるが対応する終了マーカーが無い（孤立マーカー）。
+    # そのSTART_MARKER行1行だけをブロックに差し替え、それ以降の行（ユーザー行を含む）は
+    # そのまま保持する。
+    for ((i = 0; i < start_idx; i++)); do out+=("${lines[$i]}"); done
+    while IFS= read -r _bline; do out+=("$_bline"); done <<< "$BLOCK_CONTENT"
+    for ((i = start_idx + 1; i < ${#lines[@]}; i++)); do out+=("${lines[$i]}"); done
   else
+    # マーカーが無い。末尾に追記する。
     for ((i = 0; i < ${#lines[@]}; i++)); do out+=("${lines[$i]}"); done
     while IFS= read -r _bline; do out+=("$_bline"); done <<< "$BLOCK_CONTENT"
   fi
@@ -135,15 +156,27 @@ fi
 NEW_CONTENT="$(build_desired_content "$OLD_CONTENT")"
 
 EXCLUDE_UPDATED="no"
+EXCLUDE_WRITE_FAILED=0
 if [ "$NEW_CONTENT" != "$OLD_CONTENT" ]; then
   EXCLUDE_UPDATED="yes"
   if [ "$CHECK_MODE" -eq 0 ]; then
     mkdir -p "$(dirname "$EXCLUDE_FILE")"
-    printf '%s\n' "$NEW_CONTENT" > "$EXCLUDE_FILE"
+    # 書き込み失敗（ディスクフル・権限不足等）を検査するため、一時ファイルへ書いてから
+    # mv で置き換える（in-place の truncate を避け、失敗時に元ファイルを壊さない）。
+    # 削除コマンド（rm/rmdir/unlink）は使わない。
+    EXCLUDE_TMP="${EXCLUDE_FILE}.dev-workflow-tmp.$$"
+    if printf '%s\n' "$NEW_CONTENT" > "$EXCLUDE_TMP" 2>/dev/null \
+      && mv -f -- "$EXCLUDE_TMP" "$EXCLUDE_FILE" 2>/dev/null; then
+      :
+    else
+      EXCLUDE_WRITE_FAILED=1
+    fi
   fi
 fi
 
-if [ "$EXCLUDE_UPDATED" = "yes" ]; then
+if [ "$EXCLUDE_WRITE_FAILED" -eq 1 ]; then
+  echo "[dev-workflow] 警告: ${EXCLUDE_FILE} への書き込みに失敗しました。手動で整備してください。" >&2
+elif [ "$EXCLUDE_UPDATED" = "yes" ]; then
   if [ "$CHECK_MODE" -eq 1 ]; then
     echo "[dev-workflow] 情報: ${EXCLUDE_FILE} の更新が必要です（--check のため書き込みません）。" >&2
   else
