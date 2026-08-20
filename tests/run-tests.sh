@@ -10058,6 +10058,99 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Task #125: 共通ルールに「ハーネス非注入原則」を追加し「前提」節の推奨順を反転する
+#
+# ハーネス専用のファイルが駆動先（業務）リポジトリのPRに混入する問題（issue #120）に対し、
+# 「## サンドボックス方針」の「### 前提」を3択（規約パス > 環境変数 > リポジトリ直下）に
+# 書き換え、新節「## ハーネス非注入原則」を追加したことを検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #125: 共通ルールに『ハーネス非注入原則』を追加し『前提』節の推奨順を反転する =="
+
+# --- core/instructions.md: 「### 前提」節が3択（規約パス/環境変数/リポジトリ直下）を
+#     リポジトリを汚さない選択肢を第一候補として明記している ---
+INSTR_PREREQ_SECTION="$(awk '/^### 前提$/{f=1; next} /^### プロジェクト固有の準備コマンド/{f=0} f' \
+  "${REPO_ROOT}/core/instructions.md")"
+
+if [ -z "$INSTR_PREREQ_SECTION" ]; then
+  fail "core/instructions.md: 『### 前提』節が見つかる（#125）" "節が空でした"
+else
+  pass "core/instructions.md: 『### 前提』節が見つかる（#125）"
+fi
+
+case "$INSTR_PREREQ_SECTION" in
+  *'規約パスに置く（推奨）'*'~/.claude/dev-workflow/sandbox/'*'DEV_WORKFLOW_DOCKERFILE'*'DEV_WORKFLOW_DOCKER_COMPOSE_FILE'*'DEV_WORKFLOW_DOCKER_IMAGE'*'リポジトリ直下に置いてコミットする'*'チームで run を共有する場合のみ'*)
+    pass "core/instructions.md: 『### 前提』節が3択（規約パス→環境変数→リポジトリ直下）を明記している（#125）" ;;
+  *)
+    fail "core/instructions.md: 『### 前提』節が3択（規約パス→環境変数→リポジトリ直下）を明記している（#125）" \
+      "$INSTR_PREREQ_SECTION" ;;
+esac
+
+case "$INSTR_PREREQ_SECTION" in
+  *'docker build'*'docker compose up'*'直接叩いてはならない'*'mode=none'*'自律モードを開始せずに停止する'*)
+    pass "core/instructions.md: 『### 前提』節に既存の維持事項（docker直接呼び出し禁止・mode=none停止）が残っている（#125）" ;;
+  *)
+    fail "core/instructions.md: 『### 前提』節に既存の維持事項（docker直接呼び出し禁止・mode=none停止）が残っている（#125）" \
+      "$INSTR_PREREQ_SECTION" ;;
+esac
+
+# --- core/instructions.md: 「## ハーネス非注入原則」が「## サンドボックス方針」の後・
+#     「## 安全ルール（例外なし）」の前に新設されている ---
+INSTR_NOINJECT_SECTION="$(awk '/^## ハーネス非注入原則/{f=1} /^## 安全ルール（例外なし）/{f=0} f' \
+  "${REPO_ROOT}/core/instructions.md")"
+
+if [ -z "$INSTR_NOINJECT_SECTION" ]; then
+  fail "core/instructions.md: 『## ハーネス非注入原則』節が見つかる（#125）" "節が空でした"
+else
+  pass "core/instructions.md: 『## ハーネス非注入原則』節が見つかる（#125）"
+fi
+
+case "$INSTR_NOINJECT_SECTION" in
+  *'駆動先の業務リポジトリに注入しない'*)
+    pass "core/instructions.md: ハーネス非注入原則の宣言文がある（#125）" ;;
+  *)
+    fail "core/instructions.md: ハーネス非注入原則の宣言文がある（#125）" \
+      "$INSTR_NOINJECT_SECTION" ;;
+esac
+
+case "$INSTR_NOINJECT_SECTION" in
+  *'サンドボックス定義'*'~/.claude/dev-workflow/sandbox/<repo>/'*'YOLO 用の permission 設定'*'.claude/settings.local.json'*'マーカー・状態ファイル・worktree'*'.git/info/exclude'*'.gitignore'*'駆動先の共有ファイルなので触らない'*)
+    pass "core/instructions.md: ハーネス由来のものと置き場所の対応表（3行）が明記されている（#125）" ;;
+  *)
+    fail "core/instructions.md: ハーネス由来のものと置き場所の対応表（3行）が明記されている（#125）" \
+      "$INSTR_NOINJECT_SECTION" ;;
+esac
+
+case "$INSTR_NOINJECT_SECTION" in
+  *'check-repo-hygiene.sh'*)
+    pass "core/instructions.md: 検証はscripts/check-repo-hygiene.shが行う旨が明記されている（#125）" ;;
+  *)
+    fail "core/instructions.md: 検証はscripts/check-repo-hygiene.shが行う旨が明記されている（#125）" \
+      "$INSTR_NOINJECT_SECTION" ;;
+esac
+
+case "$INSTR_NOINJECT_SECTION" in
+  *'DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS=1'*'同意なく適用される'*)
+    pass "core/instructions.md: git追跡されたsettings.local.jsonはrunをブロックする旨とその理由が明記されている（#125）" ;;
+  *)
+    fail "core/instructions.md: git追跡されたsettings.local.jsonはrunをブロックする旨とその理由が明記されている（#125）" \
+      "$INSTR_NOINJECT_SECTION" ;;
+esac
+
+# --- 生成物（agents/*.md・codex-agents/*.toml）にもcore/instructions.mdの
+#     ハーネス非注入原則節が伝播している（build.shの再生成漏れを検知する） ---
+for f in agents/planner.md agents/generator.md agents/evaluator.md \
+         codex-agents/planner.toml codex-agents/generator.toml codex-agents/evaluator.toml; do
+  if grep -Fq -- '## ハーネス非注入原則' "${REPO_ROOT}/${f}"; then
+    pass "${f}: core/instructions.mdのハーネス非注入原則節が生成物に反映されている（#125）"
+  else
+    fail "${f}: core/instructions.mdのハーネス非注入原則節が生成物に反映されている（#125）" \
+      "節が見つかりませんでした"
+  fi
+done
+
+# ---------------------------------------------------------------------------
 # Task #107: Epic本文の「## 共有ディレクトリ」節がplanner・共通ルールに定義されている
 #
 # レーンごとのフル install（#104）を避けるための共有宣言。既存の「## 準備コマンド」節・
