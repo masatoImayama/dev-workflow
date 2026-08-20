@@ -9812,6 +9812,149 @@ assert_eq "check-repo-hygiene.sh: 案内後もsettings.local.jsonは実際には
   ".claude/settings.local.json" "$HYG_PERM1_STILL_TRACKED"
 
 echo ""
+echo "== README.mdへのハーネス非注入原則・規約パス・YOLO許可スコープ指針の追記（#130） =="
+
+DOC130_README="${REPO_ROOT}/README.md"
+DOC130_INSTRUCTIONS="${REPO_ROOT}/core/instructions.md"
+DOC130_SKILL="${REPO_ROOT}/skills/run/SKILL.md"
+
+# --- 1. 前提条件・Docker sandboxのセットアップに3択が反映されている ---
+
+if grep -Fq '規約パスに置く（推奨）' "$DOC130_README" \
+  && grep -Fq '~/.claude/dev-workflow/sandbox/<リポジトリ名>/Dockerfile.dev' "$DOC130_README" \
+  && grep -Fq 'リポジトリ直下に置いてコミットする' "$DOC130_README" \
+  && grep -Fq 'チームで run を共有する場合のみ' "$DOC130_README"; then
+  pass "README.md: サンドボックス定義供給の3択（規約パス・環境変数・リポジトリ直下）が明記されている（#130）"
+else
+  fail "README.md: サンドボックス定義供給の3択（規約パス・環境変数・リポジトリ直下）が明記されている（#130）"
+fi
+
+if grep -Fq '### 1. 規約パスに置く（推奨・駆動先リポジトリを汚さない）' "$DOC130_README"; then
+  pass "README.md: 「Docker sandbox のセットアップ」で規約パスが第一候補として書かれている（#130）"
+else
+  fail "README.md: 「Docker sandbox のセットアップ」で規約パスが第一候補として書かれている（#130）"
+fi
+
+# --- 2. 3択の文言がcore/instructions.md・skills/run/SKILL.mdと一致している（完了条件2） ---
+
+DOC130_CHOICE_PHRASES=(
+  '規約パスに置く（推奨）'
+  '~/.claude/dev-workflow/sandbox/<リポジトリ名>/Dockerfile.dev'
+  'DEV_WORKFLOW_DOCKERFILE'
+  'DEV_WORKFLOW_DOCKER_COMPOSE_FILE'
+  'DEV_WORKFLOW_DOCKER_IMAGE'
+  'リポジトリ直下に置いてコミットする'
+  'チームで run を共有する場合のみ'
+)
+DOC130_CHOICE_OK=1
+for phrase in "${DOC130_CHOICE_PHRASES[@]}"; do
+  if ! grep -Fq "$phrase" "$DOC130_README" \
+    || ! grep -Fq "$phrase" "$DOC130_INSTRUCTIONS" \
+    || ! grep -Fq "$phrase" "$DOC130_SKILL"; then
+    DOC130_CHOICE_OK=0
+    break
+  fi
+done
+if [ "$DOC130_CHOICE_OK" = "1" ]; then
+  pass "README.md/core/instructions.md/skills/run/SKILL.md: 3択の文言が一致している（#130完了条件2）"
+else
+  fail "README.md/core/instructions.md/skills/run/SKILL.md: 3択の文言が一致している（#130完了条件2）" \
+    "不一致の句: ${phrase}"
+fi
+
+# --- 3. サンドボックス設定に解決順の表と新規環境変数がある ---
+
+if grep -Fq '### 解決順' "$DOC130_README" \
+  && grep -Fq 'DEV_WORKFLOW_DOCKER_IMAGE` が非空' "$DOC130_README" \
+  && grep -Fq 'mode=none`（run は開始しない）' "$DOC130_README"; then
+  pass "README.md: サンドボックス設定に解決順の表がある（#130）"
+else
+  fail "README.md: サンドボックス設定に解決順の表がある（#130）"
+fi
+
+if grep -Fq 'DEV_WORKFLOW_SANDBOX_HOME' "$DOC130_README" \
+  && grep -Fq 'DEV_WORKFLOW_DOCKER_BUILD_CONTEXT' "$DOC130_README" \
+  && grep -Fq 'ビルドコンテキストは' "$DOC130_README" \
+  && grep -Fq 'リポジトリルート' "$DOC130_README"; then
+  pass "README.md: DEV_WORKFLOW_SANDBOX_HOME/DEV_WORKFLOW_DOCKER_BUILD_CONTEXTとビルドコンテキスト規則が書かれている（#130）"
+else
+  fail "README.md: DEV_WORKFLOW_SANDBOX_HOME/DEV_WORKFLOW_DOCKER_BUILD_CONTEXTとビルドコンテキスト規則が書かれている（#130）"
+fi
+
+# --- 4. YOLOモードにパーミッションのスコープ指針がある ---
+
+if grep -Fq '#### 置き場所（スコープ）' "$DOC130_README" \
+  && grep -Fq '.claude/settings.local.json' "$DOC130_README" \
+  && grep -Fq '既定の置き場所' "$DOC130_README" \
+  && grep -Fq 'チームで共有する場合のみ' "$DOC130_README"; then
+  pass "README.md: YOLOモードにpermission設定の置き場所（スコープ）指針がある（#130）"
+else
+  fail "README.md: YOLOモードにpermission設定の置き場所（スコープ）指針がある（#130）"
+fi
+
+if grep -Fq '同意なく適用される' "$DOC130_README" && grep -Fq 'DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS' "$DOC130_README"; then
+  pass "README.md: 追跡された設定が同意なくチーム全体に適用される危険性が明記されている（#130）"
+else
+  fail "README.md: 追跡された設定が同意なくチーム全体に適用される危険性が明記されている（#130）"
+fi
+
+# --- 5. 通知マーカーの説明が.git/info/excludeの自動整備に更新されている ---
+
+if grep -Fq '.git/info/exclude' "$DOC130_README" \
+  && grep -Fq '駆動先チームの共有ファイルなので触らない' "$DOC130_README"; then
+  pass "README.md: 通知マーカーの説明が.git/info/exclude自動整備に更新されている（#130）"
+else
+  fail "README.md: 通知マーカーの説明が.git/info/exclude自動整備に更新されている（#130）"
+fi
+
+if grep -Fq 'echo ".claude/.dev-workflow-\*" >> .gitignore' "$DOC130_README"; then
+  fail "README.md: 通知マーカーに旧来の手作業.gitignore追記案内が残っていない（#130）"
+else
+  pass "README.md: 通知マーカーに旧来の手作業.gitignore追記案内が残っていない（#130）"
+fi
+
+# --- 6. 新節「ハーネス非注入原則」がYOLOモード節の近くにあり、check-repo-hygiene.shの使い方が書かれている ---
+
+if grep -Fq '## ハーネス非注入原則' "$DOC130_README"; then
+  pass "README.md: 「ハーネス非注入原則」の節がある（#130）"
+else
+  fail "README.md: 「ハーネス非注入原則」の節がある（#130）"
+fi
+
+DOC130_HYGIENE_SECTION="$(awk '/^## ハーネス非注入原則/{f=1} /^## YOLOモード/{f=0} f' "$DOC130_README")"
+case "$DOC130_HYGIENE_SECTION" in
+  *'check-repo-hygiene.sh'*'--run'*'--check'*)
+    pass "README.md: 「ハーネス非注入原則」節にcheck-repo-hygiene.shの--run/--checkの使い方がある（#130）" ;;
+  *)
+    fail "README.md: 「ハーネス非注入原則」節にcheck-repo-hygiene.shの--run/--checkの使い方がある（#130）" \
+      "$DOC130_HYGIENE_SECTION" ;;
+esac
+
+case "$DOC130_HYGIENE_SECTION" in
+  *'0`'*'OK'*'2`'*'ブロック'*)
+    pass "README.md: 「ハーネス非注入原則」節に終了コード（0=OK/2=ブロック）が書かれている（#130）" ;;
+  *)
+    fail "README.md: 「ハーネス非注入原則」節に終了コード（0=OK/2=ブロック）が書かれている（#130）" \
+      "$DOC130_HYGIENE_SECTION" ;;
+esac
+
+# 「ハーネス非注入原則」節がYOLOモード節の直前（近く）に配置されている
+if grep -Fq '## ハーネス非注入原則' "$DOC130_README" && grep -Fq '## YOLOモード（完全自律動作）' "$DOC130_README"; then
+  DOC130_HYGIENE_LINE="$(grep -n '^## ハーネス非注入原則' "$DOC130_README" | head -1 | cut -d: -f1)"
+  DOC130_YOLO_LINE="$(grep -n '^## YOLOモード（完全自律動作）' "$DOC130_README" | head -1 | cut -d: -f1)"
+  if [ -n "$DOC130_HYGIENE_LINE" ] && [ -n "$DOC130_YOLO_LINE" ] && [ "$DOC130_HYGIENE_LINE" -lt "$DOC130_YOLO_LINE" ] \
+    && [ "$((DOC130_YOLO_LINE - DOC130_HYGIENE_LINE))" -lt 40 ]; then
+    pass "README.md: 「ハーネス非注入原則」節がYOLOモード節の直前・近くに配置されている（#130）"
+  else
+    fail "README.md: 「ハーネス非注入原則」節がYOLOモード節の直前・近くに配置されている（#130）" \
+      "hygiene=${DOC130_HYGIENE_LINE} yolo=${DOC130_YOLO_LINE}"
+  fi
+else
+  fail "README.md: 「ハーネス非注入原則」節がYOLOモード節の直前・近くに配置されている（#130）" \
+    "いずれかの見出しが見つかりません"
+fi
+
+echo ""
 echo "== share-prepared-dirs.sh（準備成果ディレクトリの共有・共有モード） =="
 
 SPD_SCRIPT="${REPO_ROOT}/scripts/share-prepared-dirs.sh"
