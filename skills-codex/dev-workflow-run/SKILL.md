@@ -24,6 +24,18 @@ ls .codex/agents/   # generator.toml / evaluator.toml / planner.toml がある�
 役割定義・ワークフロー規約・可読性原則・安全ルールは**すべてサブエージェント側に埋め込まれている**。
 このスキルはループの制御だけを担う。
 
+## 起動時の確認
+
+**リポジトリ衛生プリフライトを最初に実行する。** git追跡された `.claude/settings.local.json`
+がある状態でYOLOモードを回すと、自動追記された許可ルールがコミット候補になってしまう
+（追跡されたpermission設定は `git clone` した全員に同意なく適用されてしまうため、issue #121）。
+**exit 2 が返ったらrunを開始せず、ここで停止する。** 意図的に追跡されたまま続行する場合は
+`DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS=1` を設定してから再実行する（opt-out）。
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-repo-hygiene.sh" --run || exit 1
+```
+
 ## Epic ブランチと作業 worktree の準備
 
 Epic issue 本文の「ブランチ」セクションからブランチ名を取得する。

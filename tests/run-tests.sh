@@ -11043,6 +11043,169 @@ for f in "skills/run/SKILL.md" "skills-codex/dev-workflow-run/SKILL.md"; do
 done
 
 # ---------------------------------------------------------------------------
+# SessionStart フックと run スキル両系統への衛生プリフライト結線（#129）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== SessionStart フック / run スキル両系統への衛生プリフライト結線（#129） =="
+
+HYG129_HOOKS_JSON="${REPO_ROOT}/hooks/hooks.json"
+HYG129_HOOKS_CODEX_JSON="${REPO_ROOT}/hooks/hooks.codex.json"
+HYG129_RUN_SKILL="${REPO_ROOT}/skills/run/SKILL.md"
+HYG129_RUN_SKILL_CODEX="${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md"
+HYG129_GOAL_SKILL="${REPO_ROOT}/skills/goal/SKILL.md"
+
+# --- 両JSONとも構文として妥当（既存の _hj_json_syntax_ok を再利用する。#52で定義済み） ---
+
+if _hj_json_syntax_ok "$HYG129_HOOKS_JSON"; then
+  pass "hooks.json: check-repo-hygiene.sh結線後も構文として妥当（#129）"
+else
+  fail "hooks.json: check-repo-hygiene.sh結線後も構文として妥当（#129）" "$(cat "$HYG129_HOOKS_JSON" 2>&1)"
+fi
+
+if _hj_json_syntax_ok "$HYG129_HOOKS_CODEX_JSON"; then
+  pass "hooks.codex.json: check-repo-hygiene.sh結線後も構文として妥当（#129）"
+else
+  fail "hooks.codex.json: check-repo-hygiene.sh結線後も構文として妥当（#129）" "$(cat "$HYG129_HOOKS_CODEX_JSON" 2>&1)"
+fi
+
+# --- hooks.json: SessionStartにcheck-prerequisites.shの次のエントリとして結線されている ---
+
+HYG129_HOOKS_SESSIONSTART="$(_hj_extract_section "$HYG129_HOOKS_JSON" "SessionStart")"
+if printf '%s' "$HYG129_HOOKS_SESSIONSTART" | grep -Fq 'bash \"${CLAUDE_PLUGIN_ROOT}/scripts/check-repo-hygiene.sh\"'; then
+  pass "hooks.json: SessionStartにcheck-repo-hygiene.shが結線されている（#129）"
+else
+  fail "hooks.json: SessionStartにcheck-repo-hygiene.shが結線されている（#129）" "$HYG129_HOOKS_SESSIONSTART"
+fi
+
+HYG129_HOOKS_PREREQ_LINE="$(printf '%s\n' "$HYG129_HOOKS_SESSIONSTART" | grep -n 'check-prerequisites.sh' | head -1 | cut -d: -f1)"
+HYG129_HOOKS_HYGIENE_LINE="$(printf '%s\n' "$HYG129_HOOKS_SESSIONSTART" | grep -n 'check-repo-hygiene.sh' | head -1 | cut -d: -f1)"
+if [ -n "$HYG129_HOOKS_PREREQ_LINE" ] && [ -n "$HYG129_HOOKS_HYGIENE_LINE" ] \
+  && [ "$HYG129_HOOKS_HYGIENE_LINE" -gt "$HYG129_HOOKS_PREREQ_LINE" ]; then
+  pass "hooks.json: check-repo-hygiene.shはcheck-prerequisites.shの次のエントリである（#129）"
+else
+  fail "hooks.json: check-repo-hygiene.shはcheck-prerequisites.shの次のエントリである（#129）" \
+    "$HYG129_HOOKS_SESSIONSTART"
+fi
+
+# 既定モードなのでブロックしない（--runを付けない。SessionStartエントリに--runが含まれないことを確認）
+if printf '%s' "$HYG129_HOOKS_SESSIONSTART" | grep -F 'check-repo-hygiene.sh' | grep -q -- '--run'; then
+  fail "hooks.json: SessionStartのcheck-repo-hygiene.shは既定モード（--runを付けない）である（#129）" \
+    "$HYG129_HOOKS_SESSIONSTART"
+else
+  pass "hooks.json: SessionStartのcheck-repo-hygiene.shは既定モード（--runを付けない）である（#129）"
+fi
+
+# --- hooks.codex.json: 同様にSessionStartへ結線され、既存エントリと同じくtimeoutが付いている ---
+
+HYG129_HOOKS_CODEX_SESSIONSTART="$(_hj_extract_section "$HYG129_HOOKS_CODEX_JSON" "SessionStart")"
+if printf '%s' "$HYG129_HOOKS_CODEX_SESSIONSTART" | grep -Fq 'bash \"${CLAUDE_PLUGIN_ROOT}/scripts/check-repo-hygiene.sh\"'; then
+  pass "hooks.codex.json: SessionStartにcheck-repo-hygiene.shが結線されている（#129）"
+else
+  fail "hooks.codex.json: SessionStartにcheck-repo-hygiene.shが結線されている（#129）" \
+    "$HYG129_HOOKS_CODEX_SESSIONSTART"
+fi
+
+HYG129_HOOKS_CODEX_PREREQ_LINE="$(printf '%s\n' "$HYG129_HOOKS_CODEX_SESSIONSTART" | grep -n 'check-prerequisites.sh' | head -1 | cut -d: -f1)"
+HYG129_HOOKS_CODEX_HYGIENE_LINE="$(printf '%s\n' "$HYG129_HOOKS_CODEX_SESSIONSTART" | grep -n 'check-repo-hygiene.sh' | head -1 | cut -d: -f1)"
+if [ -n "$HYG129_HOOKS_CODEX_PREREQ_LINE" ] && [ -n "$HYG129_HOOKS_CODEX_HYGIENE_LINE" ] \
+  && [ "$HYG129_HOOKS_CODEX_HYGIENE_LINE" -gt "$HYG129_HOOKS_CODEX_PREREQ_LINE" ]; then
+  pass "hooks.codex.json: check-repo-hygiene.shはcheck-prerequisites.shの次のエントリである（#129）"
+else
+  fail "hooks.codex.json: check-repo-hygiene.shはcheck-prerequisites.shの次のエントリである（#129）" \
+    "$HYG129_HOOKS_CODEX_SESSIONSTART"
+fi
+
+# check-repo-hygiene.shのエントリ自体に"timeout": 30が付いている（hooks.codex.jsonの他エントリと同じ作法）
+HYG129_HOOKS_CODEX_HYGIENE_ENTRY="$(printf '%s\n' "$HYG129_HOOKS_CODEX_SESSIONSTART" \
+  | awk '/check-repo-hygiene\.sh/{f=1} f{print} f&&/^[ \t]*}/{exit}')"
+if printf '%s' "$HYG129_HOOKS_CODEX_HYGIENE_ENTRY" | grep -Fq '"timeout": 30'; then
+  pass "hooks.codex.json: check-repo-hygiene.shのエントリにtimeout: 30が付いている（#129）"
+else
+  fail "hooks.codex.json: check-repo-hygiene.shのエントリにtimeout: 30が付いている（#129）" \
+    "$HYG129_HOOKS_CODEX_HYGIENE_ENTRY"
+fi
+
+if printf '%s' "$HYG129_HOOKS_CODEX_SESSIONSTART" | grep -F 'check-repo-hygiene.sh' | grep -q -- '--run'; then
+  fail "hooks.codex.json: SessionStartのcheck-repo-hygiene.shは既定モード（--runを付けない）である（#129）" \
+    "$HYG129_HOOKS_CODEX_SESSIONSTART"
+else
+  pass "hooks.codex.json: SessionStartのcheck-repo-hygiene.shは既定モード（--runを付けない）である（#129）"
+fi
+
+# --- 両JSONとも参照しているscripts/check-repo-hygiene.shが実在する（参照切れの防止） ---
+
+if [ -f "${REPO_ROOT}/scripts/check-repo-hygiene.sh" ]; then
+  pass "hooks.json/hooks.codex.json: 参照しているscripts/check-repo-hygiene.shが実在する（#129）"
+else
+  fail "hooks.json/hooks.codex.json: 参照しているscripts/check-repo-hygiene.shが実在する（#129）" \
+    "見つかりません: ${REPO_ROOT}/scripts/check-repo-hygiene.sh"
+fi
+
+# --- skills/run/SKILL.md: 「## 起動時の確認」の先頭（gh issue viewより前）に--runプリフライトがある ---
+
+HYG129_RUN_STARTUP_BLOCK="$(awk '/^## 起動時の確認$/{f=1; print; next} f && /^#/{exit} f{print}' "$HYG129_RUN_SKILL")"
+if printf '%s' "$HYG129_RUN_STARTUP_BLOCK" | grep -Fq 'check-repo-hygiene.sh" --run || exit 1'; then
+  pass "skills/run/SKILL.md: 「## 起動時の確認」にcheck-repo-hygiene.sh --runのプリフライトがある（#129）"
+else
+  fail "skills/run/SKILL.md: 「## 起動時の確認」にcheck-repo-hygiene.sh --runのプリフライトがある（#129）" \
+    "$HYG129_RUN_STARTUP_BLOCK"
+fi
+
+HYG129_RUN_PREFLIGHT_LINE="$(printf '%s\n' "$HYG129_RUN_STARTUP_BLOCK" | grep -n -- '--run || exit 1' | head -1 | cut -d: -f1)"
+HYG129_RUN_ISSUEVIEW_LINE="$(printf '%s\n' "$HYG129_RUN_STARTUP_BLOCK" | grep -n 'gh issue view \$ARGUMENTS' | head -1 | cut -d: -f1)"
+if [ -n "$HYG129_RUN_PREFLIGHT_LINE" ] && [ -n "$HYG129_RUN_ISSUEVIEW_LINE" ] \
+  && [ "$HYG129_RUN_PREFLIGHT_LINE" -lt "$HYG129_RUN_ISSUEVIEW_LINE" ]; then
+  pass "skills/run/SKILL.md: --runプリフライトはgh issue viewより前にある（#129）"
+else
+  fail "skills/run/SKILL.md: --runプリフライトはgh issue viewより前にある（#129）" "$HYG129_RUN_STARTUP_BLOCK"
+fi
+
+if printf '%s' "$HYG129_RUN_STARTUP_BLOCK" | grep -Fq 'exit 2' \
+  && printf '%s' "$HYG129_RUN_STARTUP_BLOCK" | grep -Fq 'DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS'; then
+  pass "skills/run/SKILL.md: exit 2で停止する旨とopt-out（DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS）が明記されている（#129）"
+else
+  fail "skills/run/SKILL.md: exit 2で停止する旨とopt-out（DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS）が明記されている（#129）" \
+    "$HYG129_RUN_STARTUP_BLOCK"
+fi
+
+# --- skills-codex/dev-workflow-run/SKILL.md: 同等の結線が入っている（結線漏れ禁止） ---
+
+if grep -Fq 'check-repo-hygiene.sh" --run || exit 1' "$HYG129_RUN_SKILL_CODEX"; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: check-repo-hygiene.sh --runのプリフライトがある（#129）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: check-repo-hygiene.sh --runのプリフライトがある（#129）" \
+    "$(cat "$HYG129_RUN_SKILL_CODEX")"
+fi
+
+if grep -Fq 'exit 2' "$HYG129_RUN_SKILL_CODEX" \
+  && grep -Fq 'DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS' "$HYG129_RUN_SKILL_CODEX"; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: exit 2で停止する旨とopt-outが明記されている（#129）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: exit 2で停止する旨とopt-outが明記されている（#129）"
+fi
+
+# check-repo-hygiene.sh --runの結線が、Epicブランチ+作業worktree準備（git fetch等）より前にあること
+HYG129_CODEX_PREFLIGHT_LINE="$(grep -n -- '--run || exit 1' "$HYG129_RUN_SKILL_CODEX" | head -1 | cut -d: -f1)"
+HYG129_CODEX_WORKTREE_LINE="$(grep -n '^## Epic ブランチと作業 worktree の準備$' "$HYG129_RUN_SKILL_CODEX" | head -1 | cut -d: -f1)"
+if [ -n "$HYG129_CODEX_PREFLIGHT_LINE" ] && [ -n "$HYG129_CODEX_WORKTREE_LINE" ] \
+  && [ "$HYG129_CODEX_PREFLIGHT_LINE" -lt "$HYG129_CODEX_WORKTREE_LINE" ]; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: --runプリフライトはEpicブランチ準備より前にある（#129）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: --runプリフライトはEpicブランチ準備より前にある（#129）" \
+    "preflight_line=${HYG129_CODEX_PREFLIGHT_LINE} worktree_line=${HYG129_CODEX_WORKTREE_LINE}"
+fi
+
+# --- skills/goal/SKILL.md には結線しない（重複結線の禁止） ---
+
+if grep -Fq 'check-repo-hygiene.sh' "$HYG129_GOAL_SKILL"; then
+  fail "skills/goal/SKILL.md: check-repo-hygiene.shの重複結線が無い（runに委譲しているため）（#129）" \
+    "$(grep -n 'check-repo-hygiene.sh' "$HYG129_GOAL_SKILL")"
+else
+  pass "skills/goal/SKILL.md: check-repo-hygiene.shの重複結線が無い（runに委譲しているため）（#129）"
+fi
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
