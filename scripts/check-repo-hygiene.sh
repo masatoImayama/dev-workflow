@@ -12,8 +12,9 @@
 #
 # 骨格と exclude 整備は Epic #122 Task #124 で実装した。permission 判定
 # （tracked_settings_local / tracked_settings / broad_allow と --run ブロック）は
-# 本タスク（#126）で実装する。sandbox 定義の混入検知（sandbox_in_repo_untracked）は
-# #127 が追加するため、本タスクでは実装しない（--print の出力キーは固定値 unknown のまま）。
+# Task #126 で実装した。sandbox 定義の混入検知（sandbox_in_repo_untracked。
+# scripts/resolve-sandbox.sh の解決結果を使い、リポジトリ直下かつ git 未追跡なら
+# warn する）は Task #127 で実装した。
 #
 # 使い方:
 #   bash scripts/check-repo-hygiene.sh          # 既定モード（SessionStart 用。ブロックしない）
@@ -181,10 +182,55 @@ if [ "$TRACKED_SETTINGS" = "yes" ]; then
   fi
 fi
 
-# sandbox_in_repo_untracked は #127 が実値算出を追加するまでの予約領域（固定値 unknown）。
-# 算出ロジックはここでは実装しない。verdict 判定だけ、#127 が実値を入れたときに
-# 正しく warn になるよう先に組み込んでおく。
+# --- sandbox 定義の混入検知（Epic #122 Task #127） -----------------------------
+#
+# issue #120 の事故は、ハーネスのために作った docker-compose.dev.yml がリポジトリ直下に
+# 置かれ、git 管理外のままコミット候補として放置された結果、業務リポジトリの PR に
+# 紛れ込んで発生した。scripts/resolve-sandbox.sh が実際に解決した Dockerfile / compose
+# ファイルについて、次を判定する（同ディレクトリの相対パスで resolve-sandbox.sh を呼ぶ）。
+#
+#   - 解決自体に失敗した（非0終了）                      -> unknown（警告もブロックもしない）
+#   - mode=none、または DEV_WORKFLOW_DOCKER_IMAGE 指定でファイルが無い -> no
+#   - 解決されたファイルがリポジトリルート配下かつ git 未追跡          -> yes（警告。ブロックしない）
+#   - 解決されたファイルがリポジトリルート配下かつ git 追跡済み        -> no
+#   - 解決されたファイルがリポジトリ外（規約パス・環境変数指定）       -> no（原則どおりの状態）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SANDBOX_IN_REPO_UNTRACKED="unknown"
+SANDBOX_RESOLVE_OUT=""
+if SANDBOX_RESOLVE_OUT="$(bash "${SCRIPT_DIR}/resolve-sandbox.sh" 2>/dev/null)"; then
+  eval "$SANDBOX_RESOLVE_OUT"
+
+  SANDBOX_FILE=""
+  if [ -n "${DEV_WORKFLOW_SANDBOX_DOCKERFILE:-}" ]; then
+    SANDBOX_FILE="$DEV_WORKFLOW_SANDBOX_DOCKERFILE"
+  elif [ -n "${DEV_WORKFLOW_SANDBOX_COMPOSE:-}" ]; then
+    SANDBOX_FILE="$DEV_WORKFLOW_SANDBOX_COMPOSE"
+  fi
+
+  if [ -z "$SANDBOX_FILE" ]; then
+    # mode=none、または DEV_WORKFLOW_DOCKER_IMAGE で既存イメージを指定していてファイルが無い
+    SANDBOX_IN_REPO_UNTRACKED="no"
+  else
+    # Windows のパス表現ゆれ（/c/Users/... と C:/Users/...）に対応するため、
+    # cd した先で pwd -W を優先して正規化した文字列同士で比較する
+    # （scripts/sandbox-exec.sh:139 と同じ作法）。
+    SANDBOX_DIR_NORM="$(cd "$(dirname "$SANDBOX_FILE")" 2>/dev/null && { pwd -W 2>/dev/null || pwd; })"
+    REPO_ROOT_NORM="$(cd "$REPO_ROOT" 2>/dev/null && { pwd -W 2>/dev/null || pwd; })"
+    case "$SANDBOX_DIR_NORM" in
+      "$REPO_ROOT_NORM"|"${REPO_ROOT_NORM}"/*)
+        if git ls-files --error-unmatch -- "$SANDBOX_FILE" >/dev/null 2>&1; then
+          SANDBOX_IN_REPO_UNTRACKED="no"
+        else
+          SANDBOX_IN_REPO_UNTRACKED="yes"
+        fi
+        ;;
+      *)
+        # リポジトリルート配下に無い（規約パス・環境変数で指定したリポジトリ外のファイル）
+        SANDBOX_IN_REPO_UNTRACKED="no"
+        ;;
+    esac
+  fi
+fi
 
 # --- verdict の決定: block > warn > ok ---
 HYG_ALLOW_TRACKED_OPTOUT=0
@@ -235,6 +281,16 @@ fi
 
 if [ "$TRACKED_SETTINGS" = "yes" ] && [ "$BROAD_ALLOW" = "yes" ]; then
   echo "[dev-workflow] 警告: .claude/settings.json（追跡済み）に広範な Bash/PowerShell 許可が含まれています。clone した全員に共有されるルールなので、必要なリポジトリだけの許可か確認してください。" >&2
+fi
+
+if [ "$SANDBOX_IN_REPO_UNTRACKED" = "yes" ]; then
+  {
+    echo "[dev-workflow] 警告: ハーネス用サンドボックス定義（${SANDBOX_FILE}）がリポジトリ直下にあり、git 追跡されていません。"
+    echo "  このままではコミット候補として放置され、意図せず業務リポジトリの PR に紛れ込む恐れがあります（issue #120 の事故と同種）。"
+    echo "  対処（人間が判断してください。このスクリプトはファイルの移動・削除・コミットを一切行いません）:"
+    echo "    - リポジトリを汚さずに済ませたい場合: ~/.claude/dev-workflow/sandbox/<リポジトリ名>/ に置く（規約パス。DEV_WORKFLOW_SANDBOX_HOME で変更可）"
+    echo "    - チームで run を共有する目的で意図してコミットする場合: そのまま git add してチームに共有してください"
+  } >&2
 fi
 
 if [ "$PRINT_MODE" -eq 1 ]; then

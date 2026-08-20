@@ -9697,8 +9697,8 @@ assert_eq "check-repo-hygiene.sh: --print出力でtracked_settings=no（#126予�
   "no" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | sed -n 's/^tracked_settings=//p')"
 assert_eq "check-repo-hygiene.sh: --print出力でbroad_allow=no（#126予約領域）" \
   "no" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | sed -n 's/^broad_allow=//p')"
-assert_eq "check-repo-hygiene.sh: --print出力でsandbox_in_repo_untracked=unknown（#127予約領域）" \
-  "unknown" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | sed -n 's/^sandbox_in_repo_untracked=//p')"
+assert_eq "check-repo-hygiene.sh: --print出力でsandbox_in_repo_untracked=no（sandbox定義が無いリポジトリ）（#127）" \
+  "no" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | sed -n 's/^sandbox_in_repo_untracked=//p')"
 assert_eq "check-repo-hygiene.sh: --print出力でverdict=ok（#124）" \
   "ok" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | sed -n 's/^verdict=//p')"
 
@@ -10265,6 +10265,81 @@ done
 # レーンごとのフル install（#104）を避けるための共有宣言。既存の「## 準備コマンド」節・
 # 「## SKIPパターン」節と対称な位置・対称な書き方であることを検証する。
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# check-repo-hygiene.sh（sandbox定義の混入検知: sandbox_in_repo_untracked）（#127）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== check-repo-hygiene.sh（sandbox定義の混入検知: sandbox_in_repo_untracked） =="
+
+# --- 完了条件1: 未追跡のDockerfile.devがリポジトリ直下にあると
+#     sandbox_in_repo_untracked=yes、verdict=warn、既定モード・--run ともにexit 0（完了条件7も兼ねる） ---
+HYG_SBX1="$(make_temp_repo)"
+printf 'FROM alpine\n' > "${HYG_SBX1}/Dockerfile.dev"
+HYG_SBX1_OUT="$( cd "$HYG_SBX1" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+HYG_SBX1_EXIT=$?
+HYG_SBX1_RUN_OUT="$( cd "$HYG_SBX1" && bash "$HYG_SCRIPT" --run --print 2>/dev/null )"
+HYG_SBX1_RUN_EXIT=$?
+assert_eq "check-repo-hygiene.sh: 未追跡Dockerfile.devでsandbox_in_repo_untracked=yes（#127完了条件1）" \
+  "yes" "$(printf '%s\n' "$HYG_SBX1_OUT" | sed -n 's/^sandbox_in_repo_untracked=//p')"
+assert_eq "check-repo-hygiene.sh: 未追跡Dockerfile.devでverdict=warn（#127完了条件1）" \
+  "warn" "$(printf '%s\n' "$HYG_SBX1_OUT" | sed -n 's/^verdict=//p')"
+assert_exit_code "check-repo-hygiene.sh: 未追跡Dockerfile.devでも既定モードはexit 0（#127完了条件1）" 0 "$HYG_SBX1_EXIT"
+assert_exit_code "check-repo-hygiene.sh: 未追跡Dockerfile.devでも--runはexit 0（ブロックしない）（#127完了条件1・7）" 0 "$HYG_SBX1_RUN_EXIT"
+assert_eq "check-repo-hygiene.sh: --run時もverdict=warnのまま（#127完了条件7）" \
+  "warn" "$(printf '%s\n' "$HYG_SBX1_RUN_OUT" | sed -n 's/^verdict=//p')"
+
+# --- 完了条件2: 同じDockerfile.devをgit addして追跡させるとsandbox_in_repo_untracked=no ---
+( cd "$HYG_SBX1" && git add Dockerfile.dev && git commit -q -m "add sandbox dockerfile" ) >/dev/null 2>&1
+HYG_SBX2_OUT="$( cd "$HYG_SBX1" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: 追跡済みDockerfile.devでsandbox_in_repo_untracked=no（#127完了条件2）" \
+  "no" "$(printf '%s\n' "$HYG_SBX2_OUT" | sed -n 's/^sandbox_in_repo_untracked=//p')"
+assert_eq "check-repo-hygiene.sh: 追跡済みDockerfile.devでverdict=ok（#127完了条件2）" \
+  "ok" "$(printf '%s\n' "$HYG_SBX2_OUT" | sed -n 's/^verdict=//p')"
+
+# --- 完了条件3: 未追跡のdocker-compose.dev.yml（Dockerfile.devは無し）でもyesになる（compose経路も見ている） ---
+HYG_SBX3="$(make_temp_repo)"
+printf 'services:\n  app:\n    image: alpine\n' > "${HYG_SBX3}/docker-compose.dev.yml"
+HYG_SBX3_OUT="$( cd "$HYG_SBX3" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: 未追跡docker-compose.dev.ymlでsandbox_in_repo_untracked=yes（#127完了条件3）" \
+  "yes" "$(printf '%s\n' "$HYG_SBX3_OUT" | sed -n 's/^sandbox_in_repo_untracked=//p')"
+
+# --- 完了条件4: sandbox定義が無くmode=noneならsandbox_in_repo_untracked=no（警告を出さない） ---
+HYG_SBX4="$(make_temp_repo)"
+HYG_SBX4_OUT="$( cd "$HYG_SBX4" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+HYG_SBX4_STDERR="$( cd "$HYG_SBX4" && bash "$HYG_SCRIPT" --print 2>&1 1>/dev/null )"
+assert_eq "check-repo-hygiene.sh: sandbox定義が無ければsandbox_in_repo_untracked=no（#127完了条件4）" \
+  "no" "$(printf '%s\n' "$HYG_SBX4_OUT" | sed -n 's/^sandbox_in_repo_untracked=//p')"
+case "$HYG_SBX4_STDERR" in
+  *'ハーネス用サンドボックス定義'*)
+    fail "check-repo-hygiene.sh: sandbox定義が無ければ警告を出さない（#127完了条件4）" "$HYG_SBX4_STDERR" ;;
+  *)
+    pass "check-repo-hygiene.sh: sandbox定義が無ければ警告を出さない（#127完了条件4）" ;;
+esac
+
+# --- 完了条件5: DEV_WORKFLOW_SANDBOX_HOMEで差し替えた規約パスだけに定義がある場合はno
+#     （リポジトリ外なので原則どおりの状態） ---
+HYG_SBX5="$(make_temp_repo)"
+HYG_SBX5_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-sbxhome.XXXXXX")"
+HYG_SBX5_REPO_NAME="$(basename "$HYG_SBX5")"
+mkdir -p "${HYG_SBX5_HOME}/${HYG_SBX5_REPO_NAME}"
+printf 'FROM alpine\n' > "${HYG_SBX5_HOME}/${HYG_SBX5_REPO_NAME}/Dockerfile.dev"
+HYG_SBX5_OUT="$( cd "$HYG_SBX5" && DEV_WORKFLOW_SANDBOX_HOME="$HYG_SBX5_HOME" bash "$HYG_SCRIPT" --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: 規約パス（リポジトリ外）だけに定義がある場合はsandbox_in_repo_untracked=no（#127完了条件5）" \
+  "no" "$(printf '%s\n' "$HYG_SBX5_OUT" | sed -n 's/^sandbox_in_repo_untracked=//p')"
+
+# --- 完了条件6: DEV_WORKFLOW_DOCKERFILEでリポジトリ外のファイルを明示指定した場合もno ---
+HYG_SBX6="$(make_temp_repo)"
+HYG_SBX6_EXTERNAL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-sbxext.XXXXXX")"
+printf 'FROM alpine\n' > "${HYG_SBX6_EXTERNAL_DIR}/External.dockerfile"
+HYG_SBX6_OUT="$( cd "$HYG_SBX6" && DEV_WORKFLOW_DOCKERFILE="${HYG_SBX6_EXTERNAL_DIR}/External.dockerfile" bash "$HYG_SCRIPT" --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: リポジトリ外を明示指定したDockerfileはsandbox_in_repo_untracked=no（#127完了条件6）" \
+  "no" "$(printf '%s\n' "$HYG_SBX6_OUT" | sed -n 's/^sandbox_in_repo_untracked=//p')"
+
+# 完了条件8（shellcheck / bash -n が通ること）は冒頭の全 scripts/*.sh 走査
+# （bash -n（構文チェック）／shellcheck（利用可能な場合のみ）」の各セクション）で
+# check-repo-hygiene.sh も対象に含まれているため、ここでは重複させない。
 
 echo ""
 echo "== Task #107: Epic本文の『## 共有ディレクトリ』節がplanner・共通ルールに定義されている =="
