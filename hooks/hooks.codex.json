@@ -8,6 +8,12 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh\"",
             "statusMessage": "dev-workflow: 前提条件チェック中..."
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/check-repo-hygiene.sh\"",
+            "timeout": 30,
+            "statusMessage": "dev-workflow: リポジトリ衛生チェック中..."
           }
         ]
       }

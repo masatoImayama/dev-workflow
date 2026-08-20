@@ -51,7 +51,14 @@ claude --plugin-dir /path/to/dev-workflow
 - [GitHub CLI (`gh`)](https://cli.github.com/) がインストール・認証済み
 - [Docker](https://docs.docker.com/get-docker/) がインストール・起動済み
 - Git リポジトリ内で実行
-- プロジェクトルートに `Dockerfile.dev` または `docker-compose.dev.yml` を配置
+- サンドボックス定義（`Dockerfile.dev` または `docker-compose.dev.yml`）を次の3択のいずれかで
+  供給する。**駆動先の業務リポジトリを汚さない選択肢を第一候補とする**（詳細は下記
+  「Docker sandbox のセットアップ」参照）
+  1. 規約パスに置く（推奨）: `~/.claude/dev-workflow/sandbox/<リポジトリ名>/Dockerfile.dev`
+     （または同ディレクトリの `docker-compose.dev.yml`）
+  2. 環境変数で渡す: `DEV_WORKFLOW_DOCKERFILE` / `DEV_WORKFLOW_DOCKER_COMPOSE_FILE` /
+     `DEV_WORKFLOW_DOCKER_IMAGE`
+  3. リポジトリ直下に置いてコミットする（チームで run を共有する場合のみ）
 - 上記が満たされない場合、セッション開始時にブロックされます
 
 ### 自動設定（SessionStart時）
@@ -77,6 +84,26 @@ dev-workflow は2つの外部 MCP ツール（context7 / code-review-graph）を
 - **効かなければ外す判断基準**: `docs/optional-mcp-tools.md` の「外す判断基準」節を参照してください。複数 Epic を通してトークン消費が減らず、レビュー品質の向上も観測できない場合は結線を外してかまいません
 
 ## Docker sandbox のセットアップ
+
+サンドボックス定義（`Dockerfile.dev` / `docker-compose.dev.yml`）は次のいずれかの場所に置きます。
+**中身は共通で、置き場所が変わるだけです**（下記のサンプルはそのままどちらの場所でも使えます）。
+
+### 1. 規約パスに置く（推奨・駆動先リポジトリを汚さない）
+
+```bash
+mkdir -p ~/.claude/dev-workflow/sandbox/<リポジトリ名>
+```
+
+このディレクトリに、下記と同じ内容の `Dockerfile.dev`（または `docker-compose.dev.yml`）を配置
+してください。`<リポジトリ名>` は `basename(リポジトリルート)` です。
+
+### 2. 環境変数で渡す
+
+```bash
+export DEV_WORKFLOW_DOCKERFILE=/path/to/Dockerfile.dev
+```
+
+### 3. リポジトリ直下に置いてコミットする（チームで run を共有する場合のみ）
 
 プロジェクトルートに開発用Dockerfileを配置してください:
 
@@ -456,6 +483,35 @@ node_modules  yarn.lock package.json
   コマンドの前に `share-prepared-dirs.sh --detach` で共有リンクを解除してから install する
   必要がある（generator へは run が指示するが、人間が挙動を追えるようここにも明記する）
 
+## ハーネス非注入原則
+
+**dev-workflow ハーネス都合のファイル・設定を、駆動先の業務リポジトリに注入しない。**
+サンドボックス定義に限らず、permission 設定・マーカー・状態ファイル・worktree 等、
+ハーネスが動作のために必要とするものは、業務リポジトリのコミット履歴やPRに混入させない。
+
+| ハーネス由来のもの | あるべき置き場所 |
+|---|---|
+| サンドボックス定義 | 規約パス `~/.claude/dev-workflow/sandbox/<repo>/` または環境変数。リポジトリ内に置くのは**チームで run を共有する場合に限る** |
+| YOLO 用の permission 設定 | gitignore 済みの `.claude/settings.local.json`、またはユーザースコープ。**git 追跡された設定に広範な allow を積まない** |
+| マーカー・状態ファイル・worktree | リポジトリ内に置くが、`.git/info/exclude`（コミットされない）で除外する。**`.gitignore` は駆動先の共有ファイルなので触らない** |
+
+### `scripts/check-repo-hygiene.sh`
+
+上記を検証・整備するスクリプト。利用者向けの使い方はここが正本です。
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-repo-hygiene.sh"          # 手動チェック（ブロックしない）
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-repo-hygiene.sh" --run    # runと同じ判定（ブロックしうる）
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-repo-hygiene.sh" --check  # 書き換えず判定だけ行う
+```
+
+- 終了コード: `0` = OK（警告があっても0） / `2` = ブロック（引数エラー、または `--run` かつ
+  `.claude/settings.local.json` が追跡されておりブロック条件を満たす場合）
+- 環境変数 `DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS` を非空に設定すると、`--run` 時のブロックを
+  一時的に解除できる（判定は block ではなく warn になる）
+- **SessionStart のたびに自動実行され**、`.git/info/exclude` の整備は毎セッション冪等に行われる
+  （既存の除外内容が期待値と一致していれば書き込まない）
+
 ## YOLOモード（完全自律動作）
 
 実装フェーズ（run）ではユーザー確認を一切行わず完全自律で動作する。
@@ -463,7 +519,24 @@ node_modules  yarn.lock package.json
 ### パーミッション設定（必須）
 
 YOLOモードではClaude Code本体のパーミッション確認を無効化する必要がある。
-プロジェクトの `.claude/settings.json` に許可・拒否コマンドを設定する:
+
+#### 置き場所（スコープ）
+
+| 置き場所 | 用途 |
+|---|---|
+| `.claude/settings.local.json`（**gitignore 済みであること**） | 個人の YOLO 用許可。**既定の置き場所** |
+| ユーザースコープ（`~/.claude/settings.json`） | 複数リポジトリで同じ許可を使い回す場合 |
+| `.claude/settings.json`（git 追跡） | **チームで共有する場合のみ。** レビューを経て、最小限の許可だけを置く |
+
+**危険性:** git 追跡された設定に広範な allow（`Bash(*)` / `Bash(git *)` 等）をコミットすると、
+そのリポジトリを clone したチームメンバー全員の Claude Code セッションに**同意なく適用される**。
+個人の判断で入れた YOLO 許可が、リポジトリ経由でチーム全体への権限付与に化ける。
+
+`scripts/check-repo-hygiene.sh` はこれを検知する。**git 追跡された `.claude/settings.local.json`
+は run をブロックする**（`DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS=1` で opt-out）。詳細は上記
+「ハーネス非注入原則」を参照。
+
+上記いずれかのスコープに、許可・拒否コマンドを設定する:
 
 ```json
 {
@@ -579,14 +652,38 @@ READABILITY_MAX_LINE=5000      # ソース1行の許容上限（文字数）
 DEV_WORKFLOW_DOCKER_IMAGE=my-image:tag      # 既存イメージを使う（ビルドしない）
 DEV_WORKFLOW_DOCKER_COMPOSE_FILE=path.yml   # 使用する compose ファイル
 DEV_WORKFLOW_DOCKERFILE=path                # 使用する Dockerfile（既定: Dockerfile.dev）
+DEV_WORKFLOW_SANDBOX_HOME=path              # 規約パスのベースディレクトリ（既定: ~/.claude/dev-workflow/sandbox）
+DEV_WORKFLOW_DOCKER_BUILD_CONTEXT=path      # ビルドコンテキストの明示指定（最優先）
 ```
 
-未設定の場合は `Dockerfile.dev` → `docker-compose.dev.yml` の順に探索します。
+### 解決順
+
+| 順 | 条件 | 結果 |
+|---|---|---|
+| 1 | `DEV_WORKFLOW_DOCKER_IMAGE` が非空 | 既存イメージを使う（ビルドしない） |
+| 2 | `${DEV_WORKFLOW_DOCKERFILE:-Dockerfile.dev}` が存在 | その Dockerfile をビルド |
+| 3 | `${DEV_WORKFLOW_DOCKER_COMPOSE_FILE:-docker-compose.dev.yml}` が存在 | compose を使う |
+| 4 | `<SANDBOX_HOME>/<repo>/Dockerfile.dev` が存在 | その Dockerfile をビルド |
+| 5 | `<SANDBOX_HOME>/<repo>/docker-compose.dev.yml` が存在 | compose を使う |
+| 6 | いずれも不成立 | `mode=none`（run は開始しない） |
+
+`<SANDBOX_HOME>` は `DEV_WORKFLOW_SANDBOX_HOME`（既定 `~/.claude/dev-workflow/sandbox`）、
+`<repo>` は `basename(リポジトリルート)` です。
+
 現在の解決結果は次のコマンドで確認できます。
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-sandbox.sh" --print
 ```
+
+### ビルドコンテキスト
+
+Dockerfile がリポジトリルート外（規約パス等）にある場合、ビルドコンテキストは
+**リポジトリルート**になります（compose の `--project-directory` 固定と同じ思想）。これにより
+規約パスに置いた Dockerfile でも `COPY package*.json ./` が動きます。リポジトリ内に置いた
+Dockerfile の挙動は従来どおり `dirname(Dockerfile)` のままで変わりません。
+`DEV_WORKFLOW_DOCKER_BUILD_CONTEXT` を設定するとこの既定を上書きし、常にその値をビルド
+コンテキストとして使います（最優先）。
 
 ### 分離単位（コンテナ = epic / キャッシュ = リポジトリ / イメージ = Dockerfileのhash）
 
@@ -789,6 +886,8 @@ git reset --hard
 DEV_WORKFLOW_DOCKER_IMAGE=my-image:tag       # 既存イメージを使う（ビルドしない）
 DEV_WORKFLOW_DOCKER_COMPOSE_FILE=path.yml    # 使用する compose ファイル
 DEV_WORKFLOW_DOCKERFILE=path                 # 使用する Dockerfile（既定: Dockerfile.dev）
+DEV_WORKFLOW_SANDBOX_HOME=path                # 規約パスのベースディレクトリ（既定: ~/.claude/dev-workflow/sandbox）
+DEV_WORKFLOW_DOCKER_BUILD_CONTEXT=path        # ビルドコンテキストの明示指定（最優先）
 DEV_WORKFLOW_CACHE_PATHS="/path1 /path2"     # volume化するコンテナ内パス（スペース区切り）
 DEV_WORKFLOW_EPIC=epic259                    # --epic 未指定時に参照する epic 識別子
 DEV_WORKFLOW_COMPOSE_SERVICE=app             # composeモードでexecするサービス名
@@ -829,11 +928,10 @@ https://hooks.slack.com/services/XXX/YYY/ZZZ
 | `none` | メンションなし |
 | `<@U123ABC>` | 特定ユーザーへのメンション（SlackのメンバーID） |
 
-3. **`.claude/slack-webhook` は必ず `.gitignore` に追加する**（Webhook URLは秘密情報）
-
-```bash
-echo ".claude/slack-webhook" >> .gitignore
-```
+3. `.claude/slack-webhook` はWebhook URLという秘密情報を含むため、`.gitignore` には追加しない。
+   `.git/info/exclude`（コミットされないローカル除外設定）で自動的に除外される。**`.gitignore`
+   は駆動先チームの共有ファイルなので触らない**（上記「ハーネス非注入原則」参照）。この整備は
+   `scripts/check-repo-hygiene.sh` が SessionStart のたびに冪等に行う
 
 環境変数 `SLACK_WEBHOOK_URL` / `DEV_WORKFLOW_PROJECT_NAME` でも指定できる（ファイル設定が優先）。メンションは `DEV_WORKFLOW_SLACK_MENTION` で上書きでき、こちらはファイル設定より優先される。
 
@@ -882,13 +980,12 @@ echo ".claude/slack-webhook" >> .gitignore
 
 これにより、**エラーで落ちた・承認待ちで止まった・コンテキストが尽きた**といった「静かな失敗」も取りこぼさずに通知される。停止通知は鳴り続けないよう1回だけ送られる。
 
-マーカーは一時ファイルなので `.gitignore` に追加しておく:
+マーカーは一時ファイルであり、`.git/info/exclude`（コミットされないローカル除外設定）で
+自動的に除外される。**`.gitignore` は駆動先チームの共有ファイルなので触らない**（上記
+「ハーネス非注入原則」参照）。この整備は `scripts/check-repo-hygiene.sh` が SessionStart の
+たびに冪等に行う。
 
-```bash
-echo ".claude/.dev-workflow-*" >> .gitignore
-```
-
-（通知の抑止状態を持つ `.claude/.dev-workflow-notify-last` とデバッグログも同じパターンで除外される）
+（通知の抑止状態を持つ `.claude/.dev-workflow-notify-last` とデバッグログも同じ仕組みで除外される）
 
 ### 通常の応答完了通知の有効化
 

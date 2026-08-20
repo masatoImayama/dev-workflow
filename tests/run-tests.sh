@@ -9499,6 +9499,589 @@ case "$GEN113_PREP_SECTION" in
       "$GEN113_PREP_SECTION" ;;
 esac
 
+# ---------------------------------------------------------------------------
+# check-repo-hygiene.sh（.git/info/exclude の冪等整備・骨格）（#124）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== check-repo-hygiene.sh（.git/info/exclude の冪等整備） =="
+
+HYG_SCRIPT="${REPO_ROOT}/scripts/check-repo-hygiene.sh"
+
+# --- bash -n が通る ---
+if bash -n "$HYG_SCRIPT" 2>/dev/null; then
+  pass "check-repo-hygiene.sh: bash -n の構文チェックが通る（#124）"
+else
+  fail "check-repo-hygiene.sh: bash -n の構文チェックが通る（#124）"
+fi
+
+# --- rm / rmdir / unlink によるファイル削除が無い（安全ルール）。
+#     share-prepared-dirs.sh のテストと同じ検査方法（コメント行を除外し、単語境界での一致だけを見る） ---
+HYG_FORBIDDEN_HITS="$(grep -v '^[[:space:]]*#' "$HYG_SCRIPT" \
+  | grep -E '(^|[^A-Za-z0-9_])(rm|rmdir|unlink)([[:space:]]|$)' || true)"
+if [ -z "$HYG_FORBIDDEN_HITS" ]; then
+  pass "check-repo-hygiene.sh: rm / rmdir / unlink によるファイル削除が無い（#124）"
+else
+  fail "check-repo-hygiene.sh: rm / rmdir / unlink によるファイル削除が無い（#124）" "$HYG_FORBIDDEN_HITS"
+fi
+
+# --- 未知のオプションで exit 2（完了条件8） ---
+HYG_UNKNOWN_OUT="$(bash "$HYG_SCRIPT" --bogus 2>&1)"
+HYG_UNKNOWN_EXIT=$?
+assert_exit_code "check-repo-hygiene.sh: 未知のオプションで exit 2（#124）" 2 "$HYG_UNKNOWN_EXIT"
+case "$HYG_UNKNOWN_OUT" in
+  *"ERROR:"*"--bogus"*)
+    pass "check-repo-hygiene.sh: 未知のオプションはエラーメッセージ付きで拒否される（黙って無視しない）（#124）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 未知のオプションはエラーメッセージ付きで拒否される（黙って無視しない）（#124）" "$HYG_UNKNOWN_OUT" ;;
+esac
+
+# --- git 管理外のディレクトリで実行しても exit 0、何も書き込まない（完了条件7） ---
+HYG_NONGIT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-nongit.XXXXXX")"
+HYG_NONGIT_EXIT=0
+( cd "$HYG_NONGIT_DIR" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1 || HYG_NONGIT_EXIT=$?
+assert_exit_code "check-repo-hygiene.sh: git管理外ディレクトリで exit 0（#124）" 0 "$HYG_NONGIT_EXIT"
+assert_eq "check-repo-hygiene.sh: git管理外ディレクトリでは .git が作られない（#124）" \
+  "no" "$([ -e "${HYG_NONGIT_DIR}/.git" ] && echo yes || echo no)"
+
+# --- 既定モードは stdout に何も出さない・exit 0（SessionStart 用。stdoutを汚さない） ---
+HYG_REPO_DEFAULT="$(make_temp_repo)"
+HYG_DEFAULT_EXIT=0
+HYG_DEFAULT_OUT="$( (cd "$HYG_REPO_DEFAULT" && bash "$HYG_SCRIPT") 2>/dev/null)" || HYG_DEFAULT_EXIT=$?
+assert_eq "check-repo-hygiene.sh: 既定モードはstdoutに何も出さない（#124）" "" "$HYG_DEFAULT_OUT"
+assert_exit_code "check-repo-hygiene.sh: 既定モードは exit 0（#124）" 0 "$HYG_DEFAULT_EXIT"
+
+# --- --run も本タスクの範囲ではブロックせず exit 0 ---
+HYG_RUN_EXIT=0
+( cd "$HYG_REPO_DEFAULT" && bash "$HYG_SCRIPT" --run ) >/dev/null 2>&1 || HYG_RUN_EXIT=$?
+assert_exit_code "check-repo-hygiene.sh: --run は本タスクの範囲ではブロックせず exit 0（#124）" 0 "$HYG_RUN_EXIT"
+
+# --- 完了条件1: 空の一時 git リポジトリで実行すると .git/info/exclude にブロックが追記される ---
+HYG_REPO1="$(make_temp_repo)"
+( cd "$HYG_REPO1" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1
+HYG_EXCLUDE1="${HYG_REPO1}/.git/info/exclude"
+assert_eq "check-repo-hygiene.sh: 空のリポジトリで .git/info/exclude が作られる（#124）" \
+  "yes" "$([ -f "$HYG_EXCLUDE1" ] && echo yes || echo no)"
+
+HYG_EXCLUDE1_CONTENT="$(cat -- "$HYG_EXCLUDE1" 2>/dev/null)"
+case "$HYG_EXCLUDE1_CONTENT" in
+  *'# >>> dev-workflow: ハーネス生成物のローカル除外（自動生成。コミットされません） >>>'*'/.claude/.dev-workflow-*'*'/.claude/worktrees/'*'/.claude/agent-tokens.tsv'*'/.claude/slack-webhook'*'/.claude/settings.local.json'*'# <<< dev-workflow <<<'*)
+    pass "check-repo-hygiene.sh: 期待されるブロック内容が書き込まれる（#124）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 期待されるブロック内容が書き込まれる（#124）" "$HYG_EXCLUDE1_CONTENT" ;;
+esac
+
+# --- 完了条件2: 2回連続で実行しても内容は1度しか変わらない（冪等）。2回目は exclude_updated=no ---
+HYG_CONTENT_BEFORE="$(cat -- "$HYG_EXCLUDE1")"
+HYG_PRINT2="$( cd "$HYG_REPO1" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+HYG_CONTENT_AFTER="$(cat -- "$HYG_EXCLUDE1")"
+assert_eq "check-repo-hygiene.sh: 2回目実行後も .git/info/exclude の内容は変わらない（冪等）（#124）" \
+  "$HYG_CONTENT_BEFORE" "$HYG_CONTENT_AFTER"
+assert_eq "check-repo-hygiene.sh: 2回目実行時は exclude_updated=no（#124）" \
+  "no" "$(printf '%s\n' "$HYG_PRINT2" | sed -n 's/^exclude_updated=//p')"
+
+# --- 完了条件3: ユーザーが事前に書いた既存行（マーカー外）が1行も失われない ---
+HYG_REPO2="$(make_temp_repo)"
+HYG_EXCLUDE2="${HYG_REPO2}/.git/info/exclude"
+printf 'existing-line-1\nexisting-line-2\n' > "$HYG_EXCLUDE2"
+( cd "$HYG_REPO2" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1
+HYG_EXCLUDE2_CONTENT="$(cat -- "$HYG_EXCLUDE2")"
+case "$HYG_EXCLUDE2_CONTENT" in
+  *'existing-line-1'*'existing-line-2'*)
+    pass "check-repo-hygiene.sh: 事前に書かれた既存行が保持される（#124）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 事前に書かれた既存行が保持される（#124）" "$HYG_EXCLUDE2_CONTENT" ;;
+esac
+case "$HYG_EXCLUDE2_CONTENT" in
+  *'# >>> dev-workflow: ハーネス生成物のローカル除外（自動生成。コミットされません） >>>'*)
+    pass "check-repo-hygiene.sh: 既存行があってもブロックが追記される（#124）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 既存行があってもブロックが追記される（#124）" "$HYG_EXCLUDE2_CONTENT" ;;
+esac
+
+# --- 完了条件4: ブロック内容が改変されている状態で実行すると、ブロック内だけが期待値に
+#     復元され、マーカー外の行（前方・後方とも）は変更されない ---
+HYG_REPO3="$(make_temp_repo)"
+HYG_EXCLUDE3="${HYG_REPO3}/.git/info/exclude"
+{
+  echo "outer-line-kept"
+  echo "# >>> dev-workflow: ハーネス生成物のローカル除外（自動生成。コミットされません） >>>"
+  echo "/.claude/tampered-line"
+  echo "# <<< dev-workflow <<<"
+  echo "outer-line-after"
+} > "$HYG_EXCLUDE3"
+
+( cd "$HYG_REPO3" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1
+HYG_EXCLUDE3_CONTENT="$(cat -- "$HYG_EXCLUDE3")"
+
+case "$HYG_EXCLUDE3_CONTENT" in
+  *'outer-line-kept'*)
+    pass "check-repo-hygiene.sh: ブロック改変時もマーカー外の前方行は保持される（#124）" ;;
+  *)
+    fail "check-repo-hygiene.sh: ブロック改変時もマーカー外の前方行は保持される（#124）" "$HYG_EXCLUDE3_CONTENT" ;;
+esac
+case "$HYG_EXCLUDE3_CONTENT" in
+  *'outer-line-after'*)
+    pass "check-repo-hygiene.sh: ブロック改変時もマーカー外の後方行は保持される（#124）" ;;
+  *)
+    fail "check-repo-hygiene.sh: ブロック改変時もマーカー外の後方行は保持される（#124）" "$HYG_EXCLUDE3_CONTENT" ;;
+esac
+case "$HYG_EXCLUDE3_CONTENT" in
+  *'/.claude/tampered-line'*)
+    fail "check-repo-hygiene.sh: 改変されたブロック内容は期待値に復元される（#124）" "$HYG_EXCLUDE3_CONTENT" ;;
+  *)
+    pass "check-repo-hygiene.sh: 改変されたブロック内容は期待値に復元される（#124）" ;;
+esac
+case "$HYG_EXCLUDE3_CONTENT" in
+  *'/.claude/worktrees/'*'/.claude/agent-tokens.tsv'*'/.claude/slack-webhook'*'/.claude/settings.local.json'*)
+    pass "check-repo-hygiene.sh: 復元後のブロックに期待される全エントリが含まれる（#124）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 復元後のブロックに期待される全エントリが含まれる（#124）" "$HYG_EXCLUDE3_CONTENT" ;;
+esac
+
+# --- 完了条件5: worktree から実行しても、書き込み先はメインリポの .git/info/exclude になる ---
+HYG_REPO4="$(make_temp_repo)"
+HYG_WT4_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-wt.XXXXXX")"
+make_worktree "$HYG_REPO4" "$HYG_WT4_DIR" "hyg-worktree-branch"
+
+HYG_WT4_GITDIR="$(cd "$HYG_WT4_DIR" && git rev-parse --path-format=absolute --git-dir)"
+HYG_WT4_COMMONDIR="$(cd "$HYG_WT4_DIR" && git rev-parse --path-format=absolute --git-common-dir)"
+assert_eq "check-repo-hygiene.sh: worktreeのgit-common-dirはメインリポの.gitと一致する（前提確認）（#124）" \
+  "${HYG_REPO4}/.git" "$HYG_WT4_COMMONDIR"
+
+( cd "$HYG_WT4_DIR" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1
+
+case "$(cat -- "${HYG_WT4_COMMONDIR}/info/exclude" 2>/dev/null)" in
+  *'# >>> dev-workflow'*)
+    pass "check-repo-hygiene.sh: worktreeから実行してもgit-common-dir配下のinfo/excludeに書き込まれる（#124）" ;;
+  *)
+    fail "check-repo-hygiene.sh: worktreeから実行してもgit-common-dir配下のinfo/excludeに書き込まれる（#124）" ;;
+esac
+assert_eq "check-repo-hygiene.sh: worktree専用git-dir配下にはinfo/excludeが作られない（#124）" \
+  "no" "$([ -e "${HYG_WT4_GITDIR}/info/exclude" ] && echo yes || echo no)"
+
+# --- 完了条件6: --check では書き込みが発生しない（ファイルの内容が変わらない）が、
+#     exclude_updated は必要性を正しく報告する。
+#     `git init` は既定のテンプレートから .git/info/exclude を作るため、実行前から
+#     ファイルが存在すること自体は前提にできない（内容がブロックを含まないことだけを前提にする）。 ---
+HYG_REPO5="$(make_temp_repo)"
+HYG_EXCLUDE5="${HYG_REPO5}/.git/info/exclude"
+HYG_EXCLUDE5_BEFORE="$(cat -- "$HYG_EXCLUDE5" 2>/dev/null)"
+case "$HYG_EXCLUDE5_BEFORE" in
+  *'# >>> dev-workflow'*)
+    fail "check-repo-hygiene.sh: --check前提: 実行前はまだブロックが含まれていない（#124）" "$HYG_EXCLUDE5_BEFORE" ;;
+  *)
+    pass "check-repo-hygiene.sh: --check前提: 実行前はまだブロックが含まれていない（#124）" ;;
+esac
+
+HYG_CHECK1_OUT="$( cd "$HYG_REPO5" && bash "$HYG_SCRIPT" --check --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: --check時、更新が必要なら exclude_updated=yes（#124）" \
+  "yes" "$(printf '%s\n' "$HYG_CHECK1_OUT" | sed -n 's/^exclude_updated=//p')"
+assert_eq "check-repo-hygiene.sh: --check時は実際には書き込まれない（ファイル内容が変わらない）（#124）" \
+  "$HYG_EXCLUDE5_BEFORE" "$(cat -- "$HYG_EXCLUDE5" 2>/dev/null)"
+
+( cd "$HYG_REPO5" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1
+HYG_CHECK2_OUT="$( cd "$HYG_REPO5" && bash "$HYG_SCRIPT" --check --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: 整備済み後の --check では exclude_updated=no（#124）" \
+  "no" "$(printf '%s\n' "$HYG_CHECK2_OUT" | sed -n 's/^exclude_updated=//p')"
+
+# --- --print の予約領域キー（#126 / #127 が値を埋めるまでの固定値。完了条件の前提整備） ---
+HYG_PRINT_KEYS_OUT="$( cd "$HYG_REPO1" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: --print出力にrepo_rootキーがある（#124）" \
+  "yes" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | grep -q '^repo_root=' && echo yes || echo no)"
+assert_eq "check-repo-hygiene.sh: --print出力にexclude_fileキーがある（#124）" \
+  "yes" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | grep -q '^exclude_file=' && echo yes || echo no)"
+assert_eq "check-repo-hygiene.sh: --print出力でtracked_settings_local=no（#126予約領域）" \
+  "no" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | sed -n 's/^tracked_settings_local=//p')"
+assert_eq "check-repo-hygiene.sh: --print出力でtracked_settings=no（#126予約領域）" \
+  "no" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | sed -n 's/^tracked_settings=//p')"
+assert_eq "check-repo-hygiene.sh: --print出力でbroad_allow=no（#126予約領域）" \
+  "no" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | sed -n 's/^broad_allow=//p')"
+assert_eq "check-repo-hygiene.sh: --print出力でsandbox_in_repo_untracked=no（sandbox定義が無いリポジトリ）（#127）" \
+  "no" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | sed -n 's/^sandbox_in_repo_untracked=//p')"
+assert_eq "check-repo-hygiene.sh: --print出力でverdict=ok（#124）" \
+  "ok" "$(printf '%s\n' "$HYG_PRINT_KEYS_OUT" | sed -n 's/^verdict=//p')"
+
+# ---------------------------------------------------------------------------
+# check-repo-hygiene.sh（permission 衛生チェックと --run ブロック）（#126）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== check-repo-hygiene.sh（permission 衛生チェックと --run ブロック） =="
+
+make_hyg_perm_repo() {
+  # make_hyg_perm_repo <dir> <settings_local_json追跡有無:yes|no> <settings_json内容(空なら未作成)> <settings_json追跡有無:yes|no>
+  # 一時 git リポジトリを作り、必要に応じて .claude/settings.local.json /
+  # .claude/settings.json を配置・追跡してパスを返す。
+  local dir="$1" track_local="$2" settings_content="$3" track_settings="$4"
+  (
+    cd "$dir" || exit 1
+    git init -q
+    git config user.email "dev-workflow-test@example.com"
+    git config user.name "dev-workflow test"
+    printf 'test repo\n' > README.md
+    git add README.md
+    git commit -q -m "init"
+    mkdir -p .claude
+    if [ "$track_local" = "yes" ]; then
+      printf '{}\n' > .claude/settings.local.json
+      git add .claude/settings.local.json
+    fi
+    if [ -n "$settings_content" ]; then
+      printf '%s\n' "$settings_content" > .claude/settings.json
+      if [ "$track_settings" = "yes" ]; then
+        git add .claude/settings.json
+      fi
+    fi
+    if [ "$track_local" = "yes" ] || { [ -n "$settings_content" ] && [ "$track_settings" = "yes" ]; }; then
+      git commit -q -m "add .claude settings"
+    fi
+  ) >/dev/null 2>&1
+}
+
+# --- 完了条件1: settings.local.json を追跡した状態で --run すると exit 2、verdict=block ---
+HYG_PERM1="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-perm1.XXXXXX")"
+make_hyg_perm_repo "$HYG_PERM1" "yes" "" "no"
+HYG_PERM1_OUT="$( cd "$HYG_PERM1" && bash "$HYG_SCRIPT" --run --print 2>/dev/null )"
+HYG_PERM1_EXIT=$?
+HYG_PERM1_STDERR="$( cd "$HYG_PERM1" && bash "$HYG_SCRIPT" --run --print 2>&1 1>/dev/null )"
+assert_exit_code "check-repo-hygiene.sh: settings.local.json追跡＋--runでexit 2（#126完了条件1）" 2 "$HYG_PERM1_EXIT"
+assert_eq "check-repo-hygiene.sh: settings.local.json追跡＋--runでverdict=block（#126完了条件1）" \
+  "block" "$(printf '%s\n' "$HYG_PERM1_OUT" | sed -n 's/^verdict=//p')"
+assert_eq "check-repo-hygiene.sh: settings.local.json追跡＋--runでtracked_settings_local=yes（#126完了条件1）" \
+  "yes" "$(printf '%s\n' "$HYG_PERM1_OUT" | sed -n 's/^tracked_settings_local=//p')"
+
+# --- 完了条件2: DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS=1 を付けると exit 0、verdict=warn ---
+HYG_PERM2_OUT="$( cd "$HYG_PERM1" && DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS=1 bash "$HYG_SCRIPT" --run --print 2>/dev/null )"
+HYG_PERM2_EXIT=$?
+assert_exit_code "check-repo-hygiene.sh: opt-out付き--runでexit 0（#126完了条件2）" 0 "$HYG_PERM2_EXIT"
+assert_eq "check-repo-hygiene.sh: opt-out付き--runでverdict=warn（#126完了条件2）" \
+  "warn" "$(printf '%s\n' "$HYG_PERM2_OUT" | sed -n 's/^verdict=//p')"
+
+# --- 完了条件3: --run なし（既定モード）なら exit 0、verdict=warn ---
+HYG_PERM3_OUT="$( cd "$HYG_PERM1" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+HYG_PERM3_EXIT=$?
+assert_exit_code "check-repo-hygiene.sh: 既定モードはexit 0（#126完了条件3）" 0 "$HYG_PERM3_EXIT"
+assert_eq "check-repo-hygiene.sh: 既定モードはverdict=warn（#126完了条件3）" \
+  "warn" "$(printf '%s\n' "$HYG_PERM3_OUT" | sed -n 's/^verdict=//p')"
+
+# --- 完了条件4: settings.local.json が未追跡なら tracked_settings_local=no、--runでもexit 0 ---
+HYG_PERM4="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-perm4.XXXXXX")"
+make_hyg_perm_repo "$HYG_PERM4" "no" "" "no"
+HYG_PERM4_OUT="$( cd "$HYG_PERM4" && bash "$HYG_SCRIPT" --run --print 2>/dev/null )"
+HYG_PERM4_EXIT=$?
+assert_eq "check-repo-hygiene.sh: settings.local.json未追跡でtracked_settings_local=no（#126完了条件4）" \
+  "no" "$(printf '%s\n' "$HYG_PERM4_OUT" | sed -n 's/^tracked_settings_local=//p')"
+assert_exit_code "check-repo-hygiene.sh: settings.local.json未追跡なら--runでもexit 0（#126完了条件4）" 0 "$HYG_PERM4_EXIT"
+
+# --- 完了条件5: settings.json を追跡し "Bash(*)" を含めるとbroad_allow=yesだがexit 0（ブロックしない） ---
+HYG_PERM5="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-perm5.XXXXXX")"
+make_hyg_perm_repo "$HYG_PERM5" "no" '{"permissions":{"allow":["Bash(*)"]}}' "yes"
+HYG_PERM5_OUT="$( cd "$HYG_PERM5" && bash "$HYG_SCRIPT" --run --print 2>/dev/null )"
+HYG_PERM5_EXIT=$?
+assert_eq "check-repo-hygiene.sh: Bash(*)を含む追跡済みsettings.jsonでbroad_allow=yes（#126完了条件5）" \
+  "yes" "$(printf '%s\n' "$HYG_PERM5_OUT" | sed -n 's/^broad_allow=//p')"
+assert_exit_code "check-repo-hygiene.sh: broad_allow=yesでもexit 0（ブロックしない）（#126完了条件5）" 0 "$HYG_PERM5_EXIT"
+
+# --- 完了条件6: "Bash(npm run test:*)" だけを含む追跡済みsettings.jsonではbroad_allow=no（誤検知しない） ---
+HYG_PERM6="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-perm6.XXXXXX")"
+make_hyg_perm_repo "$HYG_PERM6" "no" '{"permissions":{"allow":["Bash(npm run test:*)"]}}' "yes"
+HYG_PERM6_OUT="$( cd "$HYG_PERM6" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: 狭い許可のみの追跡済みsettings.jsonではbroad_allow=no（#126完了条件6）" \
+  "no" "$(printf '%s\n' "$HYG_PERM6_OUT" | sed -n 's/^broad_allow=//p')"
+
+# --- 完了条件7: settings.json が未追跡なら、広範な allow を含んでいてもbroad_allow=no ---
+HYG_PERM7="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-perm7.XXXXXX")"
+make_hyg_perm_repo "$HYG_PERM7" "no" '{"permissions":{"allow":["Bash(*)"]}}' "no"
+HYG_PERM7_OUT="$( cd "$HYG_PERM7" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: settings.json未追跡ならbroad_allow=no（#126完了条件7）" \
+  "no" "$(printf '%s\n' "$HYG_PERM7_OUT" | sed -n 's/^broad_allow=//p')"
+assert_eq "check-repo-hygiene.sh: settings.json未追跡ならtracked_settings=no（#126完了条件7）" \
+  "no" "$(printf '%s\n' "$HYG_PERM7_OUT" | sed -n 's/^tracked_settings=//p')"
+
+# --- 完了条件8: stderrにgit rm --cachedの案内が含まれるが、実際にはgit rmを実行していない
+#     （テスト後もファイルが追跡されたまま） ---
+case "$HYG_PERM1_STDERR" in
+  *'git rm --cached .claude/settings.local.json'*)
+    pass "check-repo-hygiene.sh: stderrにgit rm --cachedの案内が含まれる（#126完了条件8）" ;;
+  *)
+    fail "check-repo-hygiene.sh: stderrにgit rm --cachedの案内が含まれる（#126完了条件8）" "$HYG_PERM1_STDERR" ;;
+esac
+HYG_PERM1_STILL_TRACKED="$( cd "$HYG_PERM1" && git ls-files -- .claude/settings.local.json )"
+assert_eq "check-repo-hygiene.sh: 案内後もsettings.local.jsonは実際には削除されず追跡されたまま（#126完了条件8）" \
+  ".claude/settings.local.json" "$HYG_PERM1_STILL_TRACKED"
+
+echo ""
+echo "== README.mdへのハーネス非注入原則・規約パス・YOLO許可スコープ指針の追記（#130） =="
+
+DOC130_README="${REPO_ROOT}/README.md"
+DOC130_INSTRUCTIONS="${REPO_ROOT}/core/instructions.md"
+DOC130_SKILL="${REPO_ROOT}/skills/run/SKILL.md"
+
+# --- 1. 前提条件・Docker sandboxのセットアップに3択が反映されている ---
+
+if grep -Fq '規約パスに置く（推奨）' "$DOC130_README" \
+  && grep -Fq '~/.claude/dev-workflow/sandbox/<リポジトリ名>/Dockerfile.dev' "$DOC130_README" \
+  && grep -Fq 'リポジトリ直下に置いてコミットする' "$DOC130_README" \
+  && grep -Fq 'チームで run を共有する場合のみ' "$DOC130_README"; then
+  pass "README.md: サンドボックス定義供給の3択（規約パス・環境変数・リポジトリ直下）が明記されている（#130）"
+else
+  fail "README.md: サンドボックス定義供給の3択（規約パス・環境変数・リポジトリ直下）が明記されている（#130）"
+fi
+
+if grep -Fq '### 1. 規約パスに置く（推奨・駆動先リポジトリを汚さない）' "$DOC130_README"; then
+  pass "README.md: 「Docker sandbox のセットアップ」で規約パスが第一候補として書かれている（#130）"
+else
+  fail "README.md: 「Docker sandbox のセットアップ」で規約パスが第一候補として書かれている（#130）"
+fi
+
+# --- 2. 3択の文言がcore/instructions.md・skills/run/SKILL.mdと一致している（完了条件2） ---
+
+DOC130_CHOICE_PHRASES=(
+  '規約パスに置く（推奨）'
+  '~/.claude/dev-workflow/sandbox/<リポジトリ名>/Dockerfile.dev'
+  'DEV_WORKFLOW_DOCKERFILE'
+  'DEV_WORKFLOW_DOCKER_COMPOSE_FILE'
+  'DEV_WORKFLOW_DOCKER_IMAGE'
+  'リポジトリ直下に置いてコミットする'
+  'チームで run を共有する場合のみ'
+)
+DOC130_CHOICE_OK=1
+for phrase in "${DOC130_CHOICE_PHRASES[@]}"; do
+  if ! grep -Fq "$phrase" "$DOC130_README" \
+    || ! grep -Fq "$phrase" "$DOC130_INSTRUCTIONS" \
+    || ! grep -Fq "$phrase" "$DOC130_SKILL"; then
+    DOC130_CHOICE_OK=0
+    break
+  fi
+done
+if [ "$DOC130_CHOICE_OK" = "1" ]; then
+  pass "README.md/core/instructions.md/skills/run/SKILL.md: 3択の文言が一致している（#130完了条件2）"
+else
+  fail "README.md/core/instructions.md/skills/run/SKILL.md: 3択の文言が一致している（#130完了条件2）" \
+    "不一致の句: ${phrase}"
+fi
+
+# --- 3. サンドボックス設定に解決順の表と新規環境変数がある ---
+
+if grep -Fq '### 解決順' "$DOC130_README" \
+  && grep -Fq 'DEV_WORKFLOW_DOCKER_IMAGE` が非空' "$DOC130_README" \
+  && grep -Fq 'mode=none`（run は開始しない）' "$DOC130_README"; then
+  pass "README.md: サンドボックス設定に解決順の表がある（#130）"
+else
+  fail "README.md: サンドボックス設定に解決順の表がある（#130）"
+fi
+
+if grep -Fq 'DEV_WORKFLOW_SANDBOX_HOME' "$DOC130_README" \
+  && grep -Fq 'DEV_WORKFLOW_DOCKER_BUILD_CONTEXT' "$DOC130_README" \
+  && grep -Fq 'ビルドコンテキストは' "$DOC130_README" \
+  && grep -Fq 'リポジトリルート' "$DOC130_README"; then
+  pass "README.md: DEV_WORKFLOW_SANDBOX_HOME/DEV_WORKFLOW_DOCKER_BUILD_CONTEXTとビルドコンテキスト規則が書かれている（#130）"
+else
+  fail "README.md: DEV_WORKFLOW_SANDBOX_HOME/DEV_WORKFLOW_DOCKER_BUILD_CONTEXTとビルドコンテキスト規則が書かれている（#130）"
+fi
+
+# --- 4. YOLOモードにパーミッションのスコープ指針がある ---
+
+if grep -Fq '#### 置き場所（スコープ）' "$DOC130_README" \
+  && grep -Fq '.claude/settings.local.json' "$DOC130_README" \
+  && grep -Fq '既定の置き場所' "$DOC130_README" \
+  && grep -Fq 'チームで共有する場合のみ' "$DOC130_README"; then
+  pass "README.md: YOLOモードにpermission設定の置き場所（スコープ）指針がある（#130）"
+else
+  fail "README.md: YOLOモードにpermission設定の置き場所（スコープ）指針がある（#130）"
+fi
+
+if grep -Fq '同意なく適用される' "$DOC130_README" && grep -Fq 'DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS' "$DOC130_README"; then
+  pass "README.md: 追跡された設定が同意なくチーム全体に適用される危険性が明記されている（#130）"
+else
+  fail "README.md: 追跡された設定が同意なくチーム全体に適用される危険性が明記されている（#130）"
+fi
+
+# --- 5. 通知マーカーの説明が.git/info/excludeの自動整備に更新されている ---
+
+if grep -Fq '.git/info/exclude' "$DOC130_README" \
+  && grep -Fq '駆動先チームの共有ファイルなので触らない' "$DOC130_README"; then
+  pass "README.md: 通知マーカーの説明が.git/info/exclude自動整備に更新されている（#130）"
+else
+  fail "README.md: 通知マーカーの説明が.git/info/exclude自動整備に更新されている（#130）"
+fi
+
+if grep -Fq 'echo ".claude/.dev-workflow-\*" >> .gitignore' "$DOC130_README"; then
+  fail "README.md: 通知マーカーに旧来の手作業.gitignore追記案内が残っていない（#130）"
+else
+  pass "README.md: 通知マーカーに旧来の手作業.gitignore追記案内が残っていない（#130）"
+fi
+
+# --- 6. 新節「ハーネス非注入原則」がYOLOモード節の近くにあり、check-repo-hygiene.shの使い方が書かれている ---
+
+if grep -Fq '## ハーネス非注入原則' "$DOC130_README"; then
+  pass "README.md: 「ハーネス非注入原則」の節がある（#130）"
+else
+  fail "README.md: 「ハーネス非注入原則」の節がある（#130）"
+fi
+
+DOC130_HYGIENE_SECTION="$(awk '/^## ハーネス非注入原則/{f=1} /^## YOLOモード/{f=0} f' "$DOC130_README")"
+case "$DOC130_HYGIENE_SECTION" in
+  *'check-repo-hygiene.sh'*'--run'*'--check'*)
+    pass "README.md: 「ハーネス非注入原則」節にcheck-repo-hygiene.shの--run/--checkの使い方がある（#130）" ;;
+  *)
+    fail "README.md: 「ハーネス非注入原則」節にcheck-repo-hygiene.shの--run/--checkの使い方がある（#130）" \
+      "$DOC130_HYGIENE_SECTION" ;;
+esac
+
+case "$DOC130_HYGIENE_SECTION" in
+  *'0`'*'OK'*'2`'*'ブロック'*)
+    pass "README.md: 「ハーネス非注入原則」節に終了コード（0=OK/2=ブロック）が書かれている（#130）" ;;
+  *)
+    fail "README.md: 「ハーネス非注入原則」節に終了コード（0=OK/2=ブロック）が書かれている（#130）" \
+      "$DOC130_HYGIENE_SECTION" ;;
+esac
+
+# 「ハーネス非注入原則」節がYOLOモード節の直前（近く）に配置されている
+if grep -Fq '## ハーネス非注入原則' "$DOC130_README" && grep -Fq '## YOLOモード（完全自律動作）' "$DOC130_README"; then
+  DOC130_HYGIENE_LINE="$(grep -n '^## ハーネス非注入原則' "$DOC130_README" | head -1 | cut -d: -f1)"
+  DOC130_YOLO_LINE="$(grep -n '^## YOLOモード（完全自律動作）' "$DOC130_README" | head -1 | cut -d: -f1)"
+  if [ -n "$DOC130_HYGIENE_LINE" ] && [ -n "$DOC130_YOLO_LINE" ] && [ "$DOC130_HYGIENE_LINE" -lt "$DOC130_YOLO_LINE" ] \
+    && [ "$((DOC130_YOLO_LINE - DOC130_HYGIENE_LINE))" -lt 40 ]; then
+    pass "README.md: 「ハーネス非注入原則」節がYOLOモード節の直前・近くに配置されている（#130）"
+  else
+    fail "README.md: 「ハーネス非注入原則」節がYOLOモード節の直前・近くに配置されている（#130）" \
+      "hygiene=${DOC130_HYGIENE_LINE} yolo=${DOC130_YOLO_LINE}"
+  fi
+else
+  fail "README.md: 「ハーネス非注入原則」節がYOLOモード節の直前・近くに配置されている（#130）" \
+    "いずれかの見出しが見つかりません"
+fi
+
+# ---------------------------------------------------------------------------
+# check-repo-hygiene.sh（孤立START_MARKER・複数START_MARKER・書き込み失敗時の回帰）（#133）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== check-repo-hygiene.sh（孤立START_MARKER・複数START_MARKER・書き込み失敗の回帰） =="
+
+HYG_MARKER_START='# >>> dev-workflow: ハーネス生成物のローカル除外（自動生成。コミットされません） >>>'
+HYG_MARKER_END='# <<< dev-workflow <<<'
+
+# --- 完了条件(#133): START_MARKERはあるが対応するEND_MARKERが無い（孤立マーカー）場合、
+#     そのマーカー行1行だけが差し替えられ、以降のユーザー行は保持される。
+#     （修正前は末尾に丸ごと追記していたため START_MARKER が2つになり、2回目の実行で
+#      「最初のSTART_MARKER〜追記ブロックのEND_MARKER」が一括差し替えされ、間の
+#      ユーザー行が失われていた） ---
+HYG_REPO6="$(make_temp_repo)"
+HYG_EXCLUDE6="${HYG_REPO6}/.git/info/exclude"
+{
+  echo "user-before-orphan-marker"
+  echo "$HYG_MARKER_START"
+  echo "user-after-orphan-marker-1"
+  echo "user-after-orphan-marker-2"
+} > "$HYG_EXCLUDE6"
+
+( cd "$HYG_REPO6" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1
+HYG_EXCLUDE6_CONTENT="$(cat -- "$HYG_EXCLUDE6")"
+
+case "$HYG_EXCLUDE6_CONTENT" in
+  *'user-before-orphan-marker'*'user-after-orphan-marker-1'*'user-after-orphan-marker-2'*)
+    pass "check-repo-hygiene.sh: 孤立START_MARKER修正時にユーザー行（前後とも）が保持される（#133）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 孤立START_MARKER修正時にユーザー行（前後とも）が保持される（#133）" \
+      "$HYG_EXCLUDE6_CONTENT" ;;
+esac
+
+HYG_EXCLUDE6_START_COUNT="$(grep -Fc -- "$HYG_MARKER_START" "$HYG_EXCLUDE6")"
+assert_eq "check-repo-hygiene.sh: 孤立START_MARKER修正後はSTART_MARKERが1つだけになる（複製されない）（#133）" \
+  "1" "$HYG_EXCLUDE6_START_COUNT"
+
+case "$HYG_EXCLUDE6_CONTENT" in
+  *"$HYG_MARKER_START"*'/.claude/settings.local.json'*"$HYG_MARKER_END"*)
+    pass "check-repo-hygiene.sh: 孤立START_MARKER修正時に正しいブロックへ差し替わる（#133）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 孤立START_MARKER修正時に正しいブロックへ差し替わる（#133）" \
+      "$HYG_EXCLUDE6_CONTENT" ;;
+esac
+
+# 2回目実行しても内容は変わらず（冪等）、ユーザー行も引き続き失われない
+HYG_EXCLUDE6_BEFORE2="$(cat -- "$HYG_EXCLUDE6")"
+( cd "$HYG_REPO6" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1
+HYG_EXCLUDE6_AFTER2="$(cat -- "$HYG_EXCLUDE6")"
+assert_eq "check-repo-hygiene.sh: 孤立START_MARKER修正後は2回目実行しても内容が変わらない（冪等）（#133）" \
+  "$HYG_EXCLUDE6_BEFORE2" "$HYG_EXCLUDE6_AFTER2"
+case "$HYG_EXCLUDE6_AFTER2" in
+  *'user-after-orphan-marker-1'*'user-after-orphan-marker-2'*)
+    pass "check-repo-hygiene.sh: 2回目実行後もユーザー行が消えない（レビュー#133指摘の回帰）（#133）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 2回目実行後もユーザー行が消えない（レビュー#133指摘の回帰）（#133）" \
+      "$HYG_EXCLUDE6_AFTER2" ;;
+esac
+
+# --- 完了条件(#133): START_MARKERが複数（完全なブロックが2つ）存在する場合、
+#     最初のブロックだけが正として差し替えられ、2つめ以降のブロックには一切触れない ---
+HYG_REPO7="$(make_temp_repo)"
+HYG_EXCLUDE7="${HYG_REPO7}/.git/info/exclude"
+{
+  echo "outer-before"
+  echo "$HYG_MARKER_START"
+  echo "/.claude/tampered-first-block"
+  echo "$HYG_MARKER_END"
+  echo "user-line-between-blocks"
+  echo "$HYG_MARKER_START"
+  echo "/.claude/second-block-should-be-untouched"
+  echo "$HYG_MARKER_END"
+  echo "outer-after"
+} > "$HYG_EXCLUDE7"
+
+( cd "$HYG_REPO7" && bash "$HYG_SCRIPT" ) >/dev/null 2>&1
+HYG_EXCLUDE7_CONTENT="$(cat -- "$HYG_EXCLUDE7")"
+
+case "$HYG_EXCLUDE7_CONTENT" in
+  *'/.claude/tampered-first-block'*)
+    fail "check-repo-hygiene.sh: 複数START_MARKER時、最初のブロックは期待値に復元される（#133）" \
+      "$HYG_EXCLUDE7_CONTENT" ;;
+  *)
+    pass "check-repo-hygiene.sh: 複数START_MARKER時、最初のブロックは期待値に復元される（#133）" ;;
+esac
+
+case "$HYG_EXCLUDE7_CONTENT" in
+  *'/.claude/second-block-should-be-untouched'*)
+    pass "check-repo-hygiene.sh: 複数START_MARKER時、2つめ以降のブロックには触れない（#133）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 複数START_MARKER時、2つめ以降のブロックには触れない（#133）" \
+      "$HYG_EXCLUDE7_CONTENT" ;;
+esac
+
+case "$HYG_EXCLUDE7_CONTENT" in
+  *'outer-before'*'user-line-between-blocks'*'outer-after'*)
+    pass "check-repo-hygiene.sh: 複数START_MARKER時もマーカー外のユーザー行は保持される（#133）" ;;
+  *)
+    fail "check-repo-hygiene.sh: 複数START_MARKER時もマーカー外のユーザー行は保持される（#133）" \
+      "$HYG_EXCLUDE7_CONTENT" ;;
+esac
+
+HYG_EXCLUDE7_START_COUNT="$(grep -Fc -- "$HYG_MARKER_START" "$HYG_EXCLUDE7")"
+assert_eq "check-repo-hygiene.sh: 複数START_MARKER時、2つめのSTART_MARKERは意図的に残る（仕様どおり）（#133）" \
+  "2" "$HYG_EXCLUDE7_START_COUNT"
+
+# --- 完了条件(low, #133): .git/info/exclude への書き込みに失敗しても異常終了せず、
+#     警告を出すだけで済ませる（ファイルシステム構造上の失敗を使い、root権限下でも
+#     決定論的に再現できるようにする。permission ビットには依存しない） ---
+HYG_REPO8="$(make_temp_repo)"
+HYG_GITDIR8="${HYG_REPO8}/.git"
+rm -rf -- "${HYG_GITDIR8}/info" 2>/dev/null
+printf 'not-a-directory\n' > "${HYG_GITDIR8}/info"
+
+HYG_FAILWRITE_OUT="$( cd "$HYG_REPO8" && bash "$HYG_SCRIPT" 2>&1 )"
+HYG_FAILWRITE_EXIT=$?
+assert_exit_code "check-repo-hygiene.sh: exclude書き込み失敗時もexitコードは0のまま（#133）" 0 "$HYG_FAILWRITE_EXIT"
+case "$HYG_FAILWRITE_OUT" in
+  *'警告'*'書き込みに失敗しました'*)
+    pass "check-repo-hygiene.sh: exclude書き込み失敗時に警告メッセージを出す（#133）" ;;
+  *)
+    fail "check-repo-hygiene.sh: exclude書き込み失敗時に警告メッセージを出す（#133）" "$HYG_FAILWRITE_OUT" ;;
+esac
+assert_eq "check-repo-hygiene.sh: exclude書き込み失敗時も対象パスは変質しない（in-place破壊を避ける）（#133）" \
+  "not-a-directory" "$(cat -- "${HYG_GITDIR8}/info" 2>/dev/null)"
+
 echo ""
 echo "== share-prepared-dirs.sh（準備成果ディレクトリの共有・共有モード） =="
 
@@ -9855,11 +10438,220 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Task #125: 共通ルールに「ハーネス非注入原則」を追加し「前提」節の推奨順を反転する
+#
+# ハーネス専用のファイルが駆動先（業務）リポジトリのPRに混入する問題（issue #120）に対し、
+# 「## サンドボックス方針」の「### 前提」を3択（規約パス > 環境変数 > リポジトリ直下）に
+# 書き換え、新節「## ハーネス非注入原則」を追加したことを検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #125: 共通ルールに『ハーネス非注入原則』を追加し『前提』節の推奨順を反転する =="
+
+# --- core/instructions.md: 「### 前提」節が3択（規約パス/環境変数/リポジトリ直下）を
+#     リポジトリを汚さない選択肢を第一候補として明記している ---
+INSTR_PREREQ_SECTION="$(awk '/^### 前提$/{f=1; next} /^### プロジェクト固有の準備コマンド/{f=0} f' \
+  "${REPO_ROOT}/core/instructions.md")"
+
+if [ -z "$INSTR_PREREQ_SECTION" ]; then
+  fail "core/instructions.md: 『### 前提』節が見つかる（#125）" "節が空でした"
+else
+  pass "core/instructions.md: 『### 前提』節が見つかる（#125）"
+fi
+
+case "$INSTR_PREREQ_SECTION" in
+  *'規約パスに置く（推奨）'*'~/.claude/dev-workflow/sandbox/'*'DEV_WORKFLOW_DOCKERFILE'*'DEV_WORKFLOW_DOCKER_COMPOSE_FILE'*'DEV_WORKFLOW_DOCKER_IMAGE'*'リポジトリ直下に置いてコミットする'*'チームで run を共有する場合のみ'*)
+    pass "core/instructions.md: 『### 前提』節が3択（規約パス→環境変数→リポジトリ直下）を明記している（#125）" ;;
+  *)
+    fail "core/instructions.md: 『### 前提』節が3択（規約パス→環境変数→リポジトリ直下）を明記している（#125）" \
+      "$INSTR_PREREQ_SECTION" ;;
+esac
+
+case "$INSTR_PREREQ_SECTION" in
+  *'docker build'*'docker compose up'*'直接叩いてはならない'*'mode=none'*'自律モードを開始せずに停止する'*)
+    pass "core/instructions.md: 『### 前提』節に既存の維持事項（docker直接呼び出し禁止・mode=none停止）が残っている（#125）" ;;
+  *)
+    fail "core/instructions.md: 『### 前提』節に既存の維持事項（docker直接呼び出し禁止・mode=none停止）が残っている（#125）" \
+      "$INSTR_PREREQ_SECTION" ;;
+esac
+
+# --- core/instructions.md: 「## ハーネス非注入原則」が「## サンドボックス方針」の後・
+#     「## 安全ルール（例外なし）」の前に新設されている ---
+INSTR_NOINJECT_SECTION="$(awk '/^## ハーネス非注入原則/{f=1} /^## 安全ルール（例外なし）/{f=0} f' \
+  "${REPO_ROOT}/core/instructions.md")"
+
+if [ -z "$INSTR_NOINJECT_SECTION" ]; then
+  fail "core/instructions.md: 『## ハーネス非注入原則』節が見つかる（#125）" "節が空でした"
+else
+  pass "core/instructions.md: 『## ハーネス非注入原則』節が見つかる（#125）"
+fi
+
+case "$INSTR_NOINJECT_SECTION" in
+  *'駆動先の業務リポジトリに注入しない'*)
+    pass "core/instructions.md: ハーネス非注入原則の宣言文がある（#125）" ;;
+  *)
+    fail "core/instructions.md: ハーネス非注入原則の宣言文がある（#125）" \
+      "$INSTR_NOINJECT_SECTION" ;;
+esac
+
+case "$INSTR_NOINJECT_SECTION" in
+  *'サンドボックス定義'*'~/.claude/dev-workflow/sandbox/<repo>/'*'YOLO 用の permission 設定'*'.claude/settings.local.json'*'マーカー・状態ファイル・worktree'*'.git/info/exclude'*'.gitignore'*'駆動先の共有ファイルなので触らない'*)
+    pass "core/instructions.md: ハーネス由来のものと置き場所の対応表（3行）が明記されている（#125）" ;;
+  *)
+    fail "core/instructions.md: ハーネス由来のものと置き場所の対応表（3行）が明記されている（#125）" \
+      "$INSTR_NOINJECT_SECTION" ;;
+esac
+
+case "$INSTR_NOINJECT_SECTION" in
+  *'check-repo-hygiene.sh'*)
+    pass "core/instructions.md: 検証はscripts/check-repo-hygiene.shが行う旨が明記されている（#125）" ;;
+  *)
+    fail "core/instructions.md: 検証はscripts/check-repo-hygiene.shが行う旨が明記されている（#125）" \
+      "$INSTR_NOINJECT_SECTION" ;;
+esac
+
+case "$INSTR_NOINJECT_SECTION" in
+  *'DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS=1'*'同意なく適用される'*)
+    pass "core/instructions.md: git追跡されたsettings.local.jsonはrunをブロックする旨とその理由が明記されている（#125）" ;;
+  *)
+    fail "core/instructions.md: git追跡されたsettings.local.jsonはrunをブロックする旨とその理由が明記されている（#125）" \
+      "$INSTR_NOINJECT_SECTION" ;;
+esac
+
+# --- 生成物（agents/*.md・codex-agents/*.toml）にもcore/instructions.mdの
+#     ハーネス非注入原則節が伝播している（build.shの再生成漏れを検知する） ---
+for f in agents/planner.md agents/generator.md agents/evaluator.md \
+         codex-agents/planner.toml codex-agents/generator.toml codex-agents/evaluator.toml; do
+  if grep -Fq -- '## ハーネス非注入原則' "${REPO_ROOT}/${f}"; then
+    pass "${f}: core/instructions.mdのハーネス非注入原則節が生成物に反映されている（#125）"
+  else
+    fail "${f}: core/instructions.mdのハーネス非注入原則節が生成物に反映されている（#125）" \
+      "節が見つかりませんでした"
+  fi
+done
+
+# ---------------------------------------------------------------------------
 # Task #107: Epic本文の「## 共有ディレクトリ」節がplanner・共通ルールに定義されている
 #
 # レーンごとのフル install（#104）を避けるための共有宣言。既存の「## 準備コマンド」節・
 # 「## SKIPパターン」節と対称な位置・対称な書き方であることを検証する。
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# check-repo-hygiene.sh（sandbox定義の混入検知: sandbox_in_repo_untracked）（#127）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== check-repo-hygiene.sh（sandbox定義の混入検知: sandbox_in_repo_untracked） =="
+
+# --- 完了条件1: 未追跡のDockerfile.devがリポジトリ直下にあると
+#     sandbox_in_repo_untracked=yes、verdict=warn、既定モード・--run ともにexit 0（完了条件7も兼ねる） ---
+HYG_SBX1="$(make_temp_repo)"
+printf 'FROM alpine\n' > "${HYG_SBX1}/Dockerfile.dev"
+HYG_SBX1_OUT="$( cd "$HYG_SBX1" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+HYG_SBX1_EXIT=$?
+HYG_SBX1_RUN_OUT="$( cd "$HYG_SBX1" && bash "$HYG_SCRIPT" --run --print 2>/dev/null )"
+HYG_SBX1_RUN_EXIT=$?
+assert_eq "check-repo-hygiene.sh: 未追跡Dockerfile.devでsandbox_in_repo_untracked=yes（#127完了条件1）" \
+  "yes" "$(printf '%s\n' "$HYG_SBX1_OUT" | sed -n 's/^sandbox_in_repo_untracked=//p')"
+assert_eq "check-repo-hygiene.sh: 未追跡Dockerfile.devでverdict=warn（#127完了条件1）" \
+  "warn" "$(printf '%s\n' "$HYG_SBX1_OUT" | sed -n 's/^verdict=//p')"
+assert_exit_code "check-repo-hygiene.sh: 未追跡Dockerfile.devでも既定モードはexit 0（#127完了条件1）" 0 "$HYG_SBX1_EXIT"
+assert_exit_code "check-repo-hygiene.sh: 未追跡Dockerfile.devでも--runはexit 0（ブロックしない）（#127完了条件1・7）" 0 "$HYG_SBX1_RUN_EXIT"
+assert_eq "check-repo-hygiene.sh: --run時もverdict=warnのまま（#127完了条件7）" \
+  "warn" "$(printf '%s\n' "$HYG_SBX1_RUN_OUT" | sed -n 's/^verdict=//p')"
+
+# --- 完了条件2: 同じDockerfile.devをgit addして追跡させるとsandbox_in_repo_untracked=no ---
+( cd "$HYG_SBX1" && git add Dockerfile.dev && git commit -q -m "add sandbox dockerfile" ) >/dev/null 2>&1
+HYG_SBX2_OUT="$( cd "$HYG_SBX1" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: 追跡済みDockerfile.devでsandbox_in_repo_untracked=no（#127完了条件2）" \
+  "no" "$(printf '%s\n' "$HYG_SBX2_OUT" | sed -n 's/^sandbox_in_repo_untracked=//p')"
+assert_eq "check-repo-hygiene.sh: 追跡済みDockerfile.devでverdict=ok（#127完了条件2）" \
+  "ok" "$(printf '%s\n' "$HYG_SBX2_OUT" | sed -n 's/^verdict=//p')"
+
+# --- 完了条件3: 未追跡のdocker-compose.dev.yml（Dockerfile.devは無し）でもyesになる（compose経路も見ている） ---
+HYG_SBX3="$(make_temp_repo)"
+printf 'services:\n  app:\n    image: alpine\n' > "${HYG_SBX3}/docker-compose.dev.yml"
+HYG_SBX3_OUT="$( cd "$HYG_SBX3" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: 未追跡docker-compose.dev.ymlでsandbox_in_repo_untracked=yes（#127完了条件3）" \
+  "yes" "$(printf '%s\n' "$HYG_SBX3_OUT" | sed -n 's/^sandbox_in_repo_untracked=//p')"
+
+# --- 完了条件4: sandbox定義が無くmode=noneならsandbox_in_repo_untracked=no（警告を出さない） ---
+HYG_SBX4="$(make_temp_repo)"
+HYG_SBX4_OUT="$( cd "$HYG_SBX4" && bash "$HYG_SCRIPT" --print 2>/dev/null )"
+HYG_SBX4_STDERR="$( cd "$HYG_SBX4" && bash "$HYG_SCRIPT" --print 2>&1 1>/dev/null )"
+assert_eq "check-repo-hygiene.sh: sandbox定義が無ければsandbox_in_repo_untracked=no（#127完了条件4）" \
+  "no" "$(printf '%s\n' "$HYG_SBX4_OUT" | sed -n 's/^sandbox_in_repo_untracked=//p')"
+case "$HYG_SBX4_STDERR" in
+  *'ハーネス用サンドボックス定義'*)
+    fail "check-repo-hygiene.sh: sandbox定義が無ければ警告を出さない（#127完了条件4）" "$HYG_SBX4_STDERR" ;;
+  *)
+    pass "check-repo-hygiene.sh: sandbox定義が無ければ警告を出さない（#127完了条件4）" ;;
+esac
+
+# --- 完了条件5: DEV_WORKFLOW_SANDBOX_HOMEで差し替えた規約パスだけに定義がある場合はno
+#     （リポジトリ外なので原則どおりの状態） ---
+HYG_SBX5="$(make_temp_repo)"
+HYG_SBX5_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-sbxhome.XXXXXX")"
+HYG_SBX5_REPO_NAME="$(basename "$HYG_SBX5")"
+mkdir -p "${HYG_SBX5_HOME}/${HYG_SBX5_REPO_NAME}"
+printf 'FROM alpine\n' > "${HYG_SBX5_HOME}/${HYG_SBX5_REPO_NAME}/Dockerfile.dev"
+HYG_SBX5_OUT="$( cd "$HYG_SBX5" && DEV_WORKFLOW_SANDBOX_HOME="$HYG_SBX5_HOME" bash "$HYG_SCRIPT" --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: 規約パス（リポジトリ外）だけに定義がある場合はsandbox_in_repo_untracked=no（#127完了条件5）" \
+  "no" "$(printf '%s\n' "$HYG_SBX5_OUT" | sed -n 's/^sandbox_in_repo_untracked=//p')"
+
+# --- 完了条件6: DEV_WORKFLOW_DOCKERFILEでリポジトリ外のファイルを明示指定した場合もno ---
+HYG_SBX6="$(make_temp_repo)"
+HYG_SBX6_EXTERNAL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hyg-sbxext.XXXXXX")"
+printf 'FROM alpine\n' > "${HYG_SBX6_EXTERNAL_DIR}/External.dockerfile"
+HYG_SBX6_OUT="$( cd "$HYG_SBX6" && DEV_WORKFLOW_DOCKERFILE="${HYG_SBX6_EXTERNAL_DIR}/External.dockerfile" bash "$HYG_SCRIPT" --print 2>/dev/null )"
+assert_eq "check-repo-hygiene.sh: リポジトリ外を明示指定したDockerfileはsandbox_in_repo_untracked=no（#127完了条件6）" \
+  "no" "$(printf '%s\n' "$HYG_SBX6_OUT" | sed -n 's/^sandbox_in_repo_untracked=//p')"
+
+# 完了条件8（shellcheck / bash -n が通ること）は冒頭の全 scripts/*.sh 走査
+# （bash -n（構文チェック）／shellcheck（利用可能な場合のみ）」の各セクション）で
+# check-repo-hygiene.sh も対象に含まれているため、ここでは重複させない。
+
+# ---------------------------------------------------------------------------
+# Task #134: README.mdのSlack設定節が.gitignore追記を指示し続け非注入原則と
+# 矛盾していた点の回帰テスト（#122一括レビュー指摘、由来: #130）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #134: README.mdのSlack設定節に.gitignore追記案内が残っていない =="
+
+# --- README.md に「.claude/slack-webhook」を.gitignoreへ追記する案内が残っていない ---
+if grep -Fq -- 'echo ".claude/slack-webhook" >> .gitignore' "${REPO_ROOT}/README.md"; then
+  fail "README.md: Slack設定節に『.claude/slack-webhookを.gitignoreに追記する』案内が残っていない（#134）" \
+    "$(grep -n -- 'echo ".claude/slack-webhook" >> .gitignore' "${REPO_ROOT}/README.md")"
+else
+  pass "README.md: Slack設定節に『.claude/slack-webhookを.gitignoreに追記する』案内が残っていない（#134）"
+fi
+
+# --- README.md のSlack設定節が.git/info/excludeによる自動除外を案内している ---
+README_SLACK_SECTION="$(awk '/^## Slack通知/{f=1} /^### 通知されるタイミング/{f=0} f' "${REPO_ROOT}/README.md")"
+if [ -z "$README_SLACK_SECTION" ]; then
+  fail "README.md: 『## Slack通知』節が見つかる（前提）（#134）" "節が空でした"
+else
+  pass "README.md: 『## Slack通知』節が見つかる（前提）（#134）"
+fi
+
+case "$README_SLACK_SECTION" in
+  *'.git/info/exclude'*'check-repo-hygiene.sh'*)
+    pass "README.md: Slack設定節が.git/info/excludeによる自動除外とcheck-repo-hygiene.shでの整備を案内している（#134）" ;;
+  *)
+    fail "README.md: Slack設定節が.git/info/excludeによる自動除外とcheck-repo-hygiene.shでの整備を案内している（#134）" \
+      "$README_SLACK_SECTION" ;;
+esac
+
+# --- README.md のSlack設定節にWebhook URLが秘密情報である旨の注意が残っている ---
+case "$README_SLACK_SECTION" in
+  *'秘密情報'*)
+    pass "README.md: Slack設定節にWebhook URLが秘密情報である旨の注意が残っている（#134）" ;;
+  *)
+    fail "README.md: Slack設定節にWebhook URLが秘密情報である旨の注意が残っている（#134）" \
+      "$README_SLACK_SECTION" ;;
+esac
 
 echo ""
 echo "== Task #107: Epic本文の『## 共有ディレクトリ』節がplanner・共通ルールに定義されている =="
@@ -10406,6 +11198,451 @@ assert_eq "混在+--run-prep ケース: --run-prep 前に共有symlinkが解除�
 
 assert_eq "混在+--run-prep ケース: レーン側 shared_ok に準備コマンドの書き込みが反映されている（#116）" \
   "lane-write" "$(cat "${SPD116_LANE}/shared_ok/newfile.txt" 2>/dev/null || echo "READ_FAILED")"
+
+# ---------------------------------------------------------------------------
+# resolve-sandbox.sh: 規約パスのフォールバックとビルドコンテキスト解決（Task #123, Epic #122）
+#
+# ここでは resolve-sandbox.sh を sandbox-exec.sh 経由ではなく直接呼び出す
+# （eval 用の key=value 出力をそのまま plan_value で読む）。
+# ---------------------------------------------------------------------------
+
+echo "== resolve-sandbox.sh: 規約パスのフォールバックとビルドコンテキスト解決（#123） =="
+
+RESOLVE_SANDBOX_SCRIPT="${REPO_ROOT}/scripts/resolve-sandbox.sh"
+
+normalize_test_path() {
+  # normalize_test_path <dir>  resolve-sandbox.sh 内の normalize_dir と同じ作法で正規化する
+  ( cd "$1" 2>/dev/null && { pwd -W 2>/dev/null || pwd; } )
+}
+
+# --- 受け入れ条件1・2: リポジトリ内に何も無く規約パスの Dockerfile.dev だけがある ---
+RS1_REPO="$(make_temp_repo)"
+RS1_NAME="$(basename "$RS1_REPO")"
+RS1_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-sandboxhome.XXXXXX")"
+mkdir -p "${RS1_HOME}/${RS1_NAME}"
+cat > "${RS1_HOME}/${RS1_NAME}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+
+RS1_OUTPUT="$(
+  cd "$RS1_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$RS1_HOME" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "規約パス: Dockerfile.devのみ -> mode=dockerfile（受け入れ条件1）" \
+  "dockerfile" "$(plan_value DEV_WORKFLOW_SANDBOX_MODE "$RS1_OUTPUT")"
+assert_eq "規約パス: DEV_WORKFLOW_SANDBOX_DOCKERFILEが規約パスのフルパスになる（受け入れ条件1）" \
+  "${RS1_HOME}/${RS1_NAME}/Dockerfile.dev" "$(plan_value DEV_WORKFLOW_SANDBOX_DOCKERFILE "$RS1_OUTPUT")"
+assert_eq "規約パス: build contextがリポジトリルートになる（受け入れ条件2）" \
+  "$(normalize_test_path "$RS1_REPO")" "$(plan_value DEV_WORKFLOW_SANDBOX_CONTEXT "$RS1_OUTPUT")"
+
+# --- 受け入れ条件3: リポジトリ内に何も無く規約パスの docker-compose.dev.yml だけがある ---
+RS3_REPO="$(make_temp_repo)"
+RS3_NAME="$(basename "$RS3_REPO")"
+RS3_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-sandboxhome.XXXXXX")"
+mkdir -p "${RS3_HOME}/${RS3_NAME}"
+cat > "${RS3_HOME}/${RS3_NAME}/docker-compose.dev.yml" <<'EOF'
+services:
+  app:
+    image: alpine
+EOF
+
+RS3_OUTPUT="$(
+  cd "$RS3_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$RS3_HOME" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "規約パス: composeのみ -> mode=compose（受け入れ条件3）" \
+  "compose" "$(plan_value DEV_WORKFLOW_SANDBOX_MODE "$RS3_OUTPUT")"
+assert_eq "規約パス: DEV_WORKFLOW_SANDBOX_COMPOSEが規約パスのフルパスになる（受け入れ条件3）" \
+  "${RS3_HOME}/${RS3_NAME}/docker-compose.dev.yml" "$(plan_value DEV_WORKFLOW_SANDBOX_COMPOSE "$RS3_OUTPUT")"
+
+# --- 受け入れ条件4: リポジトリ内に Dockerfile.dev がある場合、規約パスにもファイルがあっても
+#     リポジトリ内が勝つ（フォールバックであることの確認） ---
+RS4_REPO="$(make_temp_repo)"
+cat > "${RS4_REPO}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+(
+  cd "$RS4_REPO" || exit 1
+  git add Dockerfile.dev
+  git commit -q -m "add local dockerfile"
+) >/dev/null 2>&1
+RS4_NAME="$(basename "$RS4_REPO")"
+RS4_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-sandboxhome.XXXXXX")"
+mkdir -p "${RS4_HOME}/${RS4_NAME}"
+cat > "${RS4_HOME}/${RS4_NAME}/Dockerfile.dev" <<'EOF'
+FROM alpine
+# convention should be ignored
+EOF
+
+RS4_OUTPUT="$(
+  cd "$RS4_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$RS4_HOME" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "規約パス: リポジトリ内Dockerfile.devが規約パスより優先される（受け入れ条件4）" \
+  "Dockerfile.dev" "$(plan_value DEV_WORKFLOW_SANDBOX_DOCKERFILE "$RS4_OUTPUT")"
+
+# --- 受け入れ条件5: リポジトリ内 Dockerfile がサブディレクトリにある場合、build context は
+#     従来どおり dirname(Dockerfile) のまま（リポジトリルート直下では判定できないため
+#     サブディレクトリに置いて確認する。後方互換） ---
+RS5_REPO="$(make_temp_repo)"
+mkdir -p "${RS5_REPO}/sub"
+cat > "${RS5_REPO}/sub/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+(
+  cd "$RS5_REPO" || exit 1
+  git add sub/Dockerfile.dev
+  git commit -q -m "add sub dockerfile"
+) >/dev/null 2>&1
+
+RS5_OUTPUT="$(
+  cd "$RS5_REPO" || exit 1
+  DEV_WORKFLOW_DOCKERFILE="sub/Dockerfile.dev" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "リポジトリ内Dockerfile: build contextは従来どおりdirname(Dockerfile)のまま（受け入れ条件5）" \
+  "$(normalize_test_path "${RS5_REPO}/sub")" "$(plan_value DEV_WORKFLOW_SANDBOX_CONTEXT "$RS5_OUTPUT")"
+
+# --- 受け入れ条件6: DEV_WORKFLOW_DOCKER_BUILD_CONTEXT を指定すると、リポジトリ内 Dockerfile
+#     でもその値が採用される ---
+RS6_REPO="$(make_temp_repo)"
+cat > "${RS6_REPO}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+(
+  cd "$RS6_REPO" || exit 1
+  git add Dockerfile.dev
+  git commit -q -m "add dockerfile"
+) >/dev/null 2>&1
+RS6_CUSTOM_CONTEXT="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-buildctx.XXXXXX")"
+
+RS6_OUTPUT="$(
+  cd "$RS6_REPO" || exit 1
+  DEV_WORKFLOW_DOCKER_BUILD_CONTEXT="$RS6_CUSTOM_CONTEXT" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "DEV_WORKFLOW_DOCKER_BUILD_CONTEXT指定時はその値が採用される（受け入れ条件6）" \
+  "$(normalize_test_path "$RS6_CUSTOM_CONTEXT")" "$(plan_value DEV_WORKFLOW_SANDBOX_CONTEXT "$RS6_OUTPUT")"
+
+# --- 受け入れ条件7: 規約パスにも何も無ければ mode=none のまま ---
+RS7_REPO="$(make_temp_repo)"
+RS7_NAME="$(basename "$RS7_REPO")"
+RS7_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-sandboxhome.XXXXXX")"
+mkdir -p "${RS7_HOME}/${RS7_NAME}"
+
+RS7_OUTPUT="$(
+  cd "$RS7_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$RS7_HOME" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "規約パスにも何も無ければmode=noneのまま（受け入れ条件7）" \
+  "none" "$(plan_value DEV_WORKFLOW_SANDBOX_MODE "$RS7_OUTPUT")"
+
+# --- 受け入れ条件8: worktree から呼んでも規約パスの <repo> 部分が変わらない
+#     （既存の「hash が worktree で変わらない」テストと同じ作り方で確認する） ---
+RS8_REPO="$(make_temp_repo)"
+RS8_NAME="$(basename "$RS8_REPO")"
+RS8_WT="${RS8_REPO}/.claude/worktrees/agent-rs8"
+make_worktree "$RS8_REPO" "$RS8_WT" "rs8-branch"
+RS8_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-sandboxhome.XXXXXX")"
+mkdir -p "${RS8_HOME}/${RS8_NAME}"
+cat > "${RS8_HOME}/${RS8_NAME}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+
+RS8_ROOT_OUTPUT="$(
+  cd "$RS8_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$RS8_HOME" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+RS8_WT_OUTPUT="$(
+  cd "$RS8_WT" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$RS8_HOME" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "規約パス: worktreeから呼んでもmode=dockerfileになる（受け入れ条件8）" \
+  "dockerfile" "$(plan_value DEV_WORKFLOW_SANDBOX_MODE "$RS8_WT_OUTPUT")"
+assert_eq "規約パス: worktreeから呼んでもDockerfileのフルパスがリポジトリルートから呼んだ場合と一致する（受け入れ条件8）" \
+  "$(plan_value DEV_WORKFLOW_SANDBOX_DOCKERFILE "$RS8_ROOT_OUTPUT")" "$(plan_value DEV_WORKFLOW_SANDBOX_DOCKERFILE "$RS8_WT_OUTPUT")"
+assert_eq "規約パス: worktreeから呼んでもイメージタグ(hash含む)がリポジトリルートから呼んだ場合と一致する（受け入れ条件8）" \
+  "$(plan_value DEV_WORKFLOW_SANDBOX_IMAGE "$RS8_ROOT_OUTPUT")" "$(plan_value DEV_WORKFLOW_SANDBOX_IMAGE "$RS8_WT_OUTPUT")"
+
+# 受け入れ条件9（shellcheck / bash -n）は冒頭の全 scripts/*.sh 走査で resolve-sandbox.sh も
+# 対象になっているため、ここでの追加テストは不要。
+
+# ---------------------------------------------------------------------------
+# skills/run/SKILL.md・skills-codex/dev-workflow-run/SKILL.md:
+# mode=none 時の案内が供給経路3択になっている（Task #128）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== mode=none 時の案内メッセージ（供給経路3択、#128） =="
+
+MODE_NONE_OLD_MSG="プロジェクトルートに開発用Dockerfileまたはcomposeファイルを配置してください"
+
+for f in "skills/run/SKILL.md" "skills-codex/dev-workflow-run/SKILL.md"; do
+  MN_TARGET="${REPO_ROOT}/${f}"
+
+  if grep -qF "$MODE_NONE_OLD_MSG" "$MN_TARGET"; then
+    fail "${f}: mode=none 案内から旧文言（プロジェクトルートに配置一択）が消えている（#128）" \
+      "旧文言がまだ見つかりました"
+  else
+    pass "${f}: mode=none 案内から旧文言（プロジェクトルートに配置一択）が消えている（#128）"
+  fi
+
+  MN_BLOCK="$(awk '/mode=none\$.;/{f=1} f{print} f&&/^fi$/{exit}' "$MN_TARGET")"
+
+  case "$MN_BLOCK" in
+    *'規約パスに置く（推奨）'*'~/.claude/dev-workflow/sandbox/'*)
+      pass "${f}: mode=none 案内に選択肢1（規約パス）がある（#128）" ;;
+    *)
+      fail "${f}: mode=none 案内に選択肢1（規約パス）がある（#128）" "$MN_BLOCK" ;;
+  esac
+
+  case "$MN_BLOCK" in
+    *'環境変数で渡す'*'DEV_WORKFLOW_DOCKERFILE'*'DEV_WORKFLOW_DOCKER_COMPOSE_FILE'*'DEV_WORKFLOW_DOCKER_IMAGE'*)
+      pass "${f}: mode=none 案内に選択肢2（環境変数）がある（#128）" ;;
+    *)
+      fail "${f}: mode=none 案内に選択肢2（環境変数）がある（#128）" "$MN_BLOCK" ;;
+  esac
+
+  case "$MN_BLOCK" in
+    *'リポジトリ直下に置いてコミットする'*)
+      pass "${f}: mode=none 案内に選択肢3（リポジトリ直下）がある（#128）" ;;
+    *)
+      fail "${f}: mode=none 案内に選択肢3（リポジトリ直下）がある（#128）" "$MN_BLOCK" ;;
+  esac
+
+  MN_SYNTAX_TMP="$(mktemp "${TMPDIR:-/tmp}/dw-test-mode-none.XXXXXX")"
+  {
+    echo 'PLAN="mode=none"'
+    printf '%s\n' "$MN_BLOCK"
+  } > "$MN_SYNTAX_TMP"
+  if bash -n "$MN_SYNTAX_TMP" 2>/dev/null; then
+    pass "${f}: mode=none 案内ブロックが bash として構文的に妥当である（#128）"
+  else
+    fail "${f}: mode=none 案内ブロックが bash として構文的に妥当である（#128）" \
+      "$(bash -n "$MN_SYNTAX_TMP" 2>&1)"
+  fi
+  rm -f "$MN_SYNTAX_TMP"
+done
+
+# ---------------------------------------------------------------------------
+# SessionStart フックと run スキル両系統への衛生プリフライト結線（#129）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== SessionStart フック / run スキル両系統への衛生プリフライト結線（#129） =="
+
+HYG129_HOOKS_JSON="${REPO_ROOT}/hooks/hooks.json"
+HYG129_HOOKS_CODEX_JSON="${REPO_ROOT}/hooks/hooks.codex.json"
+HYG129_RUN_SKILL="${REPO_ROOT}/skills/run/SKILL.md"
+HYG129_RUN_SKILL_CODEX="${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md"
+HYG129_GOAL_SKILL="${REPO_ROOT}/skills/goal/SKILL.md"
+
+# --- 両JSONとも構文として妥当（既存の _hj_json_syntax_ok を再利用する。#52で定義済み） ---
+
+if _hj_json_syntax_ok "$HYG129_HOOKS_JSON"; then
+  pass "hooks.json: check-repo-hygiene.sh結線後も構文として妥当（#129）"
+else
+  fail "hooks.json: check-repo-hygiene.sh結線後も構文として妥当（#129）" "$(cat "$HYG129_HOOKS_JSON" 2>&1)"
+fi
+
+if _hj_json_syntax_ok "$HYG129_HOOKS_CODEX_JSON"; then
+  pass "hooks.codex.json: check-repo-hygiene.sh結線後も構文として妥当（#129）"
+else
+  fail "hooks.codex.json: check-repo-hygiene.sh結線後も構文として妥当（#129）" "$(cat "$HYG129_HOOKS_CODEX_JSON" 2>&1)"
+fi
+
+# --- hooks.json: SessionStartにcheck-prerequisites.shの次のエントリとして結線されている ---
+
+HYG129_HOOKS_SESSIONSTART="$(_hj_extract_section "$HYG129_HOOKS_JSON" "SessionStart")"
+if printf '%s' "$HYG129_HOOKS_SESSIONSTART" | grep -Fq 'bash \"${CLAUDE_PLUGIN_ROOT}/scripts/check-repo-hygiene.sh\"'; then
+  pass "hooks.json: SessionStartにcheck-repo-hygiene.shが結線されている（#129）"
+else
+  fail "hooks.json: SessionStartにcheck-repo-hygiene.shが結線されている（#129）" "$HYG129_HOOKS_SESSIONSTART"
+fi
+
+HYG129_HOOKS_PREREQ_LINE="$(printf '%s\n' "$HYG129_HOOKS_SESSIONSTART" | grep -n 'check-prerequisites.sh' | head -1 | cut -d: -f1)"
+HYG129_HOOKS_HYGIENE_LINE="$(printf '%s\n' "$HYG129_HOOKS_SESSIONSTART" | grep -n 'check-repo-hygiene.sh' | head -1 | cut -d: -f1)"
+if [ -n "$HYG129_HOOKS_PREREQ_LINE" ] && [ -n "$HYG129_HOOKS_HYGIENE_LINE" ] \
+  && [ "$HYG129_HOOKS_HYGIENE_LINE" -gt "$HYG129_HOOKS_PREREQ_LINE" ]; then
+  pass "hooks.json: check-repo-hygiene.shはcheck-prerequisites.shの次のエントリである（#129）"
+else
+  fail "hooks.json: check-repo-hygiene.shはcheck-prerequisites.shの次のエントリである（#129）" \
+    "$HYG129_HOOKS_SESSIONSTART"
+fi
+
+# 既定モードなのでブロックしない（--runを付けない。SessionStartエントリに--runが含まれないことを確認）
+if printf '%s' "$HYG129_HOOKS_SESSIONSTART" | grep -F 'check-repo-hygiene.sh' | grep -q -- '--run'; then
+  fail "hooks.json: SessionStartのcheck-repo-hygiene.shは既定モード（--runを付けない）である（#129）" \
+    "$HYG129_HOOKS_SESSIONSTART"
+else
+  pass "hooks.json: SessionStartのcheck-repo-hygiene.shは既定モード（--runを付けない）である（#129）"
+fi
+
+# --- hooks.codex.json: 同様にSessionStartへ結線され、既存エントリと同じくtimeoutが付いている ---
+
+HYG129_HOOKS_CODEX_SESSIONSTART="$(_hj_extract_section "$HYG129_HOOKS_CODEX_JSON" "SessionStart")"
+if printf '%s' "$HYG129_HOOKS_CODEX_SESSIONSTART" | grep -Fq 'bash \"${CLAUDE_PLUGIN_ROOT}/scripts/check-repo-hygiene.sh\"'; then
+  pass "hooks.codex.json: SessionStartにcheck-repo-hygiene.shが結線されている（#129）"
+else
+  fail "hooks.codex.json: SessionStartにcheck-repo-hygiene.shが結線されている（#129）" \
+    "$HYG129_HOOKS_CODEX_SESSIONSTART"
+fi
+
+HYG129_HOOKS_CODEX_PREREQ_LINE="$(printf '%s\n' "$HYG129_HOOKS_CODEX_SESSIONSTART" | grep -n 'check-prerequisites.sh' | head -1 | cut -d: -f1)"
+HYG129_HOOKS_CODEX_HYGIENE_LINE="$(printf '%s\n' "$HYG129_HOOKS_CODEX_SESSIONSTART" | grep -n 'check-repo-hygiene.sh' | head -1 | cut -d: -f1)"
+if [ -n "$HYG129_HOOKS_CODEX_PREREQ_LINE" ] && [ -n "$HYG129_HOOKS_CODEX_HYGIENE_LINE" ] \
+  && [ "$HYG129_HOOKS_CODEX_HYGIENE_LINE" -gt "$HYG129_HOOKS_CODEX_PREREQ_LINE" ]; then
+  pass "hooks.codex.json: check-repo-hygiene.shはcheck-prerequisites.shの次のエントリである（#129）"
+else
+  fail "hooks.codex.json: check-repo-hygiene.shはcheck-prerequisites.shの次のエントリである（#129）" \
+    "$HYG129_HOOKS_CODEX_SESSIONSTART"
+fi
+
+# check-repo-hygiene.shのエントリ自体に"timeout": 30が付いている（hooks.codex.jsonの他エントリと同じ作法）
+HYG129_HOOKS_CODEX_HYGIENE_ENTRY="$(printf '%s\n' "$HYG129_HOOKS_CODEX_SESSIONSTART" \
+  | awk '/check-repo-hygiene\.sh/{f=1} f{print} f&&/^[ \t]*}/{exit}')"
+if printf '%s' "$HYG129_HOOKS_CODEX_HYGIENE_ENTRY" | grep -Fq '"timeout": 30'; then
+  pass "hooks.codex.json: check-repo-hygiene.shのエントリにtimeout: 30が付いている（#129）"
+else
+  fail "hooks.codex.json: check-repo-hygiene.shのエントリにtimeout: 30が付いている（#129）" \
+    "$HYG129_HOOKS_CODEX_HYGIENE_ENTRY"
+fi
+
+if printf '%s' "$HYG129_HOOKS_CODEX_SESSIONSTART" | grep -F 'check-repo-hygiene.sh' | grep -q -- '--run'; then
+  fail "hooks.codex.json: SessionStartのcheck-repo-hygiene.shは既定モード（--runを付けない）である（#129）" \
+    "$HYG129_HOOKS_CODEX_SESSIONSTART"
+else
+  pass "hooks.codex.json: SessionStartのcheck-repo-hygiene.shは既定モード（--runを付けない）である（#129）"
+fi
+
+# --- 両JSONとも参照しているscripts/check-repo-hygiene.shが実在する（参照切れの防止） ---
+
+if [ -f "${REPO_ROOT}/scripts/check-repo-hygiene.sh" ]; then
+  pass "hooks.json/hooks.codex.json: 参照しているscripts/check-repo-hygiene.shが実在する（#129）"
+else
+  fail "hooks.json/hooks.codex.json: 参照しているscripts/check-repo-hygiene.shが実在する（#129）" \
+    "見つかりません: ${REPO_ROOT}/scripts/check-repo-hygiene.sh"
+fi
+
+# --- skills/run/SKILL.md: 「## 起動時の確認」の先頭（gh issue viewより前）に--runプリフライトがある ---
+
+HYG129_RUN_STARTUP_BLOCK="$(awk '/^## 起動時の確認$/{f=1; print; next} f && /^#/{exit} f{print}' "$HYG129_RUN_SKILL")"
+if printf '%s' "$HYG129_RUN_STARTUP_BLOCK" | grep -Fq 'check-repo-hygiene.sh" --run || exit 1'; then
+  pass "skills/run/SKILL.md: 「## 起動時の確認」にcheck-repo-hygiene.sh --runのプリフライトがある（#129）"
+else
+  fail "skills/run/SKILL.md: 「## 起動時の確認」にcheck-repo-hygiene.sh --runのプリフライトがある（#129）" \
+    "$HYG129_RUN_STARTUP_BLOCK"
+fi
+
+HYG129_RUN_PREFLIGHT_LINE="$(printf '%s\n' "$HYG129_RUN_STARTUP_BLOCK" | grep -n -- '--run || exit 1' | head -1 | cut -d: -f1)"
+HYG129_RUN_ISSUEVIEW_LINE="$(printf '%s\n' "$HYG129_RUN_STARTUP_BLOCK" | grep -n 'gh issue view \$ARGUMENTS' | head -1 | cut -d: -f1)"
+if [ -n "$HYG129_RUN_PREFLIGHT_LINE" ] && [ -n "$HYG129_RUN_ISSUEVIEW_LINE" ] \
+  && [ "$HYG129_RUN_PREFLIGHT_LINE" -lt "$HYG129_RUN_ISSUEVIEW_LINE" ]; then
+  pass "skills/run/SKILL.md: --runプリフライトはgh issue viewより前にある（#129）"
+else
+  fail "skills/run/SKILL.md: --runプリフライトはgh issue viewより前にある（#129）" "$HYG129_RUN_STARTUP_BLOCK"
+fi
+
+if printf '%s' "$HYG129_RUN_STARTUP_BLOCK" | grep -Fq 'exit 2' \
+  && printf '%s' "$HYG129_RUN_STARTUP_BLOCK" | grep -Fq 'DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS'; then
+  pass "skills/run/SKILL.md: exit 2で停止する旨とopt-out（DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS）が明記されている（#129）"
+else
+  fail "skills/run/SKILL.md: exit 2で停止する旨とopt-out（DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS）が明記されている（#129）" \
+    "$HYG129_RUN_STARTUP_BLOCK"
+fi
+
+# --- skills-codex/dev-workflow-run/SKILL.md: 同等の結線が入っている（結線漏れ禁止） ---
+
+if grep -Fq 'check-repo-hygiene.sh" --run || exit 1' "$HYG129_RUN_SKILL_CODEX"; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: check-repo-hygiene.sh --runのプリフライトがある（#129）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: check-repo-hygiene.sh --runのプリフライトがある（#129）" \
+    "$(cat "$HYG129_RUN_SKILL_CODEX")"
+fi
+
+if grep -Fq 'exit 2' "$HYG129_RUN_SKILL_CODEX" \
+  && grep -Fq 'DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS' "$HYG129_RUN_SKILL_CODEX"; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: exit 2で停止する旨とopt-outが明記されている（#129）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: exit 2で停止する旨とopt-outが明記されている（#129）"
+fi
+
+# check-repo-hygiene.sh --runの結線が、Epicブランチ+作業worktree準備（git fetch等）より前にあること
+HYG129_CODEX_PREFLIGHT_LINE="$(grep -n -- '--run || exit 1' "$HYG129_RUN_SKILL_CODEX" | head -1 | cut -d: -f1)"
+HYG129_CODEX_WORKTREE_LINE="$(grep -n '^## Epic ブランチと作業 worktree の準備$' "$HYG129_RUN_SKILL_CODEX" | head -1 | cut -d: -f1)"
+if [ -n "$HYG129_CODEX_PREFLIGHT_LINE" ] && [ -n "$HYG129_CODEX_WORKTREE_LINE" ] \
+  && [ "$HYG129_CODEX_PREFLIGHT_LINE" -lt "$HYG129_CODEX_WORKTREE_LINE" ]; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: --runプリフライトはEpicブランチ準備より前にある（#129）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: --runプリフライトはEpicブランチ準備より前にある（#129）" \
+    "preflight_line=${HYG129_CODEX_PREFLIGHT_LINE} worktree_line=${HYG129_CODEX_WORKTREE_LINE}"
+fi
+
+# --- skills/goal/SKILL.md には結線しない（重複結線の禁止） ---
+
+if grep -Fq 'check-repo-hygiene.sh' "$HYG129_GOAL_SKILL"; then
+  fail "skills/goal/SKILL.md: check-repo-hygiene.shの重複結線が無い（runに委譲しているため）（#129）" \
+    "$(grep -n 'check-repo-hygiene.sh' "$HYG129_GOAL_SKILL")"
+else
+  pass "skills/goal/SKILL.md: check-repo-hygiene.shの重複結線が無い（runに委譲しているため）（#129）"
+fi
+
+# ---------------------------------------------------------------------------
+# resolve-sandbox.sh: 出力を%qでシェルクォートし、eval呼び出し側で空白入りパスが
+# 分割・誤解釈されないこと（Task #132, Epic #122 レビュー指摘 #132）
+#
+# $HOME・リポジトリルートの双方に空白を含む規約パス構成で mode=dockerfile を解決させ、
+# 出力を eval で取り込んだ後、DEV_WORKFLOW_SANDBOX_DOCKERFILE と
+# DEV_WORKFLOW_SANDBOX_CONTEXT が分割されず完全なパスとして復元されることを確認する。
+# ---------------------------------------------------------------------------
+
+echo "== resolve-sandbox.sh: 空白を含むパスでもevalで値が分割されない（#132） =="
+
+RS9_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-space-repo.XXXXXX")"
+RS9_REPO="${RS9_PARENT}/repo with space"
+mkdir -p "$RS9_REPO"
+(
+  cd "$RS9_REPO" || exit 1
+  git init -q
+  git config user.email "dev-workflow-test@example.com"
+  git config user.name "dev-workflow test"
+  printf 'test repo\n' > README.md
+  git add README.md
+  git commit -q -m "init"
+) >/dev/null 2>&1
+
+RS9_NAME="$(basename "$RS9_REPO")"
+RS9_HOME_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-space-home.XXXXXX")"
+RS9_HOME="${RS9_HOME_PARENT}/home with space"
+mkdir -p "${RS9_HOME}/${RS9_NAME}"
+cat > "${RS9_HOME}/${RS9_NAME}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+
+RS9_OUTPUT="$(
+  cd "$RS9_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$RS9_HOME" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+# eval で取り込んだ後の値を確認する（呼び出し側 sandbox-exec.sh / check-repo-hygiene.sh と
+# 同じ作法。空白で分割されていれば以下は途中で切れた値になる）
+RS9_EVAL_RESULT="$(
+  eval "$RS9_OUTPUT"
+  printf 'RS9_MODE=%s\nRS9_DOCKERFILE=%s\nRS9_CONTEXT=%s\n' \
+    "$DEV_WORKFLOW_SANDBOX_MODE" "$DEV_WORKFLOW_SANDBOX_DOCKERFILE" "$DEV_WORKFLOW_SANDBOX_CONTEXT"
+)"
+
+assert_eq "空白入りHOME/リポジトリルート: eval後もmode=dockerfileになる（#132）" \
+  "dockerfile" "$(plan_value RS9_MODE "$RS9_EVAL_RESULT")"
+assert_eq "空白入りHOME/リポジトリルート: eval後もDEV_WORKFLOW_SANDBOX_DOCKERFILEが完全なパスとして復元される（#132）" \
+  "${RS9_HOME}/${RS9_NAME}/Dockerfile.dev" "$(plan_value RS9_DOCKERFILE "$RS9_EVAL_RESULT")"
+assert_eq "空白入りHOME/リポジトリルート: eval後もDEV_WORKFLOW_SANDBOX_CONTEXTが完全なパスとして復元される（#132）" \
+  "$(normalize_test_path "$RS9_REPO")" "$(plan_value RS9_CONTEXT "$RS9_EVAL_RESULT")"
 
 # ---------------------------------------------------------------------------
 # 結果集計
