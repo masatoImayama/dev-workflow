@@ -31,6 +31,16 @@ generator の Read/Edit のたびに確認が入る（＝自律動作が止ま�
 
 ## 起動時の確認
 
+**リポジトリ衛生プリフライトを最初に実行する。** git追跡された `.claude/settings.local.json`
+がある状態でYOLOモードを回すと、自動追記された許可ルールがコミット候補になってしまう
+（追跡されたpermission設定は `git clone` した全員に同意なく適用されてしまうため、issue #121）。
+**exit 2 が返ったらrunを開始せず、ここで停止する。** 意図的に追跡されたまま続行する場合は
+`DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS=1` を設定してから再実行する（opt-out）。
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-repo-hygiene.sh" --run || exit 1
+```
+
 !`gh issue view $ARGUMENTS 2>/dev/null || echo "ERROR: issue $ARGUMENTS が見つかりません"`
 
 !`gh issue list --label "task" --state open --json number,title,labels,body --limit 100 2>/dev/null | head -200`
