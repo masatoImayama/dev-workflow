@@ -8305,9 +8305,16 @@ fi
 # `skills/run/SKILL.md:378-381`（修正前）は generator に対して「あなたの isolation
 # worktree は WAVE_BASE から分岐している」という偽の前提を伝えつつ fetch/checkout/pull を
 # 禁止しており、ウェーブ2以降で必ずベース検証が失敗する（詳細は docs/dev-workflow-handover.md
-# のH1節）。fetch/checkout/pullの禁止は維持したまま git reset --hard <WAVE_BASE> のみを
-# 明示的に許可し、実装着手前に git status --short / git reset --hard /
-# git merge-base --is-ancestor / git log --oneline -1 をこの順で実行させる。
+# のH1節）。fetch/checkout/pullの禁止は維持したまま実装着手前に git status --short /
+# [ベース合わせコマンド] / git merge-base --is-ancestor / git log --oneline -1 を
+# この順で実行させる。
+#
+# ベース合わせコマンドは当初 `git reset --hard <WAVE_BASE>` のみを例外として許可していたが、
+# Task #152 で `git merge --ff-only <WAVE_BASE>` に変更した。`git reset --hard` は一般的な
+# 安全設定（permission deny）でブロックされる代表的なコマンドであり、実際に本Epicのウェーブ2で
+# 全3レーンがこれにより着手不能になって停止した実績があるため（`merge --ff-only` は破壊的でなく
+# ブロックされにくいうえ、isolation worktreeの分岐元はWAVE_BASEの祖先であるためfast-forwardは
+# 必ず成功する）。
 # ---------------------------------------------------------------------------
 
 echo ""
@@ -8343,9 +8350,9 @@ assert_order() {
 # --- skills/run/SKILL.md: Step 3 プロンプト雛形に4手順がこの順で現れる ---
 RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$RUN_SKILL_FLAT")"
 
-assert_order "SKILL.md: Step 3 雛形に git status --short → git reset --hard → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89）" \
+assert_order "SKILL.md: Step 3 雛形に git status --short → git merge --ff-only → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89）" \
   "$RS_STEP3" \
-  "git status --short" "git reset --hard" "git merge-base --is-ancestor" "git log --oneline -1"
+  "git status --short" "git merge --ff-only" "git merge-base --is-ancestor" "git log --oneline -1"
 
 case "$RS_STEP3" in
   *'あなたの isolation worktree は WAVE_BASE から分岐している'*)
@@ -8365,9 +8372,9 @@ esac
 # --- skills-codex/dev-workflow-run/SKILL.md: Step 3 にも同じ4手順がこの順で現れる ---
 CRS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md")"
 
-assert_order "SKILL.md(codex): Step 3 に git status --short → git reset --hard → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89）" \
+assert_order "SKILL.md(codex): Step 3 に git status --short → git merge --ff-only → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89）" \
   "$CRS_STEP3" \
-  "git status --short" "git reset --hard" "git merge-base --is-ancestor" "git log --oneline -1"
+  "git status --short" "git merge --ff-only" "git merge-base --is-ancestor" "git log --oneline -1"
 
 case "$CRS_STEP3" in
   *'git fetch'*'git checkout'*'git pull'*'実行しないこと'*)
@@ -8386,13 +8393,13 @@ else
 fi
 
 # 手順の順序は「実行する具体的なコマンド列」（```bash フェンス内）だけで検査する。
-# 節の冒頭には reset --hard の許可理由を説明する散文（同じ文字列を含む）があるため、
-# 節全体を対象にすると散文側の言及に引きずられて誤検知する。
+# 節の冒頭には merge --ff-only を選んだ理由（reset --hard を使わない理由）を説明する散文
+# （同じ文字列を含む）があるため、節全体を対象にすると散文側の言及に引きずられて誤検知する。
 GEN_STEP0_FENCE="$(printf '%s\n' "$GEN_STEP0" | awk '/^```bash/{f=1;next} /^```/{f=0} f')"
 
-assert_order "core/roles/generator.md: 「0. 」節のコマンド列に git status --short → git reset --hard → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89）" \
+assert_order "core/roles/generator.md: 「0. 」節のコマンド列に git status --short → git merge --ff-only → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89）" \
   "$GEN_STEP0_FENCE" \
-  "git status --short" "git reset --hard" "git merge-base --is-ancestor" "git log --oneline -1"
+  "git status --short" "git merge --ff-only" "git merge-base --is-ancestor" "git log --oneline -1"
 
 case "$GEN_STEP0" in
   *'実装着手前に'*'1回だけ'*)
@@ -8402,17 +8409,24 @@ case "$GEN_STEP0" in
 esac
 
 case "$GEN_STEP0" in
-  *'コミットを積んだ後に再実行してはならない'*)
-    pass "core/roles/generator.md: 「0. 」節に『コミット後に再実行してはならない』の明記がある（#89）" ;;
+  *'コミットを積んだ後に再実行する必要は無い'*)
+    pass "core/roles/generator.md: 「0. 」節に『コミット後に再実行する必要は無い』の明記がある（#89, #152）" ;;
   *)
-    fail "core/roles/generator.md: 「0. 」節に『コミット後に再実行してはならない』の明記がある（#89）" "$GEN_STEP0" ;;
+    fail "core/roles/generator.md: 「0. 」節に『コミット後に再実行する必要は無い』の明記がある（#89, #152）" "$GEN_STEP0" ;;
 esac
 
 case "$GEN_STEP0" in
-  *'`git reset --hard <WAVE_BASE>` のみを例外として許可する'*)
-    pass "core/roles/generator.md: 「0. 」節に reset --hard のみを例外として許可する旨の明記がある（#89）" ;;
+  *'`git merge --ff-only <WAVE_BASE>` のみを例外として許可する'*)
+    pass "core/roles/generator.md: 「0. 」節に merge --ff-only のみを例外として許可する旨の明記がある（#152）" ;;
   *)
-    fail "core/roles/generator.md: 「0. 」節に reset --hard のみを例外として許可する旨の明記がある（#89）" "$GEN_STEP0" ;;
+    fail "core/roles/generator.md: 「0. 」節に merge --ff-only のみを例外として許可する旨の明記がある（#152）" "$GEN_STEP0" ;;
+esac
+
+case "$GEN_STEP0" in
+  *'git reset --hard'*'一般的な安全設定'*)
+    pass "core/roles/generator.md: 「0. 」節に reset --hard を使わない理由（permission denyでの着手不能実績）が明記されている（#152）" ;;
+  *)
+    fail "core/roles/generator.md: 「0. 」節に reset --hard を使わない理由（permission denyでの着手不能実績）が明記されている（#152）" "$GEN_STEP0" ;;
 esac
 
 case "$GEN_STEP0" in
@@ -8442,6 +8456,77 @@ case "$README_WAVE_SECTION" in
   *)
     fail "README.md: 「ウェーブと wave ブランチ」節が分岐元はハーネス依存でWAVE_BASEとは限らない旨に改められている（#89）" \
       "$README_WAVE_SECTION" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# H152（Task #152）: WAVE_BASEへのベース合わせ手段を git reset --hard から
+# git merge --ff-only へ変更する（回帰防止）。
+#
+# 背景: git reset --hard は一般的な安全設定（permission deny）でブロックされる代表的な
+# コマンドであり、実際に本Epicのウェーブ2で全3レーンが着手不能になって停止した。
+# isolation worktreeの分岐元はWAVE_BASEの祖先であるため、破壊的でない git merge --ff-only
+# で必ずfast-forwardできる。この回帰テストは「reset --hardが実行コマンドとして規定されて
+# いないこと」と「merge --ff-onlyが実行コマンドとして規定されていること」を機械的に検査する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== H152: WAVE_BASEへのベース合わせ手段が reset --hard から merge --ff-only へ変更されている =="
+
+# --- 実行コマンド行（`$ git ...` の形でechoされている行）だけを対象に、
+#     reset --hard が実行コマンドとして残っていないことを検査する ---
+for h152_pair in \
+  "skills/run/SKILL.md:${RS_STEP3}" \
+  "skills-codex/dev-workflow-run/SKILL.md:${CRS_STEP3}" \
+  "core/roles/generator.md:${GEN_STEP0_FENCE}"; do
+  h152_f="${h152_pair%%:*}"
+  h152_text="${h152_pair#*:}"
+  h152_exec_lines="$(printf '%s\n' "$h152_text" | grep -F "echo '\$ git")"
+  if printf '%s\n' "$h152_exec_lines" | grep -Fq 'reset --hard'; then
+    fail "${h152_f}: WAVE_BASE合わせの実行コマンド行に reset --hard が残っていない（#152）" \
+      "$h152_exec_lines"
+  else
+    pass "${h152_f}: WAVE_BASE合わせの実行コマンド行に reset --hard が残っていない（#152）"
+  fi
+  if printf '%s\n' "$h152_exec_lines" | grep -Fq 'merge --ff-only'; then
+    pass "${h152_f}: WAVE_BASE合わせの実行コマンド行に merge --ff-only が規定されている（#152）"
+  else
+    fail "${h152_f}: WAVE_BASE合わせの実行コマンド行に merge --ff-only が規定されている（#152）" \
+      "$h152_exec_lines"
+  fi
+done
+
+# --- README.md: WAVE_BASE合わせの説明箇所が merge --ff-only を規定し、
+#     reset --hard を使わない理由（permission denyでの着手不能実績）に触れている ---
+README_WAVE_BASE_ALIGN="$(awk '/^### ウェーブと wave ブランチ/{f=1} /^### `--ff-only`/{f=0} f' "${REPO_ROOT}/README.md")"
+case "$README_WAVE_BASE_ALIGN" in
+  *'`git merge --ff-only "$WAVE_BASE"`'*)
+    pass "README.md: WAVE_BASE合わせの説明に merge --ff-only が規定されている（#152）" ;;
+  *)
+    fail "README.md: WAVE_BASE合わせの説明に merge --ff-only が規定されている（#152）" \
+      "$README_WAVE_BASE_ALIGN" ;;
+esac
+case "$README_WAVE_BASE_ALIGN" in
+  *'`git reset --hard "$WAVE_BASE"`'*)
+    fail "README.md: WAVE_BASE合わせの説明に reset --hard が実行コマンドとして残っていない（#152）" \
+      "$README_WAVE_BASE_ALIGN" ;;
+  *)
+    pass "README.md: WAVE_BASE合わせの説明に reset --hard が実行コマンドとして残っていない（#152）" ;;
+esac
+if printf '%s\n' "$README_WAVE_BASE_ALIGN" | tr -s ' \n' ' ' | grep -Fq 'ウェーブ2で 全レーンがこれにより着手不能になって停止した'; then
+  pass "README.md: reset --hard を使わない理由（実測の着手不能実績）が明記されている（#152）"
+else
+  fail "README.md: reset --hard を使わない理由（実測の着手不能実績）が明記されている（#152）" \
+    "$README_WAVE_BASE_ALIGN"
+fi
+
+# --- core/instructions.md「ブランチ戦略」節: reset --hardを使わない理由とmerge --ff-onlyの規定 ---
+H152_INSTR_BRANCH="$(awk '/^## ブランチ戦略/{f=1} /^### レーン → wave ブランチ/{f=0} f' "${REPO_ROOT}/core/instructions.md")"
+case "$H152_INSTR_BRANCH" in
+  *'`git merge --ff-only <WAVE_BASE>`'*'`git reset --hard` は使わない'*)
+    pass "core/instructions.md: ブランチ戦略節が merge --ff-only を規定し reset --hard を使わない旨を明記している（#152）" ;;
+  *)
+    fail "core/instructions.md: ブランチ戦略節が merge --ff-only を規定し reset --hard を使わない旨を明記している（#152）" \
+      "$H152_INSTR_BRANCH" ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -9065,7 +9150,7 @@ GEN_STEP0_H2="$(awk '/^### 0\. /{f=1} /^### 1\. /{f=0} f' "${REPO_ROOT}/core/rol
 
 assert_order "core/roles/generator.md: H2向け編集後も「0. 」節のコマンド列の順序（#89）が保たれている（#94）" \
   "$(printf '%s\n' "$GEN_STEP0_H2" | awk '/^```bash/{f=1;next} /^```/{f=0} f')" \
-  "git status --short" "git reset --hard" "git merge-base --is-ancestor" "git log --oneline -1"
+  "git status --short" "git merge --ff-only" "git merge-base --is-ancestor" "git log --oneline -1"
 
 # --- README.md: 「この1回の準備がウェーブ・レーンをまたいで効く」が消えている ---
 if grep -Fq -- 'この1回の準備がウェーブ・レーンをまたいで効く' "${REPO_ROOT}/README.md"; then
@@ -13099,7 +13184,7 @@ done
 # ---------------------------------------------------------------------------
 
 echo ""
-echo "== Task #153: cross-wave lane reuseの検証結果とフォールバックの明記 =="
+echo "== Task #153/#152: cross-wave lane reuseの検証結果とその訂正の明記 =="
 
 H153_ADR="${REPO_ROOT}/docs/adr/0004-cross-wave-lane-reuse.md"
 
@@ -13109,22 +13194,36 @@ else
   fail "docs/adr/0004-cross-wave-lane-reuse.md が新規作成されている（#153）" "ファイルが存在しません"
 fi
 
-# --- 検証結果（実際に確認した事実）がADRに書かれている ---
+# --- Task #153当時の誤った結論と、Task #152による訂正の両方がADRに書かれている ---
 H153_ADR_BODY="$(cat "$H153_ADR" 2>/dev/null)"
 case "$H153_ADR_BODY" in
-  *'手段（`SendMessage` に相当するツール）は存在しない'*)
-    pass "ADR 0004: SendMessage相当の継続手段が確認できなかった事実が書かれている（#153）" ;;
+  *'`SendMessage` ツールが実在する'*)
+    pass "ADR 0004: SendMessageツールが実在するという訂正後の事実が書かれている（#152）" ;;
   *)
-    fail "ADR 0004: SendMessage相当の継続手段が確認できなかった事実が書かれている（#153）" \
+    fail "ADR 0004: SendMessageツールが実在するという訂正後の事実が書かれている（#152）" \
+      "$H153_ADR_BODY" ;;
+esac
+case "$H153_ADR_BODY" in
+  *'この結論は誤りだった'*)
+    pass "ADR 0004: Task #153の当初結論が誤りだったと明記されている（#152）" ;;
+  *)
+    fail "ADR 0004: Task #153の当初結論が誤りだったと明記されている（#152）" \
+      "$H153_ADR_BODY" ;;
+esac
+case "$H153_ADR_BODY" in
+  *'本 Epic では実際に cross-wave 継続を実装・実地検証してはいない'*)
+    pass "ADR 0004: 機構はあるが本Epicでは未検証である旨が明記されている（#152）" ;;
+  *)
+    fail "ADR 0004: 機構はあるが本Epicでは未検証である旨が明記されている（#152）" \
       "$H153_ADR_BODY" ;;
 esac
 
-# --- 継続できない場合: 従来どおりの経路のまま、との決定が明記されている ---
+# --- 決定: 本Epicのスコープでは実装しない（見送り）ことが明記されている ---
 case "$H153_ADR_BODY" in
-  *'レーンのウェーブ横断維持は実装しない'*)
-    pass "ADR 0004: 継続できないため従来どおりの経路を維持する決定が明記されている（#153）" ;;
+  *'レーンのウェーブ横断維持は、本 Epic のスコープでは実装しない'*)
+    pass "ADR 0004: 本Epicのスコープでは実装しない（見送り）という決定が明記されている（#152）" ;;
   *)
-    fail "ADR 0004: 継続できないため従来どおりの経路を維持する決定が明記されている（#153）" \
+    fail "ADR 0004: 本Epicのスコープでは実装しない（見送り）という決定が明記されている（#152）" \
       "$H153_ADR_BODY" ;;
 esac
 
@@ -13189,6 +13288,13 @@ if grep -Fq 'cross-wave lane reuse' "${REPO_ROOT}/README.md"; then
   pass "README.md: cross-wave lane reuseの検証結果が明記されている（#153）"
 else
   fail "README.md: cross-wave lane reuseの検証結果が明記されている（#153）" "見つかりません"
+fi
+
+# --- README.md にTask #153当時の誤った結論とTask #152による訂正の両方が明記されている ---
+if grep -Fq '`SendMessage` ツールが実在し' "${REPO_ROOT}/README.md"; then
+  pass "README.md: SendMessageツールが実在するという訂正後の事実が明記されている（#152）"
+else
+  fail "README.md: SendMessageツールが実在するという訂正後の事実が明記されている（#152）" "見つかりません"
 fi
 
 # --- 生成物（agents/*.md・codex-agents/*.toml）が core/ と一致している（build.sh実行済み） ---
@@ -13631,6 +13737,152 @@ if [ "$H155_BUILD_CODEX_EXIT" -eq 0 ]; then
   pass "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#155）"
 else
   fail "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#155）" "$H155_BUILD_CODEX_CHECK"
+fi
+
+# ---------------------------------------------------------------------------
+# Task #152: 全系統の整合を取り、ADR 索引と生成物・全テストを最終確認する
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #152: ADR索引と、スコープ外項目に変更が入っていないことの確認 =="
+
+# --- docs/adr/README.md が存在し、6件のADRを全て索引している ---
+H152_ADR_INDEX="${REPO_ROOT}/docs/adr/README.md"
+if [ -f "$H152_ADR_INDEX" ]; then
+  pass "docs/adr/README.md が新規作成されている（#152）"
+else
+  fail "docs/adr/README.md が新規作成されている（#152）" "ファイルが存在しません"
+fi
+
+H152_ADR_INDEX_BODY="$(cat "$H152_ADR_INDEX" 2>/dev/null)"
+for h152_adr_file in \
+  "0001-integration-gate-at-epic-end.md" \
+  "0002-sandbox-overhead-reduction.md" \
+  "0003-parallel-review-by-focus.md" \
+  "0004-cross-wave-lane-reuse.md" \
+  "0005-edit-time-check-hook.md" \
+  "0006-evaluator-model-split.md"; do
+  if printf '%s\n' "$H152_ADR_INDEX_BODY" | grep -Fq "$h152_adr_file"; then
+    pass "docs/adr/README.md: ${h152_adr_file} を索引している（#152）"
+  else
+    fail "docs/adr/README.md: ${h152_adr_file} を索引している（#152）" "見つかりません"
+  fi
+done
+
+# --- docs/adr/README.md の冒頭に「ADRは設計判断の記録、使い方はREADMEに書く」旨の明示がある ---
+case "$H152_ADR_INDEX_BODY" in
+  *'ADR は設計判断の記録であり、使い方の説明は README に書く'*)
+    pass "docs/adr/README.md: 冒頭にADRの役割の明示がある（#152）" ;;
+  *)
+    fail "docs/adr/README.md: 冒頭にADRの役割の明示がある（#152）" "$H152_ADR_INDEX_BODY" ;;
+esac
+
+# --- README.md から2軸（直列区間とプロンプト量の削減／推論ターン数と出力トークン量の削減）が読み取れる ---
+case "$(cat "${REPO_ROOT}/README.md")" in
+  *'直列区間とプロンプト量の削減'*'推論ターン数と出力トークン量の削減'*)
+    pass "README.md: Epic #143 の2軸（直列区間・プロンプト量／推論ターン数・出力トークン量）が明記されている（#152）" ;;
+  *)
+    fail "README.md: Epic #143 の2軸（直列区間・プロンプト量／推論ターン数・出力トークン量）が明記されている（#152）" \
+      "見つかりません" ;;
+esac
+
+# --- 「機械的ゲートの二段構成」という古い呼称（#144で三段構成へ改称後の残存）が消えている ---
+for h152_f2 in "skills/run/SKILL.md" "core/roles/generator.md" "core/instructions.md" "README.md"; do
+  if grep -Fq '機械的ゲートの二段構成' "${REPO_ROOT}/${h152_f2}"; then
+    fail "${h152_f2}: 『機械的ゲートの二段構成』という古い呼称が残っていない（三段構成への統一・#152）" \
+      "$(grep -n '機械的ゲートの二段構成' "${REPO_ROOT}/${h152_f2}")"
+  else
+    pass "${h152_f2}: 『機械的ゲートの二段構成』という古い呼称が残っていない（三段構成への統一・#152）"
+  fi
+done
+
+# --- README.md: wave-reviewが「evaluator側の契約が用意されているだけ」という
+#     Task #147時点の古い記述のまま残っていない（#148/#149で実際に呼び出しが結線された） ---
+if grep -Fq '現時点では evaluator 側の契約' "${REPO_ROOT}/README.md"; then
+  fail "README.md: wave-reviewの呼び出しが既に結線されている旨に更新されている（#152）" \
+    "$(grep -n '現時点では evaluator 側の契約' "${REPO_ROOT}/README.md")"
+else
+  pass "README.md: wave-reviewの呼び出しが既に結線されている旨に更新されている（#152）"
+fi
+if grep -Fq '呼び出しは Step 3（レーン起動と同一メッセージ）で行う' "${REPO_ROOT}/README.md"; then
+  pass "README.md: wave-reviewの実際の呼び出しタイミング（Step 3・レーン起動と同一メッセージ）が明記されている（#152）"
+else
+  fail "README.md: wave-reviewの実際の呼び出しタイミング（Step 3・レーン起動と同一メッセージ）が明記されている（#152）" \
+    "見つかりません"
+fi
+
+# --- README.md: Epic本文の任意節（4種）が1か所の一覧にまとまっている ---
+H152_EPIC_SECTIONS="$(awk '/^### Epic 本文の任意節（一覧）/{f=1} /^### Epic の `## 準備コマンド`/{f=0} f' "${REPO_ROOT}/README.md")"
+case "$H152_EPIC_SECTIONS" in
+  *'## 準備コマンド'*'## 共有ディレクトリ'*'## SKIPパターン'*'## 編集時チェック'*)
+    pass "README.md: Epic本文の任意節4種が1か所の一覧にまとまっている（#152）" ;;
+  *)
+    fail "README.md: Epic本文の任意節4種が1か所の一覧にまとまっている（#152）" "$H152_EPIC_SECTIONS" ;;
+esac
+
+# --- README.md に「ウェーブごとに全テストを走らせる」旨の記述が残っていない ---
+if grep -Fq 'ウェーブごとに全テストを走らせる' "${REPO_ROOT}/README.md"; then
+  fail "README.md: 『ウェーブごとに全テストを走らせる』旨の記述が残っていない（完了条件・#152）" \
+    "$(grep -n 'ウェーブごとに全テストを走らせる' "${REPO_ROOT}/README.md")"
+else
+  pass "README.md: 『ウェーブごとに全テストを走らせる』旨の記述が残っていない（完了条件・#152）"
+fi
+
+# --- D. スコープ外と宣言した項目に変更が入っていないことの確認 ---
+
+# --- sandbox-exec.sh の CLI契約（--epic/--warm/--down/--ls/--reset-cache/--rebuild/--print-plan）が維持されている ---
+H152_SANDBOX="${REPO_ROOT}/scripts/sandbox-exec.sh"
+H152_SANDBOX_MISSING=""
+for h152_flag in "--epic" "--warm" "--down" "--ls" "--reset-cache" "--rebuild" "--print-plan"; do
+  if ! grep -Fq -- "$h152_flag" "$H152_SANDBOX"; then
+    H152_SANDBOX_MISSING="${H152_SANDBOX_MISSING} ${h152_flag}"
+  fi
+done
+if [ -z "$H152_SANDBOX_MISSING" ]; then
+  pass "scripts/sandbox-exec.sh: CLI契約（--epic/--warm/--down/--ls/--reset-cache/--rebuild/--print-plan）が維持されている（#152）"
+else
+  fail "scripts/sandbox-exec.sh: CLI契約（--epic/--warm/--down/--ls/--reset-cache/--rebuild/--print-plan）が維持されている（#152）" \
+    "欠落:${H152_SANDBOX_MISSING}"
+fi
+
+# --- --lanes の既定値が3のままである ---
+if grep -Fq '既定は **3**' "${REPO_ROOT}/README.md"; then
+  pass "README.md: --lanes の既定値が3のままである（#152）"
+else
+  fail "README.md: --lanes の既定値が3のままである（#152）" "見つかりません"
+fi
+
+# --- merge-lane.sh のmerge-base検証があり、cherry-pickによる載せ替えを行っていない ---
+H152_MERGE_LANE="${REPO_ROOT}/scripts/merge-lane.sh"
+if grep -Fq 'merge-base' "$H152_MERGE_LANE" && grep -Fq 'cherry-pick による載せ替えは行わない' "$H152_MERGE_LANE"; then
+  pass "scripts/merge-lane.sh: merge-base検証があり、cherry-pickによる載せ替えを行わない旨が明記されている（#152）"
+else
+  fail "scripts/merge-lane.sh: merge-base検証があり、cherry-pickによる載せ替えを行わない旨が明記されている（#152）" \
+    "$(grep -n 'merge-base\|cherry-pick' "$H152_MERGE_LANE")"
+fi
+
+# --- Epicブランチへのforce push禁止がcore/instructions.mdに残っている ---
+if grep -Fq 'force push は行わない' "${REPO_ROOT}/core/instructions.md"; then
+  pass "core/instructions.md: Epicブランチへのforce push禁止が残っている（#152）"
+else
+  fail "core/instructions.md: Epicブランチへのforce push禁止が残っている（#152）" "見つかりません"
+fi
+
+# --- 生成物（agents/*.md・codex-agents/*.toml）が core/ と一致している（build.sh実行済み） ---
+H152_BUILD_CLAUDE_CHECK="$(bash "${REPO_ROOT}/adapters/claude/build.sh" --check 2>&1)"
+H152_BUILD_CLAUDE_EXIT=$?
+if [ "$H152_BUILD_CLAUDE_EXIT" -eq 0 ]; then
+  pass "adapters/claude/build.sh --check: agents/ が core/ と一致している（#152）"
+else
+  fail "adapters/claude/build.sh --check: agents/ が core/ と一致している（#152）" "$H152_BUILD_CLAUDE_CHECK"
+fi
+
+H152_BUILD_CODEX_CHECK="$(bash "${REPO_ROOT}/adapters/codex/build.sh" --check 2>&1)"
+H152_BUILD_CODEX_EXIT=$?
+if [ "$H152_BUILD_CODEX_EXIT" -eq 0 ]; then
+  pass "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#152）"
+else
+  fail "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#152）" "$H152_BUILD_CODEX_CHECK"
 fi
 
 # ---------------------------------------------------------------------------
