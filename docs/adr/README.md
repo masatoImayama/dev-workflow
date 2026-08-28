@@ -1,0 +1,23 @@
+# ADR（Architecture Decision Record）索引
+
+**ADR は設計判断の記録であり、使い方の説明は README に書く。** ここには「なぜその設計を選んだか・
+何を却下したか」だけを記録する。ハーネスの使い方・コマンド一覧・環境変数などの説明は
+リポジトリルートの `README.md`（または `docs/dev-workflow-handover.md`）を参照すること。
+
+## 一覧
+
+| 番号 | タイトル | 決定の要約 | 状態 |
+|---|---|---|---|
+| [0001](0001-integration-gate-at-epic-end.md) | 統合ゲート（フルスイート実行）を Epic 末の1回に集約する | ウェーブごとのフルスイート実行をやめ、プロジェクトの全テストは Epic につき1回、全ウェーブ完了後に集約する。ウェーブ単位の安全網は取り込み検証（merge-base 完全一致検証＋可読性ガード）に置き換える | 承認済み（Task #144） |
+| [0002](0002-sandbox-overhead-reduction.md) | サンドボックス呼び出しオーバーヘッドの削減 | `sandbox-exec.sh` の呼び出しごとの固定オーバーヘッド（docker CLI 複数回呼び出し）を fast path 判定で削減する | 採用（Task #145） |
+| [0003](0003-parallel-review-by-focus.md) | 観点別レビュー（focus）とウェーブ差分の先行レビュー（wave-review） | evaluator に観点（correctness / readability / over-engineering / security）指定と `wave-review` モードを追加し、レビューの並列化とウェーブ間オーバーラップの土台を作る | 承認済み（Task #147） |
+| [0004](0004-cross-wave-lane-reuse.md) | レーンのウェーブ横断維持（cross-wave lane reuse）は見送る（未実装のまま） | ウェーブをまたいでレーン（generator）を継続させる機構（`SendMessage`）自体は存在するが、本 Epic のスコープでは実装・実地検証していないため、現状は毎ウェーブ新規 spawn する方式を維持する。Task #153 時点の「手段が存在しない」という結論は誤りであり、Task #152 で訂正した | 承認済み・見送り（Task #153、Task #152 で記述を訂正） |
+| [0005](0005-edit-time-check-hook.md) | 編集時チェック（PostToolUse フック） | generator の編集直後にホスト側で型/lint の軽量チェックを行い、`sandbox-exec.sh` 経由のビルド/テスト往復の一部を削減する | 採用（Task #155） |
+| [0006](0006-evaluator-model-split.md) | evaluator を「発見は sonnet、確度判定は opus」に変える | 観点別レビューの発見役を sonnet で並列に回し、拾った指摘の確度判定だけを opus に寄せることで、レビューの直列区間のコストを下げる | 承認済み（Task #157） |
+
+## 命名・運用ルール
+
+- ファイル名は `NNNN-短い英語スラッグ.md`（4桁の連番＋ハイフン区切りの英語スラッグ）
+- 新しい ADR を追加したら、この索引の表に1行追加すること（Epic 完了時の最終整合タスクだけでなく、
+  ADR を新規作成したタスク自身がこの表を更新するのが望ましい）
+- 状態は ADR 本文の「ステータス」節をそのまま短縮して転記する（「承認済み」「採用」「見送り」等）
