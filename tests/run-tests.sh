@@ -13903,6 +13903,28 @@ else
   fail "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#152）" "$H152_BUILD_CODEX_CHECK"
 fi
 
+# --- タスク見送り時の作業ツリー復旧が git reset --hard HEAD のまま残っていない（#161） ---
+for H161_FILE in "core/roles/generator.md" "README.md" "skills-codex/dev-workflow-run/SKILL.md" \
+  "agents/generator.md" "codex-agents/generator.toml"; do
+  if grep -Fq 'git reset --hard HEAD' "${REPO_ROOT}/${H161_FILE}"; then
+    fail "${H161_FILE}: 見送り時の作業ツリー復旧に git reset --hard HEAD が残っていない（#161）" \
+      "$(grep -n 'git reset --hard HEAD' "${REPO_ROOT}/${H161_FILE}")"
+  else
+    pass "${H161_FILE}: 見送り時の作業ツリー復旧に git reset --hard HEAD が残っていない（#161）"
+  fi
+done
+
+# --- タスク見送り時の作業ツリー復旧が非破壊手順（git restore + git clean -nd）に置き換わっている（#161） ---
+for H161_FILE in "core/roles/generator.md" "README.md" "skills-codex/dev-workflow-run/SKILL.md"; do
+  if grep -Fq 'git restore --source=HEAD --staged --worktree .' "${REPO_ROOT}/${H161_FILE}" \
+    && grep -Fq 'git clean -nd' "${REPO_ROOT}/${H161_FILE}"; then
+    pass "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd に置き換わっている（#161）"
+  else
+    fail "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd に置き換わっている（#161）" \
+      "$(grep -n 'git restore\|git clean' "${REPO_ROOT}/${H161_FILE}")"
+  fi
+done
+
 # ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
