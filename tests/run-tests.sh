@@ -13626,6 +13626,25 @@ H155_EXIT_ENV_OVERRIDE=$(printf '{"tool_input":{"file_path":"%s"}}' "${H155_WORK
   >/dev/null 2>&1; echo $?)
 assert_exit_code "edit-check.sh: DEV_WORKFLOW_EDIT_CHECK環境変数がマーカーファイルより優先する" 2 "$H155_EXIT_ENV_OVERRIDE"
 
+# --- ケース11: 即座に成功するチェックはタイムアウト秒数未満で返る（#158の回帰検出） ---
+#
+# run_with_timeout の監視用サブシェル ( sleep "$secs"; kill ... ) が、成功パスでも
+# 標準出力をコマンド置換のパイプに残したまま孤児化し、EOF待ちで常にタイムアウト秒数ぶん
+# ブロックしていたバグ（レビュー#158）。従来のケース3（終了コードのみ検証）はこの遅延を
+# 検出できなかったため、所要時間そのものを assert する。DEV_WORKFLOW_EDIT_CHECK_TIMEOUT=10
+# を指定し、経過が3秒未満（十分に10秒を下回る）であることを確認する。
+edit_check_write '*.go true'
+H158_START="$(date +%s)"
+edit_check_run_hook "${H155_WORK}/sample.go" DEV_WORKFLOW_EDIT_CHECK_TIMEOUT=10 >/dev/null 2>&1
+H158_END="$(date +%s)"
+H158_ELAPSED=$((H158_END - H158_START))
+if [ "$H158_ELAPSED" -lt 3 ]; then
+  pass "edit-check.sh: 即座に成功するチェックはタイムアウト秒数（10秒）未満で返る（実測${H158_ELAPSED}秒・#158）"
+else
+  fail "edit-check.sh: 即座に成功するチェックはタイムアウト秒数（10秒）未満で返る（実測${H158_ELAPSED}秒・#158）" \
+    "監視用サブシェルがパイプの書き込み端を保持し続けタイムアウト秒数ぶんブロックしていないか確認すること"
+fi
+
 edit_check_clear
 
 # --- hooks.json: PostToolUse(Write|Edit|MultiEdit) に edit-check.sh が結線され、

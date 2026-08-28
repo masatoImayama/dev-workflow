@@ -151,14 +151,25 @@ CMD="${CMD_TEMPLATE//\{file\}/$EDIT_CHECK_FILE}"
 # ── タイムアウト付き実行（外部 `timeout` コマンドに非依存。check-readability.sh と
 #    同じ理由＝macOS既定環境に `timeout` が無いため、bash組み込みだけで実装する） ──
 run_with_timeout() {
-  # run_with_timeout <timeout_secs> <command string>
-  # 標準出力にコマンドの出力（stdout+stderr）を返す。戻り値がコマンドの終了コード。
-  # SIGTERMで打ち切られた場合は128+15=143を返す（呼び出し側でタイムアウトと判定する）。
-  local secs="$1" cmd="$2"
+  # run_with_timeout <timeout_secs> <command string> <出力の書き出し先ファイル>
+  # 戻り値がコマンドの終了コード。SIGTERMで打ち切られた場合は128+15=143を返す
+  # （呼び出し側でタイムアウトと判定する）。
+  #
+  # コマンドの出力（stdout+stderr）はコマンド置換のパイプではなく一時ファイルへ書く
+  # （呼び出し側でファイルを読む）。監視用サブシェル `( sleep ...; kill ... )` は
+  # `bash -c "$cmd" &` と同じプロセスグループ内でパイプの書き込み端を継承するため、
+  # そちらを /dev/null にリダイレクトするだけでは、"$cmd" 自身が生成した孫プロセスが
+  # 依然としてパイプを保持しうる（レビュー#158で指摘・実測確認）。出力先を一時ファイルに
+  # することで、pipeのEOF待ちという失敗モード自体を解消する。
+  local secs="$1" cmd="$2" outfile="$3"
   (
-    bash -c "$cmd" 2>&1 &
+    bash -c "$cmd" >"$outfile" 2>&1 &
     local cmd_pid=$!
-    ( sleep "$secs"; kill -TERM "$cmd_pid" 2>/dev/null ) &
+    # 監視用サブシェルの標準出力・標準エラーは親（コマンド置換のパイプ）から切り離す。
+    # 切り離さないと、kill後も孫プロセスの sleep がパイプの書き込み端を保持し続け、
+    # 呼び出し側の command substitution が EOF を待って常にタイムアウト秒数ぶんブロックする
+    # （レビュー#158。実測: 5366ms→179ms）。
+    ( sleep "$secs"; kill -TERM "$cmd_pid" 2>/dev/null ) >/dev/null 2>&1 &
     local watch_pid=$!
     wait "$cmd_pid" 2>/dev/null
     local rc=$?
@@ -168,8 +179,11 @@ run_with_timeout() {
   )
 }
 
-OUTPUT="$(run_with_timeout "$TIMEOUT_SECS" "$CMD")"
+EDIT_CHECK_OUTFILE="$(mktemp "${TMPDIR:-/tmp}/dw-edit-check-out.XXXXXX" 2>/dev/null || printf '/tmp/dw-edit-check-out.%s' "$$")"
+run_with_timeout "$TIMEOUT_SECS" "$CMD" "$EDIT_CHECK_OUTFILE"
 RC=$?
+OUTPUT="$(cat "$EDIT_CHECK_OUTFILE" 2>/dev/null)"
+rm -f "$EDIT_CHECK_OUTFILE" 2>/dev/null
 
 # rc=127: コマンド不在 / rc>=128: シグナルで終了（タイムアウトのSIGTERM含む）
 # → いずれもフック自体のエラーとして扱い、ブロックしない
