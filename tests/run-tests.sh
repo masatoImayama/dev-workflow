@@ -13843,6 +13843,24 @@ fi
 
 edit_check_clear
 
+# --- ケース12: ヘッダコメントの仕様例に gofmt -l {file} 単体（終了コード常に0のアンチパターン）が
+#     残っていない（#168。#165でcore/roles/planner.md・README.mdは差し替え済みだったが、
+#     仕様書式の一次資料であるこのヘッダだけ取りこぼしていた） ---
+H168_BARE_GOFMT="$(grep -Fn 'gofmt -l {file}' "${EDIT_CHECK_SCRIPT}" | grep -v 'test -z')"
+if [ -n "$H168_BARE_GOFMT" ]; then
+  fail "edit-check.sh: ヘッダの仕様例に終了コード常に0のgofmt -l {file}単体が残っていない（#168）" \
+    "$H168_BARE_GOFMT"
+else
+  pass "edit-check.sh: ヘッダの仕様例に終了コード常に0のgofmt -l {file}単体が残っていない（#168）"
+fi
+
+if grep -Fq 'test -z "$(gofmt -l {file})"' "${EDIT_CHECK_SCRIPT}"; then
+  pass "edit-check.sh: ヘッダの仕様例が終了コードで違反を表現する形（test -z \"\$(gofmt -l {file})\"）になっている（#168）"
+else
+  fail "edit-check.sh: ヘッダの仕様例が終了コードで違反を表現する形（test -z \"\$(gofmt -l {file})\"）になっている（#168）" \
+    "$(sed -n '25,40p' "${EDIT_CHECK_SCRIPT}")"
+fi
+
 # --- hooks.json: PostToolUse(Write|Edit|MultiEdit) に edit-check.sh が結線され、
 #     既存のcheck-readability.shと共存し、タイムアウトが設定されている ---
 HJ_POSTTOOLUSE_WEM="$(_hj_extract_section "$HJ_HOOKS_JSON" "PostToolUse")"

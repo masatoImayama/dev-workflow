@@ -30,8 +30,11 @@
 #   `"{file}"` のように引用するのは呼び出し側（Epic本文を書く側）の責任とする。
 #
 #   例:
-#     *.go  gofmt -l {file}
-#     *.ts  npx tsc --noEmit {file}
+#     *.go   test -z "$(gofmt -l {file})"
+#     *.py   ruff check {file}
+#     *.ts   npx tsc --noEmit -p tsconfig.json
+#
+#   違反は終了コードで表現すること。gofmt -l のように常に0を返すコマンドは永久にブロックしない。
 #
 # タイムアウト（既定5秒。DEV_WORKFLOW_EDIT_CHECK_TIMEOUT秒で調整可）:
 #   想定するのは型チェック単体・lint単体のような**秒オーダーで終わるもの**であり、
