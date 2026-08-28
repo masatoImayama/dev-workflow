@@ -64,8 +64,8 @@ run は1レーンに**複数のタスクを割り当てることがある**（`#
 - **タスクごとに独立したコミットを積む。** 複数タスクを1コミットにまとめない
   （run はタスク単位で issue をクローズし、レビューはコミット単位で差分を読む）
 - **1件のタスクに失敗しても、レーン全体を投げ出さない。** 失敗したタスクは
-  `git restore --source=HEAD --staged --worktree .` で追跡ファイルをHEADの状態へ戻し、
-  `git clean -nd`（dry-run。削除はしない）で残る未追跡ファイルを報告してから見送り、
+  `git restore --source=HEAD --staged --worktree -- :/` で追跡ファイルをHEADの状態へ戻し、
+  `git clean -nd -- :/`（dry-run。削除はしない）で残る未追跡ファイルを報告してから見送り、
   **次のタスクへ進む。**（`git reset --hard` は手順0のベース合わせと同じ理由で
   `permissions.deny` にブロックされうるため、ここでも使わない。詳細は下記「見送り時の
   作業ツリー復旧に `git reset --hard` を使わない理由」を参照）
@@ -157,13 +157,20 @@ BASE_EVIDENCE_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
 `Bash(git reset --hard:*)` のような**コマンド名の前方一致**であり、文脈（ベース合わせか
 見送りか）を区別しない。そのため見送り時の復旧も次の非破壊手順に置き換える。
 
-```bash
-# 追跡ファイルをHEADの状態へ戻す（ステージ済み・未ステージの変更を両方戻す。破壊的ではない）
-{ echo '$ git restore --source=HEAD --staged --worktree .'; \
-  git restore --source=HEAD --staged --worktree .; } | tee -a "$EVIDENCE_FILE"
+**`-- :/`（トップレベル起点のマジック pathspec）を必ず付ける。** pathspec を省略すると
+`git restore` / `git clean` はいずれも**カレントディレクトリ配下だけ**を対象とし、複合
+コマンドで `cd` した場合などにリポジトリ他所の変更・未追跡ファイルが戻らない／報告されない
+まま「残留なし」という誤った証跡が残る。置き換え前に使っていた `--hard` 付きの全域リセットは
+cwd に関係なくリポジトリ全域に効いていたため、`-- :/` を付けて初めて等価になる。
 
-# 残る未追跡ファイルを報告する（-n はdry-run。削除はしない）
-{ echo '$ git clean -nd'; git clean -nd; } | tee -a "$EVIDENCE_FILE"
+```bash
+# 追跡ファイルをHEADの状態へ戻す（ステージ済み・未ステージの変更を両方戻す。破壊的ではない。
+# -- :/ でリポジトリ全域を対象にする。cwd 相対にしない）
+{ echo '$ git restore --source=HEAD --staged --worktree -- :/'; \
+  git restore --source=HEAD --staged --worktree -- :/; } | tee -a "$EVIDENCE_FILE"
+
+# 残る未追跡ファイルを報告する（-n はdry-run。削除はしない。-- :/ でリポジトリ全域を対象にする）
+{ echo '$ git clean -nd -- :/'; git clean -nd -- :/; } | tee -a "$EVIDENCE_FILE"
 ```
 
 `git clean -nd` は削除を行わず一覧を表示するだけであり、報告された未追跡ファイルは
@@ -502,8 +509,8 @@ Task #[番号]: success skips=[件数|unknown] duration_sec=[秒数] evidence=[E
 Task #[番号]: 見送り skips=[件数|unknown|n/a] duration_sec=[秒数] evidence=[EVIDENCE_FILEのパス] 理由=[短い要約]
 ```
 
-- `見送り` の場合、`git restore --source=HEAD --staged --worktree .` で追跡ファイルを
-  HEADの状態へ戻し、`git clean -nd`（dry-run）で残る未追跡ファイルを報告したことと、
+- `見送り` の場合、`git restore --source=HEAD --staged --worktree -- :/` で追跡ファイルを
+  HEADの状態へ戻し、`git clean -nd -- :/`（dry-run）で残る未追跡ファイルを報告したことと、
   その実出力も `$EVIDENCE_FILE` に追記してから報告する（チャットへ実出力を貼り直さない。
   `git reset --hard` を使わない理由は「0. 渡されたベースにHEADを合わせる」節を参照）
 - 変更ファイル一覧・対象範囲・Epic本文を参照した場合の不足情報・作らなかったもの（ラダー判定）

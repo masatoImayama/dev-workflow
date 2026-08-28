@@ -14112,12 +14112,15 @@ for H161_FILE in "core/roles/generator.md" "README.md" "skills-codex/dev-workflo
 done
 
 # --- タスク見送り時の作業ツリー復旧が非破壊手順（git restore + git clean -nd）に置き換わっている（#161） ---
+# -- :/ が付いていることも要求する（#167: pathspec省略はcwd相対になり、サブディレクトリから
+# 実行するとリポジトリ他所の変更・未追跡ファイルが戻らない／報告されないまま
+# 「残留なし」という誤った証跡が残るため）
 for H161_FILE in "core/roles/generator.md" "README.md" "skills-codex/dev-workflow-run/SKILL.md"; do
-  if grep -Fq 'git restore --source=HEAD --staged --worktree .' "${REPO_ROOT}/${H161_FILE}" \
-    && grep -Fq 'git clean -nd' "${REPO_ROOT}/${H161_FILE}"; then
-    pass "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd に置き換わっている（#161）"
+  if grep -Fq 'git restore --source=HEAD --staged --worktree -- :/' "${REPO_ROOT}/${H161_FILE}" \
+    && grep -Fq 'git clean -nd -- :/' "${REPO_ROOT}/${H161_FILE}"; then
+    pass "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd -- :/ に置き換わっている（#161, #167）"
   else
-    fail "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd に置き換わっている（#161）" \
+    fail "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd -- :/ に置き換わっている（#161, #167）" \
       "$(grep -n 'git restore\|git clean' "${REPO_ROOT}/${H161_FILE}")"
   fi
 done
