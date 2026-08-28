@@ -21,9 +21,16 @@ Codex 版（`skills-codex/` / `adapters/codex/run-loop.sh`）は変更しない�
 自律ループの前提変数（`SKIPPED_CSV` 等）と同じ場所で、**ループ開始前に1回だけ**初期化する。
 
 ```bash
-REVIEWED_COMMIT="$(git merge-base main "${EPIC_BRANCH}")"   # Epicブランチの分岐元
+# ベースブランチを master/main に決め打ちしない（`references/review.md` と同じ方法で解決する。
+# dev-workflow自身のデフォルトブランチがmasterであっても、それを駆動先の値として埋め込まない）。
+BASE_BRANCH="$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null)"
+BASE_BRANCH="${BASE_BRANCH:-main}"
+REVIEWED_COMMIT="$(git merge-base "$BASE_BRANCH" "${EPIC_BRANCH}")"   # Epicブランチの分岐元
 PREV_WAVE_INCORPORATED=false   # 「このrunセッション内で、直前のウェーブをEpicへ取り込んだか」
 ```
+
+解決（`gh repo view`）または `merge-base` のいずれかに失敗した場合（`REVIEWED_COMMIT` が空）は
+wave-review を起動しない。`REVIEWED_COMMIT` を進めず、その区間は Epic 末レビューに委ねる。
 
 - **`PREV_WAVE_INCORPORATED` が `false` の間（＝このrunセッションでまだ一度もウェーブを
   取り込んでいない、最初のウェーブ）は wave-review を起動しない。** 前ウェーブが無いので

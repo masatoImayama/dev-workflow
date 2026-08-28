@@ -12900,11 +12900,29 @@ case "$H148_RS_STEP3" in
 esac
 
 # --- REVIEWED_COMMITの初期値・更新・失敗時に進めない規定 ---
-if grep -Fq 'REVIEWED_COMMIT="$(git merge-base main' "${REPO_ROOT}/skills/run/SKILL.md"; then
-  pass "SKILL.md: REVIEWED_COMMITの初期値（mainとのmerge-base）が書かれている（#148）"
+if grep -Fq 'REVIEWED_COMMIT="$(git merge-base "$BASE_BRANCH"' "${REPO_ROOT}/skills/run/SKILL.md"; then
+  pass "SKILL.md: REVIEWED_COMMITの初期値（gh repo viewで解決したベースブランチとのmerge-base）が書かれている（#148, #160）"
 else
-  fail "SKILL.md: REVIEWED_COMMITの初期値（mainとのmerge-base）が書かれている（#148）" \
+  fail "SKILL.md: REVIEWED_COMMITの初期値（gh repo viewで解決したベースブランチとのmerge-base）が書かれている（#148, #160）" \
     "$(grep -n 'REVIEWED_COMMIT' "${REPO_ROOT}/skills/run/SKILL.md")"
+fi
+
+# --- REVIEWED_COMMITの初期化がベースブランチをmain/masterに決め打ちしていない（#160） ---
+if grep -Fq 'REVIEWED_COMMIT="$(git merge-base main' "${REPO_ROOT}/skills/run/SKILL.md" \
+  || grep -Fq 'REVIEWED_COMMIT="$(git merge-base main' "${REPO_ROOT}/skills/run/references/wave-review.md"; then
+  fail "SKILL.md / wave-review.md: REVIEWED_COMMITの初期化がmainにハードコードされていない（#160）" \
+    "ハードコードされた 'git merge-base main' が見つかった"
+else
+  pass "SKILL.md / wave-review.md: REVIEWED_COMMITの初期化がmainにハードコードされていない（#160）"
+fi
+
+# --- REVIEWED_COMMITの初期化がgh repo view --json defaultBranchRefで解決している（#160） ---
+if grep -Fq 'gh repo view --json defaultBranchRef' "${REPO_ROOT}/skills/run/SKILL.md" \
+  && grep -Fq 'gh repo view --json defaultBranchRef' "${REPO_ROOT}/skills/run/references/wave-review.md"; then
+  pass "SKILL.md / wave-review.md: REVIEWED_COMMITの初期化がgh repo viewでベースブランチを解決している（#160）"
+else
+  fail "SKILL.md / wave-review.md: REVIEWED_COMMITの初期化がgh repo viewでベースブランチを解決している（#160）" \
+    "$(grep -n 'defaultBranchRef' "${REPO_ROOT}/skills/run/SKILL.md" "${REPO_ROOT}/skills/run/references/wave-review.md")"
 fi
 
 if grep -Fq '進めない' "$H148_WAVEREVIEW_REF"; then
@@ -14080,6 +14098,124 @@ if [ "$H152_BUILD_CODEX_EXIT" -eq 0 ]; then
   pass "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#152）"
 else
   fail "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#152）" "$H152_BUILD_CODEX_CHECK"
+fi
+
+# --- タスク見送り時の作業ツリー復旧が git reset --hard HEAD のまま残っていない（#161） ---
+for H161_FILE in "core/roles/generator.md" "README.md" "skills-codex/dev-workflow-run/SKILL.md" \
+  "agents/generator.md" "codex-agents/generator.toml"; do
+  if grep -Fq 'git reset --hard HEAD' "${REPO_ROOT}/${H161_FILE}"; then
+    fail "${H161_FILE}: 見送り時の作業ツリー復旧に git reset --hard HEAD が残っていない（#161）" \
+      "$(grep -n 'git reset --hard HEAD' "${REPO_ROOT}/${H161_FILE}")"
+  else
+    pass "${H161_FILE}: 見送り時の作業ツリー復旧に git reset --hard HEAD が残っていない（#161）"
+  fi
+done
+
+# --- タスク見送り時の作業ツリー復旧が非破壊手順（git restore + git clean -nd）に置き換わっている（#161） ---
+for H161_FILE in "core/roles/generator.md" "README.md" "skills-codex/dev-workflow-run/SKILL.md"; do
+  if grep -Fq 'git restore --source=HEAD --staged --worktree .' "${REPO_ROOT}/${H161_FILE}" \
+    && grep -Fq 'git clean -nd' "${REPO_ROOT}/${H161_FILE}"; then
+    pass "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd に置き換わっている（#161）"
+  else
+    fail "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd に置き換わっている（#161）" \
+      "$(grep -n 'git restore\|git clean' "${REPO_ROOT}/${H161_FILE}")"
+  fi
+done
+
+# --- run-loop.sh: set -o pipefail（またはset -uo pipefail）が設定されている（回帰防止 #37, #166） ---
+if grep -Eq '^set -[a-zA-Z]*o pipefail\b|^set -o pipefail\b' "${REPO_ROOT}/adapters/codex/run-loop.sh"; then
+  pass "run-loop.sh: set -o pipefail（またはset -uo pipefail）が設定されている（#166）"
+else
+  fail "run-loop.sh: set -o pipefail（またはset -uo pipefail）が設定されている（#166）" \
+    "$(grep -n '^set ' "${REPO_ROOT}/adapters/codex/run-loop.sh")"
+fi
+
+# --- run-loop.sh: epic_gate()本体がテスト実行の失敗で早期returnする形になっている（静的検証・#166） ---
+RL166_EPIC_GATE_BODY_STATIC="$(sed -n '/^epic_gate() {/,/^}/p' "${REPO_ROOT}/adapters/codex/run-loop.sh")"
+RL166_EPIC_GATE_ONELINE_STATIC="$(printf '%s' "$RL166_EPIC_GATE_BODY_STATIC" | tr '\n' ' ')"
+case "$RL166_EPIC_GATE_ONELINE_STATIC" in
+  *'if ! ('*') 2>&1 | tee'*'then'*'return 1'*)
+    pass "run-loop.sh: epic_gate()がテスト実行の失敗（パイプライン終端ステータス）で早期returnする形になっている（#166）" ;;
+  *)
+    fail "run-loop.sh: epic_gate()がテスト実行の失敗（パイプライン終端ステータス）で早期returnする形になっている（#166）" \
+      "$RL166_EPIC_GATE_BODY_STATIC" ;;
+esac
+
+# --- run-loop.sh: epic_gate()の合否判定がset -o pipefailに依存していることを動的に確認する（#166） ---
+# Review #37: mechanical_gate()がテストを走らせず可読性ガードだけ実行していた回帰。#144でepic_gate()に
+# 分割された際、「テスト失敗がゲート失敗になること（AND判定）」の検証だけが移植されずに消えていた。
+# epic_gate()は `if ! ( ... ) 2>&1 | tee "$log"; then return 1; fi` というパイプライン終端ステータス
+# （tee）に依存する形であり、set -o pipefailが外れると無言で通過してしまう。
+RL166_SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-epicgate.XXXXXX")"
+mkdir -p "${RL166_SCRATCH}/scripts"
+
+cat > "${RL166_SCRATCH}/scripts/sandbox-exec.sh" <<'FAKE_SANDBOX_EXEC_166'
+#!/bin/bash
+echo "fake sandbox-exec.sh: simulated test failure"
+exit 1
+FAKE_SANDBOX_EXEC_166
+chmod +x "${RL166_SCRATCH}/scripts/sandbox-exec.sh"
+
+cat > "${RL166_SCRATCH}/scripts/count-skips.sh" <<'FAKE_COUNT_SKIPS_166'
+#!/bin/bash
+echo "skips=0"
+exit 0
+FAKE_COUNT_SKIPS_166
+chmod +x "${RL166_SCRATCH}/scripts/count-skips.sh"
+
+cat > "${RL166_SCRATCH}/scripts/check-readability.sh" <<'FAKE_CHECK_READABILITY_166'
+#!/bin/bash
+exit 0
+FAKE_CHECK_READABILITY_166
+chmod +x "${RL166_SCRATCH}/scripts/check-readability.sh"
+
+RL166_EPIC_WT="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-epicwt.XXXXXX")"
+RL166_EPIC_GATE_FN_BODY="$(sed -n '/^epic_gate() {/,/^}/p' "${REPO_ROOT}/adapters/codex/run-loop.sh")"
+
+# (a) set -o pipefail が有効（本番と同じ）: テスト失敗（fakeなsandbox-exec.shのexit 1）を検知して
+#     epic_gate()が非0を返すこと
+RL166_WITH_PIPEFAIL_EXIT="$(
+  set -o pipefail
+  eval "$RL166_EPIC_GATE_FN_BODY"
+  DRY_RUN=0
+  PLUGIN_ROOT_DIR="$RL166_SCRATCH"
+  EPIC_WT="$RL166_EPIC_WT"
+  EPIC_NUM="test"
+  EPIC_BRANCH="test"
+  TEST_CMD="true"
+  SKIP_PATTERN=""
+  epic_gate >/dev/null 2>&1
+  echo $?
+)"
+
+if [ "$RL166_WITH_PIPEFAIL_EXIT" != "0" ]; then
+  pass "run-loop.sh: set -o pipefail有効時、epic_gate()はテスト失敗を検知して非0を返す（動的検証・回帰防止 #37, #166）"
+else
+  fail "run-loop.sh: set -o pipefail有効時、epic_gate()はテスト失敗を検知して非0を返す（動的検証・回帰防止 #37, #166）" \
+    "exit=${RL166_WITH_PIPEFAIL_EXIT}"
+fi
+
+# (b) set -o pipefail が無効: 同じテスト失敗をepic_gate()が検知できず0を返してしまうことを実際に
+#     確認する（＝合否判定がset -o pipefailに完全依存していることの証拠。#166が指摘した回帰リスクの再現）
+RL166_WITHOUT_PIPEFAIL_EXIT="$(
+  set +o pipefail
+  eval "$RL166_EPIC_GATE_FN_BODY"
+  DRY_RUN=0
+  PLUGIN_ROOT_DIR="$RL166_SCRATCH"
+  EPIC_WT="$RL166_EPIC_WT"
+  EPIC_NUM="test"
+  EPIC_BRANCH="test"
+  TEST_CMD="true"
+  SKIP_PATTERN=""
+  epic_gate >/dev/null 2>&1
+  echo $?
+)"
+
+if [ "$RL166_WITHOUT_PIPEFAIL_EXIT" = "0" ]; then
+  pass "run-loop.sh: set -o pipefail無効時にepic_gate()がテスト失敗を無言で見逃すことを再現できる（pipefail依存の証拠・#166）"
+else
+  fail "run-loop.sh: set -o pipefail無効時にepic_gate()がテスト失敗を無言で見逃すことを再現できる（pipefail依存の証拠・#166）" \
+    "exit=${RL166_WITHOUT_PIPEFAIL_EXIT}（0が期待値。0以外はepic_gate()の抽出・スタブ化が想定と異なる）"
 fi
 
 # ---------------------------------------------------------------------------
