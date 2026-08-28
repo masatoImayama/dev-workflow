@@ -301,23 +301,27 @@ Task #<番号> を実装してください。
 - あなたの作業ブランチ（<LANE_BRANCH>）は Step 2 で `git checkout -B` によって WAVE_BASE から
   作成済みであり、既に WAVE_BASE の子孫のはずである。**Claude 版の generator と同じ保証を
   同じ手順で確認するため**、実装に着手する前に次の手順を1回だけこの順序で実行すること
-  （通常はno-opになる）。**自分のコミットを積んだ後に再実行しないこと**（手順2を再実行すると
-  積んだコミットが失われる）。**証跡はファイルに書き出し、報告にはパスと1行の判定だけを
+  （通常はno-opになる）。**自分のコミットを積んだ後に再実行する必要は無い**（手順2は非破壊的で
+  あり、再実行しても既に取り込み済みなら何もせず終わるだけで積んだコミットは消えない）。
+  **証跡はファイルに書き出し、報告にはパスと1行の判定だけを
   載せること**（Task #156。自己申告にしないという意図は変わらない）:
   ```bash
   BASE_EVIDENCE_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
   ```
   1) `{ echo '$ git status --short'; git status --short; } | tee -a "$BASE_EVIDENCE_FILE"`
      （空であることを確認。空でなければ実装を始めず、`$BASE_EVIDENCE_FILE` のパスを添えて報告し停止すること）
-  2) `{ echo '$ git reset --hard <WAVE_BASE>'; git reset --hard <WAVE_BASE>; } | tee -a "$BASE_EVIDENCE_FILE"`
-     （HEADをWAVE_BASEに合わせる。fetch/checkout/pullではないためネットワーク不要）
+  2) `{ echo '$ git merge --ff-only <WAVE_BASE>'; git merge --ff-only <WAVE_BASE>; } | tee -a "$BASE_EVIDENCE_FILE"`
+     （HEADをWAVE_BASEに合わせる。fetch/checkout/pullではないためネットワーク不要。
+     `git reset --hard` は一般的な安全設定でブロックされるため使わない。既に WAVE_BASE の
+     子孫のはずなので通常はno-opになるが、失敗した場合は自力で直そうとせず報告し停止すること）
   3) `{ echo '$ git merge-base --is-ancestor <WAVE_BASE> HEAD && echo BASE_OK'; git merge-base --is-ancestor <WAVE_BASE> HEAD && echo BASE_OK; } | tee -a "$BASE_EVIDENCE_FILE"`
      （偽なら実装を始めず、`$BASE_EVIDENCE_FILE` のパスを添えて報告し停止すること）
   4) `{ echo '$ git log --oneline -1'; git log --oneline -1; } | tee -a "$BASE_EVIDENCE_FILE"`
      （実際のHEADが証跡に残る）
   報告には `ベース検証: [OK|NG] evidence=[BASE_EVIDENCE_FILEのパス]` の1行だけを書くこと
-- **`git fetch` / `git checkout` / `git pull` は実行しないこと。** 同期は run が Epic 専用
-  worktree で既に済ませている。手順2の `git reset --hard` のみが例外として許可されている
+- **`git fetch` / `git checkout` / `git pull` / `git reset --hard` は実行しないこと。** 同期は
+  run が Epic 専用 worktree で既に済ませている。手順2の `git merge --ff-only` のみが例外として
+  許可されている
 - 作業ディレクトリ: <EPIC_WT>（ここから移動しないこと）
 - **サンドボックスに渡すコマンドの中で `cd` して作業ディレクトリを変えないこと。**
   `sandbox-exec.sh` は呼び出し元cwdから workdir を解決するため、`cd` はそれを上書きし、

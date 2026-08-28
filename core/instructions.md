@@ -64,8 +64,10 @@ gh label list | grep -q "review" || gh label create "review" --color "B60205" --
 3. ウェーブ内は issue 番号の小さい順に並べ、並列度（レーン数）ぶんの**レーン**へ配分する。
    **1レーンが複数タスクを持つ場合、そのレーンは同一の作業ツリーでタスク列を連続処理する**
    （タスクごとにエージェントを作り直さない）。**この連続処理は同一ウェーブ内に限られる。**
-   ウェーブをまたいでレーン（エージェント）を使い回す手段は無いことを検証済みであり
-   （`docs/adr/0004-cross-wave-lane-reuse.md`）、ウェーブが変わるたびにレーンは新規に作り直される
+   ウェーブをまたいでレーン（エージェント）を継続させる機構自体（オーケストレータ側の
+   `SendMessage` 相当）は存在するが、本 Epic のスコープでは実装・実地検証していない
+   （`docs/adr/0004-cross-wave-lane-reuse.md`）。そのため現状はウェーブが変わるたびに
+   レーンは新規に作り直される
 4. **Phase は人間向けの区分であり、実行順序の決定には使わない。依存グラフが唯一の根拠である**
    （例: 鎖状に直列な依存を持つ Phase がある一方、Phase をまたいで相互に独立なタスクの
    組もある。Phase 順に実行すると、本来並列に走らせられるタスクを直列化してしまう）
@@ -89,8 +91,13 @@ main（保護: 人間のみマージ可）
 - **各ウェーブ開始前に必ず Epic ブランチを最新に同期し、その tip を `WAVE_BASE` として記録する。**
   そのウェーブに属する全レーンはこの `WAVE_BASE` から分岐する（共有する、ではない）。
   **各レーンの分岐元はハーネスが決めるため `WAVE_BASE` とは限らない。** そのため generator は
-  実装着手前に `git reset --hard <WAVE_BASE>` の1コマンドで自分の HEAD を `WAVE_BASE` に
-  合わせる。それ以外の `fetch` / `checkout` / `pull` は行わない。古いベースから分岐したまま
+  実装着手前に `git merge --ff-only <WAVE_BASE>` の1コマンドで自分の HEAD を `WAVE_BASE` に
+  合わせる。それ以外の `fetch` / `checkout` / `pull` / `reset --hard` は行わない。
+  **`git reset --hard` は使わない。** 一般的な安全設定（permission deny の代表的な対象）で
+  ブロックされるコマンドであり、実際に本 Epic のウェーブ2で全レーンがこれにより着手不能に
+  なって停止した。レーンの isolation worktree はハーネスによってメインリポの HEAD から
+  分岐して作られ、`WAVE_BASE` は必ずその子孫（Epic ブランチ上のコミット）であるため、
+  破壊的でない `git merge --ff-only` で必ず fast-forward できる。古いベースから分岐したまま
   実装すると、前ウェーブの変更が反映されずコンフリクトやファイル不整合が発生する
   （詳細は `core/roles/generator.md` を参照）
 
@@ -237,13 +244,17 @@ high/medium にしない」という規定と一貫させる。
 2. **全タスク完了後**にレビューを1回実施し、`main...Epicブランチ` の全差分を見る。
    **観点（correctness / readability / over-engineering / security）別に4本の evaluator を
    同一メッセージで並列起動**し、結果をマージ・重複排除する（Claude のみ。Codex は `lanes=1`
-   固定と同様に単一 evaluator の全観点レビューのままとする）
+   固定と同様に単一 evaluator の全観点レビューのままとする）。マージ後、issue化の前に
+   **確度判定役（発見役とは別モデルで起動する evaluator を1本）**が `findings` を再検証し、
+   確度を付与する（発見・確度判定のモデル構成は `docs/adr/0006-evaluator-model-split.md` 参照。
+   Codex は同等機構の有無を確認できていないため単一 evaluator のまま据え置く）
 3. 指摘は**個別のissueに変換**し、実装側が対応する。対応は review issue を1件ずつ渡さず、
    通常のウェーブループで**並列に**処理する
-4. 対応後は**その差分だけ**を再レビューする（最大2巡。delta-review は観点別に分けず1本）
+4. 対応後は**その差分だけ**を再レビューする（最大2巡。delta-review は観点別に分けず1本。
+   確度判定を経由しない）
 
-これによりレビューは Epic あたり最大2巡（初回R1の観点別4本 + delta-reviewの1本）に固定され、
-巡数がタスク数に比例することはない。詳細は `skills/run/references/review.md` を参照する。
+これによりレビューは Epic あたり最大2巡（初回R1の観点別4本＋確度判定1本 + delta-reviewの1本）に
+固定され、巡数がタスク数に比例することはない。詳細は `skills/run/references/review.md` を参照する。
 
 ### 機械的ゲートの三段構成
 

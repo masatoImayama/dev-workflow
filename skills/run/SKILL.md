@@ -274,8 +274,9 @@ main (保護: 人間のみマージ可)
 - 各レーン（generator の isolation worktree）が実装着手前に自分のHEADを合わせるべき唯一の
   正しい基準点が、そのウェーブ開始時点のEpicブランチtip（`WAVE_BASE`）である。isolation
   worktree を作るのは**ハーネス**であり、その分岐元はハーネスが決めるため WAVE_BASE とは
-  限らない。そのため generator は `git reset --hard "$WAVE_BASE"` で自分の HEAD を明示的に
-  合わせてから実装に着手する（Step 3 のプロンプト雛形参照）
+  限らない。そのため generator は `git merge --ff-only "$WAVE_BASE"` で自分の HEAD を明示的に
+  合わせてから実装に着手する（`git reset --hard` は一般的な安全設定でブロックされるため
+  使わない。Step 3 のプロンプト雛形参照）
 - レーンは wave ブランチを経由し、**ウェーブ末の取り込み検証（merge-base 完全一致検証＋
   可読性ガード）通過後にのみ** `--ff-only` でEpicブランチへ合流する。**プロジェクトの
   全テストはここでは走らせない**（Epic統合ゲートへ集約する。「機械的ゲートの三段構成」参照）
@@ -413,9 +414,13 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/watchdog.sh" --wave --epic "$EPIC_NUM" \
 **同期はここ（ウェーブの先頭）でだけ行う。** タスクごとには行わない。この `WAVE_BASE` が、
 このウェーブに属する全レーンが実装着手前に自分のHEADを合わせるべき唯一の正しい基準点になる。
 **各レーン（generatorのisolation worktree）の分岐元はハーネスが決めるため、WAVE_BASEとは
-限らない。** そのため generator は実装着手前に `git reset --hard "$WAVE_BASE"` の1コマンドで
-自分のHEADをWAVE_BASEへ明示的に合わせる（Step 3のプロンプト雛形参照）。この1コマンドを除き、
-generator自身は `fetch` / `checkout` / `pull` を行わない（`core/roles/generator.md`）。
+限らない。** そのため generator は実装着手前に `git merge --ff-only "$WAVE_BASE"` の1コマンドで
+自分のHEADをWAVE_BASEへ明示的に合わせる（Step 3のプロンプト雛形参照）。**`git reset --hard` は
+使わない**（一般的な安全設定でブロックされる代表的なコマンドであり、実際に本Epicのウェーブ2で
+全レーンがこれにより着手不能になって停止した実績がある。`merge --ff-only`は破壊的でないため
+ブロックされにくく、isolation worktreeの分岐元はWAVE_BASEの祖先であるためfast-forwardは
+必ず成功する）。この1コマンドを除き、generator自身は `fetch` / `checkout` / `pull` を行わない
+（`core/roles/generator.md`）。
 
 ### Step 3: レーンにタスク列を割り当て、generator を並列起動する
 
@@ -451,16 +456,20 @@ generator自身は `fetch` / `checkout` / `pull` を行わない（`core/roles/g
   ```
   1) `{ echo '$ git status --short'; git status --short; } | tee -a "$BASE_EVIDENCE_FILE"`
      （空であることを確認。空でなければ着手せず、`$BASE_EVIDENCE_FILE` のパスを添えて報告し停止すること）
-  2) `{ echo '$ git reset --hard "[WAVE_BASE]"'; git reset --hard "[WAVE_BASE]"; } | tee -a "$BASE_EVIDENCE_FILE"`
-     （HEADをWAVE_BASEに合わせる。fetch/checkout/pullではないためネットワーク不要）
+  2) `{ echo '$ git merge --ff-only "[WAVE_BASE]"'; git merge --ff-only "[WAVE_BASE]"; } | tee -a "$BASE_EVIDENCE_FILE"`
+     （HEADをWAVE_BASEに合わせる。fetch/checkout/pullではないためネットワーク不要。
+     isolation worktreeの分岐元はWAVE_BASEの祖先であるためfast-forwardは必ず成功する。
+     **失敗した場合は自力で直そうとせず、`$BASE_EVIDENCE_FILE` のパスを添えて報告し停止すること**）
   3) `{ echo '$ git merge-base --is-ancestor "[WAVE_BASE]" HEAD && echo BASE_OK'; git merge-base --is-ancestor "[WAVE_BASE]" HEAD && echo BASE_OK; } | tee -a "$BASE_EVIDENCE_FILE"`
      （偽なら着手せず、`$BASE_EVIDENCE_FILE` のパスを添えて報告し停止すること）
   4) `{ echo '$ git log --oneline -1'; git log --oneline -1; } | tee -a "$BASE_EVIDENCE_FILE"`
      （実際のHEADが証跡に残る）
   報告には `ベース検証: [OK|NG] evidence=[BASE_EVIDENCE_FILEのパス]` の1行だけを書くこと。
   実出力そのものをチャットへ貼り直さないこと
-- **`git fetch` / `git checkout` / `git pull` は実行しないこと。** 同期は run が Epic 専用
-  worktree で既に済ませている。手順2の `git reset --hard` のみが例外として許可されている
+- **`git fetch` / `git checkout` / `git pull` / `git reset --hard` は実行しないこと。** 同期は
+  run が Epic 専用 worktree で既に済ませている。手順2の `git merge --ff-only` のみが例外として
+  許可されている。**`git reset --hard` は使わないこと**（一般的な安全設定（permission deny の
+  代表的な対象）でブロックされ、実際に本Epicのウェーブ2で全レーンが着手不能になった）
 - サンドボックスへのコマンド投入は `${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh` 経由で行い、
   ビルド・テストは1回の呼び出しにまとめること（分けると待ち時間が倍増する）
 - `sandbox-exec.sh` を呼ぶ際は必ず `--epic "$EPIC_NUM"` を渡すこと（例: `--epic "$EPIC_NUM" 'make test'`）
@@ -564,18 +573,23 @@ Claude Code のサブエージェントは**バッチ全員が終わるまで結
 補充は原理的に実装できない。ウェーブの所要時間は**最長レーン（そのレーンのタスク列の合計）**で
 決まる。これは harness の制約として受け入れる。
 
-#### レーンはウェーブをまたいで維持されない（検証結果。Task #153）
+#### レーンはウェーブをまたいで維持されない（Task #153の検証結果。Task #152で記述を訂正）
 
 上記は**バッチ内**（同一ウェーブの実行中）の制約である。これとは別に、**バッチ間**（ウェーブが
-変わるたびにレーン＝generatorを作り直さず継続させられないか）を検証したが、Claude Code の
-Task tool には、一度完了して結果を返したサブエージェント呼び出しへ後から追加のメッセージを
-送って会話を継続させる手段が無いことを確認した（このエージェント自身が Task tool で起動される
-generator であり、利用可能なツール一覧にその手段が存在しないことが直接の根拠）。そのため
-**レーンはウェーブごとに新規 spawn する現行の方式のまま**とし、無理に実装しない。検証の詳細と
-判断理由は `docs/adr/0004-cross-wave-lane-reuse.md` を参照する。この結果、Step 2 で記録する
-`WAVE_BASE` へのベース合わせ（`git reset --hard`）は、常に「レーンの先頭（＝各ウェーブで
-新規 spawn された直後）で1回だけ」のままであり、タスク境界／ウェーブ境界という区別は生じない
-（レーンがウェーブをまたいで生存する場合にのみ意味を持つ区別のため）。
+変わるたびにレーン＝generatorを作り直さず継続させられないか）を Task #153 が検証した。当時は
+「このエージェント自身（Task tool で起動された generator）に割り当てられたツール一覧に、
+既に完了したサブエージェント呼び出しへ後から追加のメッセージを送って継続させる手段が見当たら
+なかった」ことを根拠に「Claude Code にはその手段が無い」と結論したが、**この結論は誤りだった**
+（Task #152 が訂正）。Claude Code には `SendMessage` ツールが実在し、`Agent` ツールの説明にも
+既存サブエージェントをコンテキストを保持したまま継続させられる旨が明記されている。ただし
+`SendMessage` は**オーケストレータ（run）側のツール**であり、generator 自身の道具箱に無かった
+ことは根拠として誤っていた。**とはいえ本 Epic では実際に `SendMessage` によるレーン継続を
+実装・実地検証してはいない。** そのため機構としては存在するが未検証であることを理由に、
+**レーンはウェーブごとに新規 spawn する現行の方式のまま**とし、本 Epic では実装を見送る。
+検証の詳細と判断理由は `docs/adr/0004-cross-wave-lane-reuse.md` を参照する。この結果、Step 2 で
+記録する `WAVE_BASE` へのベース合わせ（`git merge --ff-only`）は、常に「レーンの先頭（＝各
+ウェーブで新規 spawn された直後）で1回だけ」のままであり、タスク境界／ウェーブ境界という区別は
+生じない（レーンがウェーブをまたいで生存する場合にのみ意味を持つ区別のため）。
 
 #### 同一メッセージで前ウェーブの wave-review を起動する（`PREV_WAVE_INCORPORATED` が true のときのみ）
 
@@ -603,7 +617,7 @@ Epic #$ARGUMENTS のウェーブ差分を先行レビューしてください。
 ### Step 4: レーン内ゲートの結果を確認する
 
 各 generator は自分の isolation worktree 内で、タスクごとの完了報告（**変更範囲のテスト**結果）を
-返す。**レーン内ゲートはフルスイートではない**（理由は「機械的ゲートの二段構成」節）。
+返す。**レーン内ゲートはフルスイートではない**（理由は「機械的ゲートの三段構成」節）。
 
 - レーン内ゲートに失敗したタスクは wave へ取り込まれない（generator が commit を積んでいない）。
   試行回数を保持したまま次ウェーブへ持ち越す
