@@ -12560,6 +12560,218 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Task #149: Epic末レビューを観点別4本の並列起動にし、指摘のマージ・重複排除と
+#            指摘対応の並列化を行う
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #149: Epic末レビューの観点別4本並列起動と指摘対応の並列化 =="
+
+H149_RUN_SKILL="$RUN_SKILL_FLAT"
+H149_REVIEW_REF="${REPO_ROOT}/skills/run/references/review.md"
+H149_INSTRUCTIONS="$CORE_INSTRUCTIONS_FLAT"
+H149_README="${REPO_ROOT}/README.md"
+
+# --- R1: 4観点を同一メッセージで起動する手順になっており、理由が書かれている ---
+H149_R1_SECTION="$(awk '/^### R1: 一括レビューの実行/{f=1} /^### R2以降/{f=0} f' "$H149_RUN_SKILL")"
+
+if [ -z "$H149_R1_SECTION" ]; then
+  fail "skills/run/SKILL.md: 『### R1: 一括レビューの実行』節が見つかる（#149）" "節が空でした"
+else
+  pass "skills/run/SKILL.md: 『### R1: 一括レビューの実行』節が見つかる（#149）"
+fi
+
+case "$H149_R1_SECTION" in
+  *'同一メッセージで4本'*'correctness'*'readability'*'over-engineering'*'security'*)
+    pass "skills/run/SKILL.md: R1が4観点をevaluatorの同一メッセージで起動する旨が明記されている（#149）" ;;
+  *)
+    fail "skills/run/SKILL.md: R1が4観点をevaluatorの同一メッセージで起動する旨が明記されている（#149）" \
+      "$H149_R1_SECTION" ;;
+esac
+
+case "$H149_R1_SECTION" in
+  *'同一メッセージでなければ並行にならない'*)
+    pass "skills/run/SKILL.md: 同一メッセージで起動する理由（並行にならない）が書かれている（#149）" ;;
+  *)
+    fail "skills/run/SKILL.md: 同一メッセージで起動する理由（並行にならない）が書かれている（#149）" \
+      "$H149_R1_SECTION" ;;
+esac
+
+case "$H149_R1_SECTION" in
+  *'観点: correctness'*)
+    pass "skills/run/SKILL.md: R1のプロンプト例に観点行がある（#149）" ;;
+  *)
+    fail "skills/run/SKILL.md: R1のプロンプト例に観点行がある（#149）" "$H149_R1_SECTION" ;;
+esac
+
+# --- 「変更50ファイル超」の3分岐が維持され、観点別並列と両立する形で書かれている ---
+if grep -Fq 'CHANGED_FILES' "$H149_REVIEW_REF" \
+  && grep -Fq '> 50' "$H149_REVIEW_REF" \
+  && grep -Fq 'blast radius' "$H149_REVIEW_REF"; then
+  pass "review.md: 『変更50ファイル超』の3分岐が維持されている（#149）"
+else
+  fail "review.md: 『変更50ファイル超』の3分岐が維持されている（#149）" "3分岐の記述が見つかりません"
+fi
+
+if grep -Fq '4観点すべてに同じように適用する' "$H149_REVIEW_REF" \
+  || grep -Fq '観点別並列は' "$H149_REVIEW_REF"; then
+  pass "review.md: 3分岐と観点別並列が両立する旨が書かれている（#149）"
+else
+  fail "review.md: 3分岐と観点別並列が両立する旨が書かれている（#149）" "記述が見つかりません"
+fi
+
+# --- マージ・重複排除の手順が明文化されている ---
+H149_MERGE_SECTION="$(awk '/^### R1の結果マージ/{f=1} /^### R2: 指摘をissue化/{f=0} f' "$H149_REVIEW_REF")"
+
+if [ -z "$H149_MERGE_SECTION" ]; then
+  fail "review.md: 『### R1の結果マージ』節が見つかる（#149）" "節が空でした"
+else
+  pass "review.md: 『### R1の結果マージ』節が見つかる（#149）"
+fi
+
+case "$H149_MERGE_SECTION" in
+  *'同一 `location`'*'最も高い severity'*)
+    pass "review.md: 同一locationの統合と最高severityの採用が明記されている（#149）" ;;
+  *)
+    fail "review.md: 同一locationの統合と最高severityの採用が明記されている（#149）" "$H149_MERGE_SECTION" ;;
+esac
+
+case "$H149_MERGE_SECTION" in
+  *'由来した観点名'*)
+    pass "review.md: 由来した観点名の併記が明記されている（#149）" ;;
+  *)
+    fail "review.md: 由来した観点名の併記が明記されている（#149）" "$H149_MERGE_SECTION" ;;
+esac
+
+case "$H149_MERGE_SECTION" in
+  *'verdict の合成'*'1本でも'*'REQUEST_CHANGES'*)
+    pass "review.md: verdictの合成（1本でもREQUEST_CHANGESなら全体もREQUEST_CHANGES）が明記されている（#149）" ;;
+  *)
+    fail "review.md: verdictの合成（1本でもREQUEST_CHANGESなら全体もREQUEST_CHANGES）が明記されている（#149）" \
+      "$H149_MERGE_SECTION" ;;
+esac
+
+case "$H149_MERGE_SECTION" in
+  *'reviewed_commit'*'食い違った場合は'*'最も古いもの'*)
+    pass "review.md: reviewed_commit食い違い時は最も古いものを採用する旨が明記されている（#149）" ;;
+  *)
+    fail "review.md: reviewed_commit食い違い時は最も古いものを採用する旨が明記されている（#149）" \
+      "$H149_MERGE_SECTION" ;;
+esac
+
+# --- 1本失敗時に「記録して進む」扱いになっている（runを止めない） ---
+case "$H149_MERGE_SECTION" in
+  *'1本の失敗'*'記録して進む'*'run は止めない'*)
+    pass "review.md: 1本失敗時に『記録して進む』扱いでrunを止めない旨が明記されている（#149）" ;;
+  *)
+    fail "review.md: 1本失敗時に『記録して進む』扱いでrunを止めない旨が明記されている（#149）" \
+      "$H149_MERGE_SECTION" ;;
+esac
+
+# --- review issueに `- Epic:` と `- 前提: なし` を書く規定がある ---
+H149_R2_SECTION="$(awk '/^### R2: 指摘をissue化/{f=1} /^### R3: 指摘対応ループ/{f=0} f' "$H149_REVIEW_REF")"
+
+case "$H149_R2_SECTION" in
+  *'- Epic: #'*'- 前提: なし'*)
+    pass "review.md: review issueテンプレートに『- Epic:』と『- 前提: なし』がある（#149）" ;;
+  *)
+    fail "review.md: review issueテンプレートに『- Epic:』と『- 前提: なし』がある（#149）" \
+      "$H149_R2_SECTION" ;;
+esac
+
+case "$H149_R2_SECTION" in
+  *'plan-waves.sh'*)
+    pass "review.md: plan-waves.shがこの2行を読む旨が明記されている（#149）" ;;
+  *)
+    fail "review.md: plan-waves.shがこの2行を読む旨が明記されている（#149）" "$H149_R2_SECTION" ;;
+esac
+
+case "$H149_R2_SECTION" in
+  *'観点: [focus]'*)
+    pass "review.md: review issueテンプレートに観点（focus）が残る（#149）" ;;
+  *)
+    fail "review.md: review issueテンプレートに観点（focus）が残る（#149）" "$H149_R2_SECTION" ;;
+esac
+
+# --- R3: 通常のウェーブループでの並列処理になっており、最大2巡の打ち切りと
+#     未対応issueのPR本文への明記が維持されている ---
+H149_R3_SECTION="$(awk '/^### R3: 指摘対応ループ/{f=1} /^### R4: 打ち切り条件/{f=0} f' "$H149_REVIEW_REF")"
+
+case "$H149_R3_SECTION" in
+  *'1件ずつ generator に渡すのではなく'*'ウェーブループ'*'並列に'*)
+    pass "review.md: R3が通常のウェーブループでの並列処理になっている（#149）" ;;
+  *)
+    fail "review.md: R3が通常のウェーブループでの並列処理になっている（#149）" "$H149_R3_SECTION" ;;
+esac
+
+H149_R4_SECTION="$(awk '/^### R4: 打ち切り条件/{f=1} /^### レビュー粒度の調整/{f=0} f' "$H149_REVIEW_REF")"
+
+case "$H149_R4_SECTION" in
+  *'最大2巡まで'*)
+    pass "review.md: 最大2巡の打ち切りが維持されている（#149）" ;;
+  *)
+    fail "review.md: 最大2巡の打ち切りが維持されている（#149）" "$H149_R4_SECTION" ;;
+esac
+
+case "$H149_R4_SECTION" in
+  *'オープンのまま残す'*'PR本文の'*'未対応の指摘'*)
+    pass "review.md: 未対応issueをオープンのままPR本文に明記する規定が維持されている（#149）" ;;
+  *)
+    fail "review.md: 未対応issueをオープンのままPR本文に明記する規定が維持されている（#149）" "$H149_R4_SECTION" ;;
+esac
+
+# --- delta-reviewは観点別に分けず1本で行う旨が明記されている ---
+if grep -Fq '観点別に分けず' "$H149_REVIEW_REF" && grep -Fq '1本' "$H149_REVIEW_REF"; then
+  pass "review.md: delta-reviewは観点別に分けず1本で行う旨が明記されている（#149）"
+else
+  fail "review.md: delta-reviewは観点別に分けず1本で行う旨が明記されている（#149）" "記述が見つかりません"
+fi
+
+# --- core/instructions.md: 「レビュー基準」「レビューはEpic単位でまとめて行う」節が
+#     観点別並列の実態に合わせて更新されている ---
+H149_INSTR_REVIEW_SECTION="$(awk '/^### レビューはEpic単位でまとめて行う/{f=1} /^### 機械的ゲートの三段構成/{f=0} f' \
+  "$H149_INSTRUCTIONS")"
+
+case "$H149_INSTR_REVIEW_SECTION" in
+  *'観点'*'correctness'*'readability'*'over-engineering'*'security'*'同一メッセージで並列起動'*)
+    pass "core/instructions.md: レビューはEpic単位でまとめて行う節が観点別並列起動に更新されている（#149）" ;;
+  *)
+    fail "core/instructions.md: レビューはEpic単位でまとめて行う節が観点別並列起動に更新されている（#149）" \
+      "$H149_INSTR_REVIEW_SECTION" ;;
+esac
+
+case "$H149_INSTR_REVIEW_SECTION" in
+  *'Codex は'*'lanes=1'*'単一 evaluator'*)
+    pass "core/instructions.md: CodexはlanesはCodexは単一evaluatorのままである旨が明記されている（#149）" ;;
+  *)
+    fail "core/instructions.md: CodexはlanesはCodexは単一evaluatorのままである旨が明記されている（#149）" \
+      "$H149_INSTR_REVIEW_SECTION" ;;
+esac
+
+# --- Codexは単一evaluatorのままである旨がREADMEに書かれている ---
+H149_README_CODEXDIFF="$(awk '/^### Codex との差/{f=1} /^### `scripts\/plan-waves.sh --print`/{f=0} f' "$H149_README")"
+
+case "$H149_README_CODEXDIFF" in
+  *'単一 evaluator の全観点レビューのまま'*)
+    pass "README.md: Codexとの差にCodexは単一evaluatorのままである旨が書かれている（#149）" ;;
+  *)
+    fail "README.md: Codexとの差にCodexは単一evaluatorのままである旨が書かれている（#149）" \
+      "$H149_README_CODEXDIFF" ;;
+esac
+
+# --- 生成物（agents/*.md・codex-agents/*.toml）にもcore/instructions.mdのレビュー基準節の
+#     更新が反映されている（build.shの再生成漏れを検知する） ---
+for h149_f in agents/planner.md agents/generator.md agents/evaluator.md \
+              codex-agents/planner.toml codex-agents/generator.toml codex-agents/evaluator.toml; do
+  if grep -Fq -- '同一メッセージで並列起動' "${REPO_ROOT}/${h149_f}"; then
+    pass "${h149_f}: core/instructions.mdの観点別並列起動の記述が生成物に反映されている（#149）"
+  else
+    fail "${h149_f}: core/instructions.mdの観点別並列起動の記述が生成物に反映されている（#149）" \
+      "反映されていません"
+  fi
+done
+
+# ---------------------------------------------------------------------------
 # Task #153: レーンをウェーブ横断で維持し generator の cold start を除去する
 # ---------------------------------------------------------------------------
 

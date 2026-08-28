@@ -1,14 +1,37 @@
 # 一括レビューの詳細（run スキル参照資料）
 
-`skills/run/SKILL.md`「Epic一括レビュー」の R2 以降。**R1 が REQUEST_CHANGES を返したとき、または変更が 50 ファイルを超えたときにだけ読む。**
+`skills/run/SKILL.md`「Epic一括レビュー」の R1 の結果マージ、および R2 以降。**R1 が
+REQUEST_CHANGES を返したとき、または変更が 50 ファイルを超えたときにだけ読む。**
+
+### R1の結果マージ
+
+R1 は `correctness` / `readability` / `over-engineering` / `security` の4観点を
+`@evaluator` の同一メッセージで並列起動する（詳細は SKILL.md「R1: 一括レビューの実行」）。
+4本それぞれが末尾に JSON ブロック（`verdict` / `reviewed_commit` / `focus` / `findings`）を
+返すので、run が次の手順でマージ・重複排除する。**JSON のパースはあなた（runの実行者）が
+直接行う。`jq` に依存せず、パイプラインで機械的に処理しようとしない。**
+
+1. **findings の連結**: 4本の `findings[]` をそのまま連結する
+2. **重複排除**: 同一 `location`（ファイル:行）かつ同一趣旨の指摘は1件に統合する。
+   統合時は**最も高い severity** を採用し、由来した観点名（`findings[].focus`）を
+   `detail` または備考に併記する（例:「correctness / security の両観点から指摘」）
+3. **verdict の合成**: 4本のうち1本でも `REQUEST_CHANGES` なら全体を `REQUEST_CHANGES`
+   とする。4本すべてが `APPROVE` の場合のみ全体を `APPROVE` とする
+4. **`reviewed_commit` の食い違い**: 4本とも同じ値になるはずだが、食い違った場合は
+   **最も古いもの**を採用する（次の delta-review が差分を取りこぼさないようにするため）。
+   食い違った事実は Epic issue にコメントする
+5. **1本の失敗**: 4本のうち1本でも起動失敗・応答不能で結果が得られなかった場合、
+   **その観点が未レビューである事実を Epic issue と PR 本文に記録**して先へ進む
+   （「記録して進む」に分類する。run は止めない）。残り3本の結果でマージ・判定は続行する
+
+マージ後の `findings[]` は、以降の R2（issue化）で通常どおり1本のリストとして扱う。
 
 ### R2: 指摘をissue化
 
-evaluatorの出力末尾のJSONを読み、**high と medium の指摘だけ**をissueにする。
+マージ済みJSONを読み、**high と medium の指摘だけ**をissueにする。
 low は issue化せず、PR本文の「レビューで挙がった軽微な指摘」に列挙するだけに留める。
 
-JSONのパースは**あなた（runの実行者）が直接行う。** `jq` は環境によっては入っていないため、
-パイプラインで機械的に処理しようとしない。findingsを読み取り、1件ずつ以下を実行する:
+findingsを読み取り、1件ずつ以下を実行する:
 
 ```bash
 # reviewラベルを用意（初回のみ。既存なら --force で上書き）
@@ -28,11 +51,17 @@ gh issue create --label "task,review" --title "Review: [title]" --body "$(cat <<
 
 ## 由来
 - Epic: #[epic番号]
+- 前提: なし
 - 起因タスク: [task_ref]
+- 観点: [focus]
 - レビュー時点: `[reviewed_commit]`
 BODY
 )"
 ```
+
+`- Epic: #[epic番号]` と `- 前提: なし` は必ず書く。`scripts/plan-waves.sh` がこの2行を
+読んで他Epicのタスクを除外し、review issueを通常のウェーブへ載せられるようにするため
+（R3参照）。
 
 `reviewed_commit` は次の delta-review の起点になるので、**必ず控えておく。**
 
@@ -42,9 +71,12 @@ BODY
 
 `APPROVE` なら何もせずPR作成へ進む。`REQUEST_CHANGES` の場合:
 
-1. 作成した review issue を**1件ずつ** generator に渡して修正させる
-   （通常のタスクと同じ自律ループの手順を通す。Step 1〜7）
-2. 全件対応したら **delta-review** で再レビューする:
+1. 作成した review issue を**1件ずつ generator に渡すのではなく**、通常のウェーブループ
+   （Step 1〜7）に載せて**並列に**処理する。review issue は `task` ラベルを持ち、
+   本文に `- 前提: なし` を書いているため、依存関係の無い1つのウェーブとして自然にまとまる
+   （`scripts/plan-waves.sh` の依存グラフ構築に相乗りする）
+2. 全件対応したら **delta-review** で再レビューする（delta-reviewは観点別に分けず、
+   対象が指摘対応差分に限られ小さいため**1本**で行う）:
 
 ```
 @evaluator
@@ -66,7 +98,8 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
 
 ### R4: 打ち切り条件
 
-**レビューは最大2巡まで**（初回 + delta-review 1回。合わせてevaluator起動は最大3回）。
+**レビューは最大2巡まで**（初回R1（4観点並列）+ delta-review 1回（1本）。
+合わせてevaluator起動は最大5回）。
 
 2巡目でも `REQUEST_CHANGES` が残る場合は、**そこで打ち切ってPRを作成する。**
 未対応の指摘は:
@@ -113,24 +146,34 @@ Phase単位分割へフォールバックする。
 | `CHANGED_FILES` > 50 かつ code-review-graphが未導入 | **従来どおり**、R1をPhase単位に分割して起動する（下記の既存の回避策） |
 
 code-review-graphが利用可能な場合でも、Phase単位の分割を**禁止はしない**（両立してよい）。
-どちらの場合も**タスク単位には戻さない**。
+どちらの場合も**タスク単位には戻さない**。分岐の判定は1回だけ行い、その結果
+（blast radius可否 / Phase分割の要否）を4観点すべてに同じように適用する。**観点別並列は
+どの分岐でも維持する**（4本を同一メッセージで起動する構成は変えない）。
 
-blast radiusを使う場合のプロンプト例（R1の基本形に1行加えるだけでよい）:
+blast radiusを使う場合のプロンプト例（R1の基本形に1行加えるだけでよい。4観点それぞれに
+同じ1行を加えて同一メッセージで起動する）:
 
 ```
 @evaluator
 Epic #$ARGUMENTS の全変更をレビューしてください。
 - モード: epic-review
+- 観点: correctness
 - 差分範囲: main...[epic/epicXX/機能名]
 - 変更ファイル数が50超のため、code-review-graphのblast radiusの算出を使って読む優先順位を付けてよい
-- 最後に必ずJSONブロック（verdict / reviewed_commit / findings）を出力すること
+- 最後に必ずJSONブロック（verdict / reviewed_commit / focus / findings）を出力すること
+
+（readability / over-engineering / security も同様に3本続けて同一メッセージで起動する）
 ```
 
-code-review-graphが未導入の場合（従来どおりPhase単位に分割する既存の回避策）:
+code-review-graphが未導入の場合（従来どおりPhase単位に分割する既存の回避策。Phaseごとに
+4観点を同一メッセージで起動する）:
 
 ```
 @evaluator
 Epic #$ARGUMENTS のうち Phase 1 の変更をレビューしてください。
+- 観点: correctness
 - 差分範囲: main...[epic-branch] のうち [Phase1で変更されたファイル群]
+
+（readability / over-engineering / security も同様。Phase 2 以降も同じ形で続ける）
 ```
 

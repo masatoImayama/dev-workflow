@@ -266,9 +266,9 @@ generator は実装コードに手を付ける前に、`DietrichGebert/ponytail`
 
 | | 旧（タスクごと） | 現（Epic一括） |
 |---|---|---|
-| evaluator起動回数 | タスク数 × 差し戻し回数 | **1〜3回（タスク数に非依存）** |
+| evaluator起動回数 | タスク数 × 差し戻し回数 | **最大2巡（初回R1の観点別4本並列 + delta-review 1本。タスク数に非依存）** |
 | タスクごとの品質担保 | Opusレビュー | テスト・ビルド・可読性ガード（機械的・LLM不要） |
-| 指摘の扱い | その場で差し戻し | **issue化してgeneratorが対応** |
+| 指摘の扱い | その場で差し戻し | **issue化し、通常のウェーブループで並列に対応** |
 | 打ち切り | 3回REQUEST_CHANGESでスキップ | 2巡で打ち切り、残りは人間のPRレビューへ |
 
 副次的な効果として、レビュアーが**タスクをまたいだ整合性**（重複実装、
@@ -279,11 +279,16 @@ generator は実装コードに手を付ける前に、`DietrichGebert/ponytail`
 
 evaluator は観点（`correctness` / `readability` / `over-engineering` / `security`）を指定して
 起動できる。観点を指定すると、evaluator は**自分の観点の指摘だけ**を返す（観点未指定なら
-従来どおり全観点を見る。Codex は観点未指定のまま使う）。またモードに `wave-review`
-（`[前回レビュー済みcommit]..[epic-branch]`）を追加し、あるウェーブが Epic ブランチへ
-取り込まれた直後にそのウェーブ差分だけを先行レビューできるようにした。**現時点（Task #147）
-では evaluator 側の契約（モードと出力フォーマット）を用意したところまでで、観点別の4本同時
-起動・wave-review の実際の呼び出し・run 側での指摘マージ手順は別タスクの担当である**
+従来どおり全観点を見る。Codex は観点未指定のまま使う）。Epic末の一括レビュー（R1）は
+**この4観点を `@evaluator` の同一メッセージで並列起動**し、run が結果を
+マージ・重複排除する（同一 `location` の統合、最も高い severity の採用、verdict の合成、
+`reviewed_commit` 食い違い時は最も古いものを採用。手順の詳細は
+`skills/run/references/review.md`「R1の結果マージ」参照）。
+
+またモードに `wave-review`（`[前回レビュー済みcommit]..[epic-branch]`）を追加し、あるウェーブが
+Epic ブランチへ取り込まれた直後にそのウェーブ差分だけを先行レビューできるようにした。
+**wave-review の実際の呼び出し（いつ・どのタイミングで起動するか）は別タスクの担当であり、
+現時点では evaluator 側の契約（モードと出力フォーマット）が用意されているだけである**
 （設計判断は `docs/adr/0003-parallel-review-by-focus.md` 参照）。
 
 ## ブランチ戦略
@@ -458,6 +463,8 @@ git merge --no-edit "$LANE_BRANCH"          # 直線性の強制はやめる（f
 ### Codex との差
 
 並列レーンの起動は Claude Code のみ対応する。Codex はサブエージェント専用の worktree を持たないため、**`lanes=1` 固定**で動作する。これは「仕様が違う」のではなく「設定値が固定されているだけ」であり、依存グラフ・merge-base 検証・wave ブランチ経由の統合ゲート・cherry-pick 廃止・スキップの伝播は共通仕様として両方に同じ形で適用される。`lanes=1` のとき「1レーンのウェーブ」として並列時と同じコードパスを通るため、両 run スキルの記述は一致する。**wave-review も同様の理由（`codex exec` を子プロセスとして逐次起動する構造にはバッチ内並行の手段が無い）で Codex 版には実装しない。**
+
+Epic末の一括レビュー（R1）も同じ理由で差がある。Claude は観点別4本の evaluator を同一メッセージで並列起動するが、**Codex はサブエージェント並列起動の手段が無いため、従来どおり単一 evaluator の全観点レビューのままとする**（`adapters/codex/run-loop.sh` と `skills-codex/` は変更していない）。
 
 ### `scripts/plan-waves.sh --print`（ドライラン）
 

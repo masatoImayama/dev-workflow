@@ -876,26 +876,45 @@ BODY
 ### R1: 一括レビューの実行
 
 起動前に [references/review.md](references/review.md) の「レビュー粒度の調整」の3分岐に従う
-（変更50ファイル以下なら以下の基本形のまま起動する）。
+（変更50ファイル以下なら以下の基本形のまま起動する）。判定結果（3分岐のどれに該当したか）は
+4本すべてに同じように渡す。
+
+**`@evaluator` を同一メッセージで4本（correctness / readability / over-engineering / security）
+起動する。** 同一メッセージでなければ並行にならない（Claudeのサブエージェントはバッチ完了まで
+結果が返らない）。4本には同じ差分範囲を渡し、それぞれに `- 観点: [focus]` を1行加える。
 
 ```
 @evaluator
 Epic #$ARGUMENTS の全変更をレビューしてください。
 - モード: epic-review
+- 観点: correctness
 - 差分範囲: main...[epic/epicXX/機能名]
 - 作業ディレクトリ: .claude/worktrees/[epicN]
 - 親Epic issueの仕様書と照合し、実装漏れも指摘すること
 - テストをDocker sandbox内で実行して検証すること
-- 最後に必ずJSONブロック（verdict / reviewed_commit / findings）を出力すること
+- 最後に必ずJSONブロック（verdict / reviewed_commit / focus / findings）を出力すること
+
+@evaluator
+（同上。- 観点: readability）
+
+@evaluator
+（同上。- 観点: over-engineering）
+
+@evaluator
+（同上。- 観点: security）
 ```
 
-evaluatorのTask呼び出しが完了したら、Step 4と同じ作法でトークン消費を記録する
-（読み取れた場合のみ。読み取れなくても止めない）:
+4本のTask呼び出しが完了したら、Step 4と同じ作法で観点ごとにトークン消費を記録する
+（読み取れた場合のみ。読み取れなくても止めない。1本失敗して読み取れなかった観点は記録をスキップする）:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
-  --epic "$EPIC_NUM" --role evaluator --mode epic-review --tokens [読み取ったトークン数]
+  --epic "$EPIC_NUM" --role evaluator --mode epic-review --note "focus=[観点]" --tokens [読み取ったトークン数]
 ```
+
+4本の結果のマージ・重複排除（同一 `location` の統合・severity 採用・verdict 合成・
+`reviewed_commit` 食い違い時の扱い・1本失敗時の扱い）は
+[references/review.md](references/review.md)「R1の結果マージ」を参照する。
 
 
 ### R2以降: 指摘のissue化と対応ループ
