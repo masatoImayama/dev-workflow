@@ -431,12 +431,22 @@ generator自身は `fetch` / `checkout` / `pull` を行わない（`core/roles/g
 - **あなたの isolation worktree の分岐元は WAVE_BASE とは限らない**（worktree を作るのは
   ハーネスであり、分岐元はハーネスが決める）。**レーンの先頭で1回だけ**、次をこの順に実行して
   HEAD を WAVE_BASE に合わせること。**2件目以降のタスクでは再実行しないこと**
-  （再実行すると積んだコミットが失われる）:
-  1) `git status --short`（空であることを確認。空でなければ着手せず、実出力を添えて報告し停止すること）
-  2) `git reset --hard "[WAVE_BASE]"`（HEADをWAVE_BASEに合わせる。fetch/checkout/pullではないためネットワーク不要）
-  3) `git merge-base --is-ancestor "[WAVE_BASE]" HEAD && echo BASE_OK`（偽なら着手せず、実出力を添えて報告し停止すること）
-  4) `git log --oneline -1`（実際のHEADを報告に載せる）
-  手順1〜4の実出力を完了報告に含めること（自己申告にしない）
+  （再実行すると積んだコミットが失われる）。**証跡はファイルに書き出し、報告にはパスと
+  1行の判定だけを載せること**（Task #156。自己申告にしないという意図は変わらない。
+  実在するファイルとして `grep`/`cat` で機械的に検証できる）:
+  ```bash
+  BASE_EVIDENCE_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
+  ```
+  1) `{ echo '$ git status --short'; git status --short; } | tee -a "$BASE_EVIDENCE_FILE"`
+     （空であることを確認。空でなければ着手せず、`$BASE_EVIDENCE_FILE` のパスを添えて報告し停止すること）
+  2) `{ echo '$ git reset --hard "[WAVE_BASE]"'; git reset --hard "[WAVE_BASE]"; } | tee -a "$BASE_EVIDENCE_FILE"`
+     （HEADをWAVE_BASEに合わせる。fetch/checkout/pullではないためネットワーク不要）
+  3) `{ echo '$ git merge-base --is-ancestor "[WAVE_BASE]" HEAD && echo BASE_OK'; git merge-base --is-ancestor "[WAVE_BASE]" HEAD && echo BASE_OK; } | tee -a "$BASE_EVIDENCE_FILE"`
+     （偽なら着手せず、`$BASE_EVIDENCE_FILE` のパスを添えて報告し停止すること）
+  4) `{ echo '$ git log --oneline -1'; git log --oneline -1; } | tee -a "$BASE_EVIDENCE_FILE"`
+     （実際のHEADが証跡に残る）
+  報告には `ベース検証: [OK|NG] evidence=[BASE_EVIDENCE_FILEのパス]` の1行だけを書くこと。
+  実出力そのものをチャットへ貼り直さないこと
 - **`git fetch` / `git checkout` / `git pull` は実行しないこと。** 同期は run が Epic 専用
   worktree で既に済ませている。手順2の `git reset --hard` のみが例外として許可されている
 - サンドボックスへのコマンド投入は `${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh` 経由で行い、
@@ -457,7 +467,9 @@ generator自身は `fetch` / `checkout` / `pull` を行わない（`core/roles/g
   ```
   （`$PREP_CMD` が空でない場合のみ、上のコマンドに `--run-prep '[PREP_CMDの内容]'` を追加する。
   `$PREP_CMD` が空の場合は `--run-prep` 自体を付けない）
-  - 出力の各行と `prep=` 行を**そのまま完了報告に貼ること**（自己申告にしない）
+  - 出力の各行と `prep=` 行を `$BASE_EVIDENCE_FILE` に追記し（`>> "$BASE_EVIDENCE_FILE"`）、
+    報告には `準備: [prep=の値] evidence=[BASE_EVIDENCE_FILEのパス]` の1行だけを書くこと
+    （自己申告にしない。実出力はファイルに残す）
   - **exit 3**（ロック競合）が返った場合、2本目を起動せず、その事実を報告して停止すること
   - **exit 4**（`--run-prep` に渡したコマンドの失敗）が返った場合、実装に進まず、その事実を
     報告すること
@@ -487,35 +499,47 @@ generator自身は `fetch` / `checkout` / `pull` を行わない（`core/roles/g
   通った」とだけ書き、**「回帰なし」と書かないこと**。変更が共通基盤に及ぶなど広範だと判断した
   場合に限り全テストを走らせてよく、そのときは判断根拠を報告に書くこと
 - **SKIP件数は `tail` の目視ではなく `scripts/count-skips.sh` で機械的に数えること。**
-  テスト出力を `tee` でログに保存してから数え、**数えたコマンドと実出力をそのまま報告に貼ること**
-  （`tail` で目視して「0件」と報告することは明示的に禁止する）。**並列レーンが同じ固定パスへ
-  `tee` すると他レーンの出力を上書きし合うため、`mktemp` で一意な一時ファイルを作ってから
-  使うこと**（issue #145）:
+  **証跡はファイルに書き出し、報告にはパスと1行の判定だけを載せること**（Task #156）。
+  テスト出力を証跡ファイルへ保存し、そのファイルに続けて機械可読なトレーラ（`key=value`
+  1行1項目）を追記する。**並列レーンが同じ固定パスへ `tee` すると他レーンの出力を
+  上書きし合うため、`mktemp` で一意な一時ファイルを作ってから使うこと**（issue #145）:
   ```bash
-  TEST_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-lane-test-output.XXXXXX")"
+  EVIDENCE_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
+  TASK_START_EPOCH="$(date +%s)"; TASK_START_HM="$(date +%H:%M)"
   bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" '[変更範囲のテストコマンド]' \
-    2>&1 | tee "$TEST_LOG"
-  bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file "$TEST_LOG"
+    2>&1 | tee "$EVIDENCE_FILE"
+  SKIP_OUT="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file "$EVIDENCE_FILE")"
+  TASK_END_EPOCH="$(date +%s)"; TASK_END_HM="$(date +%H:%M)"
+  {
+    echo "---"; echo "task=[番号]"; echo "lane=[記号]"; echo "status=success";
+    echo "start_epoch=${TASK_START_EPOCH}"; echo "end_epoch=${TASK_END_EPOCH}";
+    echo "start_hm=${TASK_START_HM}"; echo "end_hm=${TASK_END_HM}";
+    echo "duration_sec=$((TASK_END_EPOCH - TASK_START_EPOCH))"; echo "$SKIP_OUT";
+  } >> "$EVIDENCE_FILE"
   ```
-  （`$SKIP_PATTERN` が空でない場合のみ、次の行を追加する。空の場合はこの行を出さない）
+  （`$SKIP_PATTERN` が空でない場合のみ、`count-skips.sh` を呼ぶ前に次を実行する。
+  空の場合はこの行を出さない）
   このプロジェクトのテスト出力は built-in ランナー（go/jest/pytest）と形式が異なるため、
   `count-skips.sh` を呼ぶ前に次を実行してから数えること:
   `export DEV_WORKFLOW_SKIP_PATTERN='[SKIP_PATTERNの内容]'`
-  - `skips=<件数>`（exit 0）→ その件数を報告する。想定外のSKIPは不合格として扱う
-  - `skips=unknown`（exit 1）→ **「0件」と報告してはならない。** built-inランナー以外の
-    形式のため数えられなかった事実と、`DEV_WORKFLOW_SKIP_PATTERN`（Epic本文の
+  - `skips=<件数>`（exit 0）→ 報告の1行にその件数を書く。想定外のSKIPは不合格として扱う
+  - `skips=unknown`（exit 1）→ **報告の1行に「0件」と報告してはならない。** built-inランナー
+    以外の形式のため数えられなかった事実と、`DEV_WORKFLOW_SKIP_PATTERN`（Epic本文の
     `## SKIPパターン` 節）の設定が必要である旨を報告すること。この場合に限り、
-    `tail` ではなく生のテスト出力全体を読み、SKIPを示す行が無いか自分の目でも確認すること
+    `tail` ではなく `$EVIDENCE_FILE` の生のテスト出力全体を自分の目でも確認すること
 - issueの要件を確認し、Task issueの記載だけで着手できない場合に限り親Epic issueの本文を参照すること
 - テストファーストで実装し、**タスクごとに独立したコミットを積むこと**（タスクをまたいで1つの
   コミットにまとめない）
 - **1件のタスクに失敗しても、そのタスクだけを見送って次のタスクへ進むこと。**
   見送るときは `git reset --hard HEAD` で直前の成功コミットまで作業ツリーを戻し、
-  そのタスク番号と失敗理由を報告に残すこと（レーン全体を投げ出さない）
-- 各タスクの作業開始直後に `date +%s` で開始時刻を、報告直前にも `date +%s` で終了時刻を記録すること
-- 報告は**タスク1件につき1ブロック**とし、レーン先頭のベース検証出力を1回だけ添えること。
-  各ブロックには「タスク番号」「実際に叩いたテストコマンドの全文」「対象とした変更範囲」
-  「SKIP件数（count-skips.sh の実出力）」「開始時刻・終了時刻」を含めること。
+  その実出力を `$EVIDENCE_FILE` に追記すること（レーン全体を投げ出さない）
+- 報告は**タスク1件につき1行**とし、レーン先頭のベース検証行を1回だけ添えること。
+  各行には**必ず**次の5項目を含めること: **タスク番号 / 成功・見送り / SKIP件数 /
+  所要秒数 / 証跡ファイルのパス**（例:
+  `Task #[番号]: success skips=[件数|unknown] duration_sec=[秒数] evidence=[EVIDENCE_FILEのパス] commit=[ハッシュ]`。
+  見送りの場合は `見送り` に変え `理由=[短い要約]` を添える）。
+  対象とした変更範囲・実際に叩いたテストコマンドの全文など5項目に収まらない情報は
+  `$EVIDENCE_FILE` に追記し、チャットへ長文で貼り直さないこと。
   レーンの末尾に「レーン記号（A）」「最終的な作業ブランチ名」「成功／見送りのタスク番号」を
   1回だけ書くこと（作業ブランチ名は Step 5 の merge-lane.sh で使う）
 
@@ -573,6 +597,13 @@ Epic #$ARGUMENTS のウェーブ差分を先行レビューしてください。
   試行回数を保持したまま次ウェーブへ持ち越す
 - **レーン内の一部のタスクが失敗しても、そのレーンの成功分は取り込む。** レーンごと捨てない
 - 品質・設計・セキュリティの観点はここでは見ない。**それらは Epic 完了後の一括レビューで見る**
+
+各 generator の報告は「タスク1件につき1行＋証跡ファイルのパス」に縮小されている
+（`core/roles/generator.md`「完了報告」節、Task #156）。証跡ファイルは generator の
+isolation worktree ではなく `${TMPDIR:-/tmp}` 配下（オーケストレータと同じホスト）に
+あるため、**疑わしい報告（skips=unknown が続く・duration_sec が異様に短い等）のときだけ**
+`cat`/`grep` でそのパスを直接確認してよい。全レコードを毎回読み直す必要はない
+（読み直すと今回の削減が無意味になる）。
 
 全レーンの完了直後に、実装フェーズの計測を締める:
 

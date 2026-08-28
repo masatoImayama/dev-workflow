@@ -99,32 +99,43 @@ run は1レーンに**複数のタスクを割り当てることがある**（`#
   オブジェクトストアに既に存在するため**ネットワークアクセスは不要**であり、「リモート同期を
   させない」という禁止の意図と矛盾しない
 
-次の手順を**この順序で**実行する。
+**証跡はファイルに書き出し、報告にはパスと1行の判定だけを載せる**（Task #156。
+「完了報告」節参照）。次の手順を**この順序で**実行し、各コマンドの実出力を
+`BASE_EVIDENCE_FILE` に追記する。
 
 ```bash
+# 0) 証跡ファイルを用意する（レーンごと・呼び出しごとに mktemp が一意なパスを払い出す。
+#    ${TMPDIR:-/tmp} 配下＝リポジトリ外のためコミット対象にならない）
+BASE_EVIDENCE_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
+
 # 1) 作業ツリーが空であることを確認する（新規レーンなら空のはず）
-git status --short
-#    空でなければ実装を始めず、実出力を添えて報告し停止する（安全弁。手順2は空でない場合に
-#    未コミットの変更を消す）
+{ echo '$ git status --short'; git status --short; } | tee -a "$BASE_EVIDENCE_FILE"
+#    空でなければ実装を始めず、$BASE_EVIDENCE_FILE のパスを添えて報告し停止する
+#    （安全弁。手順2は空でない場合に未コミットの変更を消す）
 
 # 2) HEAD を WAVE_BASE に合わせる（fetch/checkout/pull ではない。ネットワーク不要）
-git reset --hard "<WAVE_BASE>"
+{ echo '$ git reset --hard "<WAVE_BASE>"'; git reset --hard "<WAVE_BASE>"; } | tee -a "$BASE_EVIDENCE_FILE"
 
 # 3) 検証する
-git merge-base --is-ancestor "<WAVE_BASE>" HEAD && echo BASE_OK
+{ echo '$ git merge-base --is-ancestor "<WAVE_BASE>" HEAD && echo BASE_OK'; \
+  git merge-base --is-ancestor "<WAVE_BASE>" HEAD && echo BASE_OK; } | tee -a "$BASE_EVIDENCE_FILE"
 
-# 4) 実際の HEAD を報告に載せる
-git log --oneline -1
+# 4) 実際の HEAD を証跡に残す
+{ echo '$ git log --oneline -1'; git log --oneline -1; } | tee -a "$BASE_EVIDENCE_FILE"
 ```
 
 **この手順は実装着手前に1回だけ行う。自分のコミットを積んだ後に再実行してはならない**
 （`git reset --hard` を積んだコミットの後に再実行すると、その成果が消える）。手順1の
 「作業ツリーが空であること」の確認が、その安全弁になっている。
 
-手順3の検証に失敗した場合、**自力で直そうとせず、実出力をそのまま報告して停止する。**
-誤ったベースの上で実装を続けると、先行タスクの変更を打ち消す差分ができる。
+手順3の検証に失敗した場合、**自力で直そうとせず、`$BASE_EVIDENCE_FILE` のパスを添えて
+報告し停止する。** 誤ったベースの上で実装を続けると、先行タスクの変更を打ち消す差分ができる。
 
-手順1〜4の**実出力**を完了報告に含めること（自己申告にしない）。
+完了報告には手順1〜4の実出力を貼らず、`ベース検証: OK evidence=$BASE_EVIDENCE_FILE`
+（失敗時は `NG`）の1行だけを書く（「完了報告」節参照）。実出力そのものは
+`$BASE_EVIDENCE_FILE` に既に残っている。**自己申告にしない、という意図は変わらない**
+（ファイルとして実在し、必要なときに `grep`/`cat` で機械的に検証できる分、
+チャットに貼るより弱くならない）。
 
 ### プロジェクト固有の準備は自分の作業ディレクトリで初回1回だけ実行する
 
@@ -352,28 +363,53 @@ ok  	example.com/pkg	0.032s
 ```
 
 `ok` の有無だけで判定しない。**SKIP件数は `tail` で目視して報告してはならない。**
-テスト出力を `tee` でログに保存し、`scripts/count-skips.sh` で機械的に数える。
+テスト出力を証跡ファイルへ保存し、`scripts/count-skips.sh` で機械的に数える。
 
 **並列レーンが同じ固定パスへ `tee` すると、他レーンの出力を上書きし合い誤ったSKIP件数を
 数えてしまう（issue #145）。`mktemp` で一意な一時ファイルを作ってから使うこと。**
 
+証跡ファイル（`EVIDENCE_FILE`）はテスト出力そのものを保存する場所であると同時に、
+「完了報告」節で報告する1行の裏付けにもなる。テスト出力に続けて、機械可読な
+トレーラ（`key=value` を1行1項目）を追記する（**証跡はファイルに書き出し、報告には
+パスと1行の判定だけを載せる**。Task #156）:
+
 ```bash
-TEST_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-lane-test-output.XXXXXX")"
+EVIDENCE_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
+TASK_START_EPOCH="$(date +%s)"; TASK_START_HM="$(date +%H:%M)"
+
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic epicXX 'make test' 2>&1 \
-  | tee "$TEST_LOG"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file "$TEST_LOG"
+  | tee "$EVIDENCE_FILE"
+SKIP_OUT="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file "$EVIDENCE_FILE")"
+
+TASK_END_EPOCH="$(date +%s)"; TASK_END_HM="$(date +%H:%M)"
+{
+  echo "---"
+  echo "task=<タスク番号>"
+  echo "lane=<レーン記号>"
+  echo "status=success"
+  echo "start_epoch=${TASK_START_EPOCH}"
+  echo "end_epoch=${TASK_END_EPOCH}"
+  echo "start_hm=${TASK_START_HM}"
+  echo "end_hm=${TASK_END_HM}"
+  echo "duration_sec=$((TASK_END_EPOCH - TASK_START_EPOCH))"
+  echo "$SKIP_OUT"
+} >> "$EVIDENCE_FILE"
 ```
 
-出力は3行（`skips=<件数|unknown>` / `runner=<go|pytest|jest|custom|unknown>` /
-`pattern=<使用したERE|none>`）、終了コードは `0`=数えられた `1`=数えられなかった
-（`skips=unknown`）。**数えたコマンドと実出力を報告に貼ること。**
+`$SKIP_OUT` は `count-skips.sh` の3行（`skips=<件数|unknown>` /
+`runner=<go|pytest|jest|custom|unknown>` / `pattern=<使用したERE|none>`）で、
+終了コードは `0`=数えられた `1`=数えられなかった（`skips=unknown`）。
 
-- `skips=<件数>`（exit 0）→ その件数を報告する。**想定外の SKIP は不合格として扱う**
-- `skips=unknown`（exit 1）→ **「0件」と報告してはならない。** built-in ランナー
+- `skips=<件数>`（exit 0）→ 報告の1行にその件数を書く。**想定外の SKIP は不合格として扱う**
+- `skips=unknown`（exit 1）→ **報告の1行に「0件」と報告してはならない。** built-in ランナー
   （go/jest/pytest）と異なる形式のため数えられなかったことを明示し、
   `DEV_WORKFLOW_SKIP_PATTERN`（run から渡された場合は Epic 本文の `## SKIPパターン` 節に
   由来する）の設定が必要である旨を報告する。渡されていない場合は、`tail` ではなく
-  生のテスト出力全体を読み、SKIPを示す行が無いか自分の目でも確認したうえでその旨を報告する
+  `$EVIDENCE_FILE` の生のテスト出力全体を自分の目でも確認したうえでその旨を報告する
+
+`$EVIDENCE_FILE` は `${TMPDIR:-/tmp}` 配下（リポジトリ外）に作られるため、
+コミット対象になったりリポジトリの追跡ファイルとして残ったりすることはない
+（共通ルールの「ハーネス非注入原則」参照）。
 
 ### 5. コミット
 
@@ -429,86 +465,57 @@ git commit -m "feat: [内容] (#[task番号])"
 
 ## 完了報告
 
-**自己申告ではなく、コマンドの実出力を貼ること。** 「ベースは正しい」「問題なし」といった
-結論だけの報告は、実態と食い違っていても検出できない。
+**証跡はファイルに書き出し、報告にはパスと1行の判定だけを載せる**（Task #156）。
+これは「自己申告ではなく実出力で示す」という従来の意図を弱めるものではない。
+`$BASE_EVIDENCE_FILE` / `$EVIDENCE_FILE`（いずれも `${TMPDIR:-/tmp}` 配下＝
+リポジトリ外）に実出力そのものが既に残っているため、報告はそのパスと1行の判定を
+書けば足りる。**むしろ「実在するファイルとして `grep`/`cat` で機械的に検証できる」
+分、チャットへの貼り付け（`tail` の目視で済まされうる）より弱くならない。**
+「ベースは正しい」「問題なし」といった、裏付けとなる証跡ファイルへの参照を欠く
+結論だけの報告は禁止のままである。
 
 報告は次の3部構成にする。
 
-1. **レーン先頭のベース検証**（レーンにつき1回だけ）
-2. **タスクごとのブロック**（割り当てられたタスクの数だけ繰り返す。見送ったタスクも書く）
-3. **レーン末尾のサマリ**（レーンにつき1回だけ）
+1. **レーン先頭のベース検証**（レーンにつき1行だけ）
+2. **タスクごとの1行**（割り当てられたタスクの数だけ繰り返す。見送ったタスクも書く）
+3. **レーン末尾のサマリ**（レーンにつき1回だけ。従来どおり）
 
-### 1. レーン先頭のベース検証（1回だけ）
-
-```
-## レーン [記号] ベース検証
-
-### ベース（実出力を貼る。自己申告しない）
-$ git status --short
-[実出力]
-$ git reset --hard [WAVE_BASE]
-[実出力]
-$ git merge-base --is-ancestor [WAVE_BASE] HEAD && echo BASE_OK
-[実出力]
-$ git log --oneline -1
-[実出力]
-
-### 準備（準備コマンド／共有ディレクトリが渡された場合のみ）
-$ bash .../share-prepared-dirs.sh ...
-[実出力の各行と prep= 行をそのまま]
-```
-
-### 2. タスクごとのブロック（割り当ての数だけ繰り返す）
+### 1. レーン先頭のベース検証（1行だけ）
 
 ```
-## Task #[番号] 完了
-
-### 所要時間
-開始: [date +%s の値 または HH:MM] / 終了: [同左]
-
-### 変更ファイル
-- [ファイル一覧]
-
-### Epic本文の参照（読んだ場合のみ）
-- 不足していた情報: [Task issueに無かった情報]
-
-### テスト結果（変更範囲。サンドボックス内）
-対象範囲: [パッケージ／モジュール名。全テストを走らせた場合はその判断根拠]
-実行したコマンドの全文:
-$ TEST_LOG=$(mktemp "${TMPDIR:-/tmp}/dw-lane-test-output.XXXXXX")
-$ bash .../sandbox-exec.sh '[実際に叩いたコマンドをそのまま]' | tee "$TEST_LOG"
-[実出力]
-
-### SKIP件数（count-skips.shの実出力を貼る。tailでの目視や自己申告にしない）
-$ bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file "$TEST_LOG"
-skips=[件数 または unknown]
-runner=[go|pytest|jest|custom|unknown]
-pattern=[使用したERE または none]
-（skips=unknownの場合は「0件」と書かない。unknownである事実と、
-DEV_WORKFLOW_SKIP_PATTERNの設定が必要である旨を書く）
-
-### コミット
-- [コミットハッシュ]: [メッセージ]
-
-### 品質ゲート
-- テスト / ビルド / 可読性チェックの実行結果
-
-### 作らなかったもの（ラダー判定）
-- [7段のラダーの1〜2段目で「作らない」「再利用する」と判定したもの。該当が無ければ「なし」]
+ベース検証: [OK|NG] evidence=[BASE_EVIDENCE_FILEのパス]
 ```
 
-**見送ったタスク**は、上記のブロックの代わりに次を出す:
+`NG` の場合は実装に着手せず、続けて失敗理由を短く添えて停止する
+（実出力は `$BASE_EVIDENCE_FILE` に既にある。改めてチャットへ貼り直さない）。
+準備コマンド・共有ディレクトリの `share-prepared-dirs.sh` を実行した場合も、
+その実出力は同じ `$BASE_EVIDENCE_FILE` に追記し、報告には
+`準備: [prep=の値] evidence=[同じパス]` の1行を足すだけでよい。
+
+### 2. タスクごとの1行（割り当ての数だけ繰り返す）
+
+次の**5項目を必ず含む1行**にする（タスク番号 / 成功・見送り / SKIP件数 /
+所要秒数 / 証跡ファイルのパス）:
 
 ```
-## Task #[番号] 見送り
-
-### 理由
-[何が起きたか。実出力を添える]
-
-### 作業ツリーの復旧
-$ git reset --hard HEAD
-[実出力。直前の成功コミットに戻っていることを示す]
+Task #[番号]: success skips=[件数|unknown] duration_sec=[秒数] evidence=[EVIDENCE_FILEのパス] commit=[ハッシュ]
 ```
+
+**見送ったタスク**は次の形にする（成功時と同じ5項目に加え、短い理由を添える）:
+
+```
+Task #[番号]: 見送り skips=[件数|unknown|n/a] duration_sec=[秒数] evidence=[EVIDENCE_FILEのパス] 理由=[短い要約]
+```
+
+- `見送り` の場合、`git reset --hard HEAD` で直前の成功コミットまで作業ツリーを
+  戻したことと、その実出力も `$EVIDENCE_FILE` に追記してから報告する
+  （チャットへ実出力を貼り直さない）
+- 変更ファイル一覧・対象範囲・Epic本文を参照した場合の不足情報・作らなかったもの（ラダー判定）
+  など、5項目に収まらない情報は `$EVIDENCE_FILE` に追記してから報告する。特筆すべき事情がある
+  場合のみ、1行の末尾に短い注記を添える（既定は `$EVIDENCE_FILE` を見れば分かる状態にしておき、
+  チャットには書かない）
+- コミットは `git log` で確認できるため、コミットメッセージそのものをチャットへ
+  貼り直す必要はない（`commit=` のハッシュで足りる）
 
 ### 3. レーン末尾のサマリ（1回だけ）
 
