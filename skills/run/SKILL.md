@@ -324,7 +324,14 @@ SKIPPED_CSV=""   # 3回失敗して見送ったタスク番号のカンマ区切
 
 # ウェーブ差分の先行レビュー（wave-review）用。詳細は references/wave-review.md を参照
 # （読むタイミング: wave-reviewの起動条件・REVIEWED_COMMITの更新規則を確認したいとき）。
-REVIEWED_COMMIT="$(git merge-base main "${EPIC_BRANCH}")"   # 「そこまではレビュー済み」の地点
+# ベースブランチを master/main に決め打ちしない（dev-workflow自身のデフォルトブランチが
+# masterであっても、それを駆動先の値として埋め込んではならない。references/review.md と
+# 同じ方法で解決する）。
+BASE_BRANCH="$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null)"
+BASE_BRANCH="${BASE_BRANCH:-main}"
+REVIEWED_COMMIT="$(git merge-base "$BASE_BRANCH" "${EPIC_BRANCH}")"   # 「そこまではレビュー済み」の地点
+# 解決・merge-baseのいずれかに失敗した場合（REVIEWED_COMMITが空）はwave-reviewを起動しない。
+# REVIEWED_COMMITを進めずEpic末レビューに委ねる（詳細はreferences/wave-review.md）。
 PREV_WAVE_INCORPORATED=false   # このrunセッション内で直前のウェーブをEpicへ取り込んだか
 
 # WAVE_NO: wave ブランチ名（wave/${EPIC_NUM}/${WAVE_NO}）に使う通し番号。

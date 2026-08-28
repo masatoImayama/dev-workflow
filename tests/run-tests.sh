@@ -12897,11 +12897,29 @@ case "$H148_RS_STEP3" in
 esac
 
 # --- REVIEWED_COMMITの初期値・更新・失敗時に進めない規定 ---
-if grep -Fq 'REVIEWED_COMMIT="$(git merge-base main' "${REPO_ROOT}/skills/run/SKILL.md"; then
-  pass "SKILL.md: REVIEWED_COMMITの初期値（mainとのmerge-base）が書かれている（#148）"
+if grep -Fq 'REVIEWED_COMMIT="$(git merge-base "$BASE_BRANCH"' "${REPO_ROOT}/skills/run/SKILL.md"; then
+  pass "SKILL.md: REVIEWED_COMMITの初期値（gh repo viewで解決したベースブランチとのmerge-base）が書かれている（#148, #160）"
 else
-  fail "SKILL.md: REVIEWED_COMMITの初期値（mainとのmerge-base）が書かれている（#148）" \
+  fail "SKILL.md: REVIEWED_COMMITの初期値（gh repo viewで解決したベースブランチとのmerge-base）が書かれている（#148, #160）" \
     "$(grep -n 'REVIEWED_COMMIT' "${REPO_ROOT}/skills/run/SKILL.md")"
+fi
+
+# --- REVIEWED_COMMITの初期化がベースブランチをmain/masterに決め打ちしていない（#160） ---
+if grep -Fq 'REVIEWED_COMMIT="$(git merge-base main' "${REPO_ROOT}/skills/run/SKILL.md" \
+  || grep -Fq 'REVIEWED_COMMIT="$(git merge-base main' "${REPO_ROOT}/skills/run/references/wave-review.md"; then
+  fail "SKILL.md / wave-review.md: REVIEWED_COMMITの初期化がmainにハードコードされていない（#160）" \
+    "ハードコードされた 'git merge-base main' が見つかった"
+else
+  pass "SKILL.md / wave-review.md: REVIEWED_COMMITの初期化がmainにハードコードされていない（#160）"
+fi
+
+# --- REVIEWED_COMMITの初期化がgh repo view --json defaultBranchRefで解決している（#160） ---
+if grep -Fq 'gh repo view --json defaultBranchRef' "${REPO_ROOT}/skills/run/SKILL.md" \
+  && grep -Fq 'gh repo view --json defaultBranchRef' "${REPO_ROOT}/skills/run/references/wave-review.md"; then
+  pass "SKILL.md / wave-review.md: REVIEWED_COMMITの初期化がgh repo viewでベースブランチを解決している（#160）"
+else
+  fail "SKILL.md / wave-review.md: REVIEWED_COMMITの初期化がgh repo viewでベースブランチを解決している（#160）" \
+    "$(grep -n 'defaultBranchRef' "${REPO_ROOT}/skills/run/SKILL.md" "${REPO_ROOT}/skills/run/references/wave-review.md")"
 fi
 
 if grep -Fq '進めない' "$H148_WAVEREVIEW_REF"; then
