@@ -222,11 +222,12 @@ WAVE_NO=$(git for-each-ref --format='%(refname:short)' "refs/heads/wave/${EPIC_N
 WAVE_NO="${WAVE_NO:-0}"
 ```
 
-### Step 1: 次のタスクを依存グラフから選定する
+### Step 1: 次のウェーブのタスク列を依存グラフから選定する
 
 `gh issue list` の先頭を素朴に取るのではなく、`scripts/plan-waves.sh` の出力から選ぶ。
 `--lanes 1` を渡すため、常にウェーブ1のタスクが issue 番号の小さい順に並ぶ。
-そのうち**先頭の1件だけ**を今回処理するタスクとする。
+**そのウェーブのタスクを全件、1本のレーンのタスク列として扱う**（`lanes=1` とは「レーンが
+1本である」という意味であり、「1回に1タスクしか進めない」という意味ではない）。
 
 ```bash
 # plan-waves.sh の --epic は数値のEpic issue番号（$EPIC_ISSUE_NUM）。sandbox-exec.sh の
@@ -243,10 +244,15 @@ echo "$PLAN"
   該当タスクの宣言漏れ・不明な依存を報告に含める（fail-safe で完全逐次扱いになっている旨も明記）
 - 出力に `wave	1	tasks	...` の行が無い（＝全タスク完了）→ ループを終了し
   **「Epic一括レビュー」** へ進む
-- `wave	1	tasks	4,5,10` のような行の**先頭（最小番号）**を今回のタスクとする
+- `wave	1	tasks	4,5,10` のような行の**全件**を、issue 番号の小さい順に並べたものが
+  今回のレーンのタスク列である（例: `#4 → #5 → #10`）
 
 完了したタスクは `gh issue list --state open` から自然に消えるため、次回呼び出しの
 `wave 1 tasks ...` は常に「次に処理すべきタスクを含む集合」になる（毎回再計算し、使い回さない）。
+
+**タスクごとに Step 2〜5 を回してはならない。** 同期（`git fetch` / `pull`）・wave ブランチの
+作成・統合ゲート・Epic ブランチへの取り込みは、**ウェーブにつき1回**である。タスクごとに
+繰り返すと、実装以外の固定コストがタスク数に比例して積み上がる。
 
 ### Step 2: WAVE_BASE を記録し、レーン（作業ブランチ）を作る
 
@@ -254,7 +260,7 @@ echo "$PLAN"
 git fetch origin && git checkout "${EPIC_BRANCH}" && git pull origin "${EPIC_BRANCH}"
 WAVE_BASE=$(git rev-parse HEAD)
 WAVE_NO=$((WAVE_NO + 1))
-LANE_BRANCH="task/${EPIC_NUM}/<番号>"
+LANE_BRANCH="task/${EPIC_NUM}/w${WAVE_NO}"   # ウェーブ単位。タスクごとに作り直さない
 git checkout -B "$LANE_BRANCH" "$WAVE_BASE"
 ```
 
@@ -304,12 +310,16 @@ Task #<番号> を実装してください。
   ディレクトリそのもの）に対して1回実行済みである。**あなたはその1回がそのまま効く場所で
   作業している**（Claude版のように別ツリーで作業するわけではないため）。準備コマンドは渡されて
   いない。効いていないと判断した場合も自前で追加実行せず、その事実を報告すること
-- 回帰確認はプロジェクトの全テストで行うこと。`-run` で絞った結果を「回帰なし」と報告しないこと
+- **回帰確認は generator の責務ではない。** 各タスクで走らせるのは**そのタスクの変更範囲の
+  テスト**（変更したファイルが属するパッケージ／モジュール単位）であり、プロジェクトの全テスト
+  ではない。全テストは Step 5 の統合ゲートがウェーブごとに1回だけ走らせる。報告には
+  「変更範囲のテストが通った」とだけ書き、**「回帰なし」と書かないこと**。変更が共通基盤に
+  及ぶなど広範だと判断した場合に限り全テストを走らせてよく、そのときは判断根拠を報告に書くこと
 - **SKIP件数は `tail` の目視ではなく `scripts/count-skips.sh` で機械的に数えること。**
   テスト出力を `tee` でログに保存してから数え、**数えたコマンドと実出力をそのまま報告に貼ること**
   （`tail` で目視して「0件」と報告することは禁止する）:
   ```bash
-  bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" '[全テストコマンド]' \
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" '[変更範囲のテストコマンド]' \
     2>&1 | tee /tmp/test-output.log
   bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file /tmp/test-output.log
   ```
@@ -325,8 +335,18 @@ Task #<番号> を実装してください。
 - issueの要件を確認すること。Task issueの記載だけで着手できない場合に限り、
   親Epic issue本文の仕様書・計画書を確認すること
 - テストファーストで実装すること
-- 変更を `<LANE_BRANCH>` にコミットすること
-- 報告には「実際に叩いたテストコマンドの全文」と「ベース検証の実出力」を含めること
+- **割り当てられたタスク列を、この順に連続処理すること。**（`#<番号1> → #<番号2> → …`）
+  ベース検証と準備の確認は**レーンの先頭で1回だけ**行い、2件目以降のタスクでは繰り返さない。
+  2件目以降は1件目で得たリポジトリの理解（ディレクトリ構成・テストコマンド・規約）を
+  そのまま使い、調べ直さないこと
+- **タスクごとに独立したコミットを `<LANE_BRANCH>` へ積むこと。** 複数タスクを1つの
+  コミットにまとめない
+- **1件のタスクに失敗しても、そのタスクだけを見送って次のタスクへ進むこと。**
+  見送るときは `git reset --hard HEAD` で直前の成功コミットまで作業ツリーを戻し、
+  そのタスク番号と失敗理由を報告に残すこと（レーン全体を投げ出さない）
+- 報告は**タスク1件につき1ブロック**とし、「ベース検証の実出力」はレーンの先頭で1回だけ
+  添えること。各ブロックには「タスク番号」「実際に叩いたテストコマンドの全文」
+  「対象とした変更範囲」「SKIP件数」を含め、レーンの末尾に成功／見送りのタスク番号を書くこと
 ```
 
 #### トークン消費の記録（効果測定。Task #76・決定3でClaude版と同じ結線を入れる）
@@ -350,7 +370,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
 WAVE_BRANCH="wave/${EPIC_NUM}/${WAVE_NO}"
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/merge-lane.sh" \
   --wave-branch "$WAVE_BRANCH" --expected-base "$WAVE_BASE" \
-  --lane-branch "$LANE_BRANCH" --task <番号> --create
+  --lane-branch "$LANE_BRANCH" --task "<このレーンで成功したタスク番号のカンマ区切り>" --create
 ```
 
 終了コードで扱いを分岐する:

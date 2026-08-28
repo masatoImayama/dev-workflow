@@ -20,7 +20,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "*",
+        "matcher": "Bash|Write|Edit|MultiEdit|Task|NotebookEdit|shell|apply_patch",
         "hooks": [
           {
             "type": "command",
@@ -44,7 +44,7 @@
         ]
       },
       {
-        "matcher": "*",
+        "matcher": "Bash|Write|Edit|MultiEdit|Task|NotebookEdit|shell|apply_patch",
         "hooks": [
           {
             "type": "command",

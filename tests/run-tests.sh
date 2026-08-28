@@ -13,6 +13,21 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# run スキルは SKILL.md 本体 + references/*.md の progressive disclosure 構成である。
+# 「run スキルにこの記述があるか」を問うテストは、本体だけを見ると参照ファイルへ移した記述を
+# 取りこぼす。本体を先頭に置いた平坦化ビューを1つ作り、内容の有無を問うテストはこれを見る
+# （本体内の記述の**順序**を問うテストは、従来どおり SKILL.md 本体そのものを見ること）。
+RUN_SKILL_FLAT="$(mktemp "${TMPDIR:-/tmp}/dw-run-skill-flat.XXXXXX")"
+cat "${REPO_ROOT}/skills/run/SKILL.md" > "$RUN_SKILL_FLAT"
+for _ref in "${REPO_ROOT}"/skills/run/references/*.md; do
+  [ -f "$_ref" ] || continue
+  printf '
+' >> "$RUN_SKILL_FLAT"
+  cat "$_ref" >> "$RUN_SKILL_FLAT"
+done
+unset _ref
+trap 'rm -f "$RUN_SKILL_FLAT"' EXIT
+
 PASS=0
 FAIL=0
 SKIP=0
@@ -3874,7 +3889,7 @@ esac
 echo ""
 echo "== skills/run/SKILL.md（統合ゲート失敗リカバリ・0レーン分岐の回帰防止 #38, #41） =="
 
-RUN_SKILL="${REPO_ROOT}/skills/run/SKILL.md"
+RUN_SKILL="$RUN_SKILL_FLAT"
 
 # #38: Step 8「統合ゲート失敗時の原因特定手順」は、この時点で checkout 中の wave ブランチに対して
 # 実行される。`git branch -f` はチェックアウト中のブランチの強制更新を拒否するため使ってはならない。
@@ -6269,17 +6284,29 @@ else
     "case文にpre|postが見つかりません: ${HJ_HB_ACCEPTED_LINE}"
 fi
 
-# --- hooks.json: PreToolUse(matcher=*)にheartbeat.sh preが結線されている ---
+# --- hooks.json: PreToolUse(作業ツール)にheartbeat.sh preが結線されている ---
 
 # JSON文字列内の `"` はエスケープされて `\"` になっているため、grep -Fq の照合パターンにも
 # バックスラッシュを含める（例: `"command": "bash \"${CLAUDE_PLUGIN_ROOT}/...\" pre"`）。
 # ここを素の `"` のまま書くと、実ファイルの内容と1文字も一致せず必ず不一致になる。
 HJ_PRETOOLUSE="$(_hj_extract_section "$HJ_HOOKS_JSON" "PreToolUse")"
-if printf '%s' "$HJ_PRETOOLUSE" | grep -Fq '"matcher": "*"' \
+if printf '%s' "$HJ_PRETOOLUSE" | grep -Eq '"matcher": "[^"]*Bash[^"]*"' \
+  && printf '%s' "$HJ_PRETOOLUSE" | grep -Eq '"matcher": "[^"]*Task[^"]*"' \
   && printf '%s' "$HJ_PRETOOLUSE" | grep -Fq 'bash \"${CLAUDE_PLUGIN_ROOT}/scripts/heartbeat.sh\" pre'; then
-  pass "hooks.json: PreToolUse(matcher=*)にheartbeat.sh preが結線されている"
+  pass "hooks.json: PreToolUse(作業ツール)にheartbeat.sh preが結線されている"
 else
-  fail "hooks.json: PreToolUse(matcher=*)にheartbeat.sh preが結線されている" "$HJ_PRETOOLUSE"
+  fail "hooks.json: PreToolUse(作業ツール)にheartbeat.sh preが結線されている" "$HJ_PRETOOLUSE"
+fi
+
+# matcher は `*`（全ツール）ではなく「実際に作業するツール」に限る。Read/Grep/Glob は
+# 1ターンに何十回も呼ばれ、1回ごとに bash 起動コストを払う。読み取りだけが続く状態で
+# heartbeat が更新され続けると watchdog のストール検知が鈍る
+# （core/instructions.md「ハング・スリープの検知」）。
+if printf '%s' "$HJ_PRETOOLUSE" | grep -Fq '"matcher": "*"' \
+  || printf '%s' "$HJ_PRETOOLUSE" | grep -Eq '"matcher": "[^"]*(Read|Grep|Glob)[^"]*"'; then
+  fail "hooks.json: PreToolUseのmatcherが読み取り専用ツールを含まない（*も不可）" "$HJ_PRETOOLUSE"
+else
+  pass "hooks.json: PreToolUseのmatcherが読み取り専用ツールを含まない（*も不可）"
 fi
 
 # pre/postの取り違えはabort判定（#50）を機能させなくする致命的なバグになるため、
@@ -6290,14 +6317,25 @@ else
   pass "hooks.json: PreToolUseにheartbeat.sh postが紛れ込んでいない"
 fi
 
-# --- hooks.json: PostToolUse(matcher=*)にheartbeat.sh postが結線され、既存の可読性ガードも残っている ---
+# --- hooks.json: PostToolUse(作業ツール)にheartbeat.sh postが結線され、既存の可読性ガードも残っている ---
 
 HJ_POSTTOOLUSE="$(_hj_extract_section "$HJ_HOOKS_JSON" "PostToolUse")"
-if printf '%s' "$HJ_POSTTOOLUSE" | grep -Fq '"matcher": "*"' \
+if printf '%s' "$HJ_POSTTOOLUSE" | grep -Eq '"matcher": "[^"]*Bash[^"]*"' \
   && printf '%s' "$HJ_POSTTOOLUSE" | grep -Fq 'bash \"${CLAUDE_PLUGIN_ROOT}/scripts/heartbeat.sh\" post'; then
-  pass "hooks.json: PostToolUse(matcher=*)にheartbeat.sh postが結線されている"
+  pass "hooks.json: PostToolUse(作業ツール)にheartbeat.sh postが結線されている"
 else
-  fail "hooks.json: PostToolUse(matcher=*)にheartbeat.sh postが結線されている" "$HJ_POSTTOOLUSE"
+  fail "hooks.json: PostToolUse(作業ツール)にheartbeat.sh postが結線されている" "$HJ_POSTTOOLUSE"
+fi
+
+# matcher は `*`（全ツール）ではなく「実際に作業するツール」に限る。Read/Grep/Glob は
+# 1ターンに何十回も呼ばれ、1回ごとに bash 起動コストを払う。読み取りだけが続く状態で
+# heartbeat が更新され続けると watchdog のストール検知が鈍る
+# （core/instructions.md「ハング・スリープの検知」）。
+if printf '%s' "$HJ_POSTTOOLUSE" | grep -Fq '"matcher": "*"' \
+  || printf '%s' "$HJ_POSTTOOLUSE" | grep -Eq '"matcher": "[^"]*(Read|Grep|Glob)[^"]*"'; then
+  fail "hooks.json: PostToolUseのmatcherが読み取り専用ツールを含まない（*も不可）" "$HJ_POSTTOOLUSE"
+else
+  pass "hooks.json: PostToolUseのmatcherが読み取り専用ツールを含まない（*も不可）"
 fi
 
 if printf '%s' "$HJ_POSTTOOLUSE" | grep -Fq 'heartbeat.sh\" pre'; then
@@ -6314,7 +6352,7 @@ else
     "$HJ_POSTTOOLUSE"
 fi
 
-# --- hooks.codex.json: PreToolUse(matcher=*)にheartbeat.sh preが結線されている ---
+# --- hooks.codex.json: PreToolUse(作業ツール)にheartbeat.sh preが結線されている ---
 #
 # CodexのイベントにPreToolUseは実在する（docs/dev-workflow-multi-vendor-guide.md §3.5.1）。
 # 当初（#52）はこれを「Codexに存在しない」と誤認して縮退させていたが、レビュー#59で
@@ -6325,12 +6363,24 @@ fi
 # 結線するだけで#61の実害（stateが常にpostになる問題）は解消する。
 
 HJ_CODEX_PRETOOLUSE="$(_hj_extract_section "$HJ_HOOKS_CODEX_JSON" "PreToolUse")"
-if printf '%s' "$HJ_CODEX_PRETOOLUSE" | grep -Fq '"matcher": "*"' \
+if printf '%s' "$HJ_CODEX_PRETOOLUSE" | grep -Eq '"matcher": "[^"]*shell[^"]*"' \
+  && printf '%s' "$HJ_CODEX_PRETOOLUSE" | grep -Eq '"matcher": "[^"]*apply_patch[^"]*"' \
   && printf '%s' "$HJ_CODEX_PRETOOLUSE" | grep -Fq 'bash \"${CLAUDE_PLUGIN_ROOT}/scripts/heartbeat.sh\" pre'; then
-  pass "hooks.codex.json: PreToolUse(matcher=*)にheartbeat.sh preが結線されている（#59, #61）"
+  pass "hooks.codex.json: PreToolUse(作業ツール)にheartbeat.sh preが結線されている（#59, #61）"
 else
-  fail "hooks.codex.json: PreToolUse(matcher=*)にheartbeat.sh preが結線されている（#59, #61）" \
+  fail "hooks.codex.json: PreToolUse(作業ツール)にheartbeat.sh preが結線されている（#59, #61）" \
     "$HJ_CODEX_PRETOOLUSE"
+fi
+
+# matcher は `*`（全ツール）ではなく「実際に作業するツール」に限る。Read/Grep/Glob は
+# 1ターンに何十回も呼ばれ、1回ごとに bash 起動コストを払う。読み取りだけが続く状態で
+# heartbeat が更新され続けると watchdog のストール検知が鈍る
+# （core/instructions.md「ハング・スリープの検知」）。
+if printf '%s' "$HJ_CODEX_PRETOOLUSE" | grep -Fq '"matcher": "*"' \
+  || printf '%s' "$HJ_CODEX_PRETOOLUSE" | grep -Eq '"matcher": "[^"]*(Read|Grep|Glob)[^"]*"'; then
+  fail "hooks.codex.json: PreToolUseのmatcherが読み取り専用ツールを含まない（*も不可）" "$HJ_CODEX_PRETOOLUSE"
+else
+  pass "hooks.codex.json: PreToolUseのmatcherが読み取り専用ツールを含まない（*も不可）"
 fi
 
 if printf '%s' "$HJ_CODEX_PRETOOLUSE" | grep -Fq 'heartbeat.sh\" post'; then
@@ -6340,11 +6390,22 @@ else
 fi
 
 HJ_CODEX_POSTTOOLUSE="$(_hj_extract_section "$HJ_HOOKS_CODEX_JSON" "PostToolUse")"
-if printf '%s' "$HJ_CODEX_POSTTOOLUSE" | grep -Fq '"matcher": "*"' \
+if printf '%s' "$HJ_CODEX_POSTTOOLUSE" | grep -Eq '"matcher": "[^"]*shell[^"]*"' \
   && printf '%s' "$HJ_CODEX_POSTTOOLUSE" | grep -Fq 'bash \"${CLAUDE_PLUGIN_ROOT}/scripts/heartbeat.sh\" post'; then
-  pass "hooks.codex.json: PostToolUse(matcher=*)にheartbeat.sh postが結線されている"
+  pass "hooks.codex.json: PostToolUse(作業ツール)にheartbeat.sh postが結線されている"
 else
-  fail "hooks.codex.json: PostToolUse(matcher=*)にheartbeat.sh postが結線されている" "$HJ_CODEX_POSTTOOLUSE"
+  fail "hooks.codex.json: PostToolUse(作業ツール)にheartbeat.sh postが結線されている" "$HJ_CODEX_POSTTOOLUSE"
+fi
+
+# matcher は `*`（全ツール）ではなく「実際に作業するツール」に限る。Read/Grep/Glob は
+# 1ターンに何十回も呼ばれ、1回ごとに bash 起動コストを払う。読み取りだけが続く状態で
+# heartbeat が更新され続けると watchdog のストール検知が鈍る
+# （core/instructions.md「ハング・スリープの検知」）。
+if printf '%s' "$HJ_CODEX_POSTTOOLUSE" | grep -Fq '"matcher": "*"' \
+  || printf '%s' "$HJ_CODEX_POSTTOOLUSE" | grep -Eq '"matcher": "[^"]*(Read|Grep|Glob)[^"]*"'; then
+  fail "hooks.codex.json: PostToolUseのmatcherが読み取り専用ツールを含まない（*も不可）" "$HJ_CODEX_POSTTOOLUSE"
+else
+  pass "hooks.codex.json: PostToolUseのmatcherが読み取り専用ツールを含まない（*も不可）"
 fi
 
 if printf '%s' "$HJ_CODEX_POSTTOOLUSE" | grep -Fq 'heartbeat.sh\" pre'; then
@@ -7113,7 +7174,7 @@ echo "== Epic一括レビューに「変更50ファイル超」しきい値の3�
 # 従来どおりPhase分割）にする。新しいしきい値の軸を増やさないこと、Claude版とCodex版で
 # 機能差を作らないこと（決定3）を検査する。
 
-DOC74_RUN_SKILL="${REPO_ROOT}/skills/run/SKILL.md"
+DOC74_RUN_SKILL="$RUN_SKILL_FLAT"
 DOC74_CODEX_RUN_SKILL="${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md"
 
 # --- skills/run/SKILL.md: 3分岐（<=50 / >50かつ利用可能 / >50かつ未導入）が記述されている ---
@@ -7610,7 +7671,7 @@ fi
 # --- run への結線: skills/run/SKILL.md と skills-codex/dev-workflow-run/SKILL.md の両方に
 #     record-agent-tokens.sh の呼び出しとPR本文への集計が記述されている ---
 
-RAT_RUN_SKILL="${REPO_ROOT}/skills/run/SKILL.md"
+RAT_RUN_SKILL="$RUN_SKILL_FLAT"
 RAT_CODEX_RUN_SKILL="${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md"
 
 for f in "$RAT_RUN_SKILL" "$RAT_CODEX_RUN_SKILL"; do
@@ -7843,7 +7904,7 @@ assert_order() {
 }
 
 # --- skills/run/SKILL.md: Step 3 プロンプト雛形に4手順がこの順で現れる ---
-RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "${REPO_ROOT}/skills/run/SKILL.md")"
+RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$RUN_SKILL_FLAT")"
 
 assert_order "SKILL.md: Step 3 雛形に git status --short → git reset --hard → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89）" \
   "$RS_STEP3" \
@@ -8475,7 +8536,7 @@ echo ""
 echo "== H2: 準備コマンドをレーンの作業ディレクトリで初回1回だけ実行させる（回帰防止 #94） =="
 
 # --- skills/run/SKILL.md: Step 3 雛形にPREP_CMDの埋め込みと「初回1回だけ」の指示がある ---
-H2_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "${REPO_ROOT}/skills/run/SKILL.md")"
+H2_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$RUN_SKILL_FLAT")"
 
 case "$H2_RS_STEP3" in
   *'PREP_CMD'*'初回1回だけ'*)
@@ -8502,7 +8563,7 @@ case "$H2_RS_STEP3" in
 esac
 
 # --- skills/run/SKILL.md: Epic開始時1回を残す理由（キャッシュ温め・統合ゲート用Epic worktree配置）が明記されている ---
-H2_RS_PREP="$(awk '/^#### プロジェクト固有の準備コマンド/{f=1} /^### サンドボックスへのコマンド投入/{f=0} f' "${REPO_ROOT}/skills/run/SKILL.md")"
+H2_RS_PREP="$(awk '/^#### プロジェクト固有の準備コマンド/{f=1} /^### サンドボックスへのコマンド投入/{f=0} f' "$RUN_SKILL_FLAT")"
 
 case "$H2_RS_PREP" in
   *'ビルドキャッシュを温める'*'統合ゲート'*'Epic worktree に生成物を配置'*)
@@ -8675,16 +8736,20 @@ echo "== H6-b: runの後片付けで当該Epic分のレーンworktreeを削除�
 # --- skills/run/SKILL.md: 「isolation worktree はハーネスが自動整理する」という誤った
 #     断定が消えている（#93以前の原文そのまま） ---
 if grep -Fq -- 'isolation worktree（`.claude/worktrees/agent-*`）はハーネスが自動整理する' \
-  "${REPO_ROOT}/skills/run/SKILL.md"; then
+  "$RUN_SKILL_FLAT"; then
   fail "SKILL.md: 『isolation worktreeはハーネスが自動整理する』という誤った記述が消えている（#95）" \
-    "$(grep -n -- 'ハーネスが自動整理する' "${REPO_ROOT}/skills/run/SKILL.md")"
+    "$(grep -n -- 'ハーネスが自動整理する' "$RUN_SKILL_FLAT")"
 else
   pass "SKILL.md: 『isolation worktreeはハーネスが自動整理する』という誤った記述が消えている（#95）"
 fi
 
 # --- skills/run/SKILL.md: 「worktree クリーンアップ」節を切り出す ---
-H6_RS_CLEANUP="$(awk '/^## worktree クリーンアップ/{f=1} /^## 自律動作ポリシー（YOLOモード）/{f=0} f' \
-  "${REPO_ROOT}/skills/run/SKILL.md")"
+# 平坦化ビューでは、各参照ファイルの `# ...（run スキル参照資料）` 見出しが節の切れ目になる。
+# 「## worktree クリーンアップ」の終端見出しは参照ファイル側には現れないため、参照ファイルの
+# 先頭見出し（`# ...（run スキル参照資料）`）も終端に含める（コードブロック内の `# コメント`
+# を終端と誤認しないよう、見出し文言まで含めて照合する）。
+H6_RS_CLEANUP="$(awk '/^## worktree クリーンアップ/{f=1} /^## 自律動作ポリシー（YOLOモード）/{f=0} /^# .*run スキル参照資料/{f=0} f' \
+  "$RUN_SKILL_FLAT")"
 
 if [ -z "$H6_RS_CLEANUP" ]; then
   fail "SKILL.md: 『worktree クリーンアップ』節が見つかる（前提）（#95）" "節が空でした"
@@ -8876,7 +8941,7 @@ case "$H3_GEN_CD_SECTION" in
 esac
 
 # --- skills/run/SKILL.md: Step 3 の雛形に同趣旨の1行がある ---
-H3_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "${REPO_ROOT}/skills/run/SKILL.md")"
+H3_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$RUN_SKILL_FLAT")"
 
 case "$H3_RS_STEP3" in
   *'サンドボックスに渡すコマンドの中で `cd`'*'workdir'*)
@@ -8977,15 +9042,15 @@ esac
 
 # --- skills/run/SKILL.md: 「SKIP されたテストがあれば件数と内容を報告に含めること」という
 #     数え方の指定が無い表現が消えている（grepで0件。H5の受け入れ条件） ---
-if grep -Fq -- 'SKIP されたテストがあれば件数と内容を報告に含めること' "${REPO_ROOT}/skills/run/SKILL.md"; then
+if grep -Fq -- 'SKIP されたテストがあれば件数と内容を報告に含めること' "$RUN_SKILL_FLAT"; then
   fail "SKILL.md: 数え方の指定が無い旧表現『SKIP されたテストがあれば件数と内容を報告に含めること』が消えている（#97）" \
-    "$(grep -n -- 'SKIP されたテストがあれば件数と内容を報告に含めること' "${REPO_ROOT}/skills/run/SKILL.md")"
+    "$(grep -n -- 'SKIP されたテストがあれば件数と内容を報告に含めること' "$RUN_SKILL_FLAT")"
 else
   pass "SKILL.md: 数え方の指定が無い旧表現『SKIP されたテストがあれば件数と内容を報告に含めること』が消えている（#97）"
 fi
 
 # --- skills/run/SKILL.md: Step 3 雛形がcount-skips.shを使う手順になっている ---
-H97_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "${REPO_ROOT}/skills/run/SKILL.md")"
+H97_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$RUN_SKILL_FLAT")"
 
 case "$H97_RS_STEP3" in
   *'tail'*'count-skips.sh'*'tee'*)
@@ -9005,7 +9070,7 @@ esac
 
 # --- skills/run/SKILL.md: SKIP_PATTERN（Epic本文の「## SKIPパターン」節）の抽出手順がある ---
 H97_RS_SKIPPATTERN="$(awk '/^## 起動時の確認/{f=1} /^## 2エージェント体制/{f=0} f' \
-  "${REPO_ROOT}/skills/run/SKILL.md")"
+  "$RUN_SKILL_FLAT")"
 
 case "$H97_RS_SKIPPATTERN" in
   *'## SKIPパターン'*'DEV_WORKFLOW_SKIP_PATTERN'*)
@@ -9017,7 +9082,7 @@ esac
 
 # --- skills/run/SKILL.md: Step 6（統合ゲート）がrun自身でcount-skips.shを実行し、
 #     0件でも必ず表示し、レーンの自己申告と食い違った場合は統合ゲートの値を採用する ---
-H97_RS_STEP6="$(awk '/^### Step 6:/{f=1} /^### Step 7:/{f=0} f' "${REPO_ROOT}/skills/run/SKILL.md")"
+H97_RS_STEP6="$(awk '/^### Step 6:/{f=1} /^### Step 7:/{f=0} f' "$RUN_SKILL_FLAT")"
 
 case "$H97_RS_STEP6" in
   *'tee'*'count-skips.sh'*)
@@ -9045,7 +9110,7 @@ esac
 
 # --- skills/run/SKILL.md: 「SKIP を通過扱いにしない」節がskips=unknownの扱いを明記している ---
 H97_RS_SKIPSECTION="$(awk '/^#### SKIP を通過扱いにしない/{f=1} /^### Step 7:/{f=0} f' \
-  "${REPO_ROOT}/skills/run/SKILL.md")"
+  "$RUN_SKILL_FLAT")"
 
 case "$H97_RS_SKIPSECTION" in
   *'skips=unknown'*'「0件」として扱ってはならない'*)
@@ -9219,7 +9284,7 @@ done
 #     ## SKIPパターン節を追加する」ことが明記されている（都度Epic issueにコメントするだけでは
 #     同じrunが来るたびにskips=unknownを繰り返すだけの状態が固定化するため） ---
 RUN_SKILL_UNKNOWN="$(awk '/^#### SKIP を通過扱いにしない/{f=1} /^### Step 7: Epicブランチへ取り込んで次のウェーブへ/{f=0} f' \
-  "${REPO_ROOT}/skills/run/SKILL.md")"
+  "$RUN_SKILL_FLAT")"
 
 case "$RUN_SKILL_UNKNOWN" in
   *'恒久対処'*'次の run までに'*'## SKIPパターン'*)
@@ -9816,7 +9881,7 @@ echo "== README.mdへのハーネス非注入原則・規約パス・YOLO許可�
 
 DOC130_README="${REPO_ROOT}/README.md"
 DOC130_INSTRUCTIONS="${REPO_ROOT}/core/instructions.md"
-DOC130_SKILL="${REPO_ROOT}/skills/run/SKILL.md"
+DOC130_SKILL="$RUN_SKILL_FLAT"
 
 # --- 1. 前提条件・Docker sandboxのセットアップに3択が反映されている ---
 
@@ -10977,7 +11042,7 @@ echo "== Task #112: run に『共有ディレクトリ』節の抽出とStep 3�
 # --- skills/run/SKILL.md: Docker sandbox の準備節に「共有ディレクトリ」節の抽出手順と
 #     EPIC_WT_ABS の取得がある ---
 H112_RS_SHAREDIR_EXTRACT="$(awk '/^#### 共有ディレクトリ（Epic 本文の `## 共有ディレクトリ` 節/{f=1} /^#### SKIP件数の判定パターン/{f=0} f' \
-  "${REPO_ROOT}/skills/run/SKILL.md")"
+  "$RUN_SKILL_FLAT")"
 
 if [ -z "$H112_RS_SHAREDIR_EXTRACT" ]; then
   fail "SKILL.md: 『#### 共有ディレクトリ』節が見つかる（#112）" "節が空でした"
@@ -11002,7 +11067,7 @@ case "$H112_RS_SHAREDIR_EXTRACT" in
 esac
 
 # --- skills/run/SKILL.md: Step 3 雛形が SHARED_DIRS の空／非空を分岐して明示している ---
-H112_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "${REPO_ROOT}/skills/run/SKILL.md")"
+H112_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$RUN_SKILL_FLAT")"
 
 case "$H112_RS_STEP3" in
   *'$SHARED_DIRS'*'空でない'*'share-prepared-dirs.sh'*'--source'*'--spec'*)
@@ -11458,7 +11523,7 @@ echo "== SessionStart フック / run スキル両系統への衛生プリフラ
 
 HYG129_HOOKS_JSON="${REPO_ROOT}/hooks/hooks.json"
 HYG129_HOOKS_CODEX_JSON="${REPO_ROOT}/hooks/hooks.codex.json"
-HYG129_RUN_SKILL="${REPO_ROOT}/skills/run/SKILL.md"
+HYG129_RUN_SKILL="$RUN_SKILL_FLAT"
 HYG129_RUN_SKILL_CODEX="${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md"
 HYG129_GOAL_SKILL="${REPO_ROOT}/skills/goal/SKILL.md"
 
