@@ -7436,6 +7436,134 @@ else
     "見つかりません: ${DOC72_CODEX_AGENT_GENERATOR}"
 fi
 
+echo "== generator に LSP ツールを与え、探索のターン数を減らす（#154） =="
+
+# Epic #143（#154）: generatorのfrontmatterにLSPのMCPツールを追加し、正本
+# （core/roles/generator.md）に「Grepの総当たりより先にLSPを引く」使用方針・
+# 「LSP（ホスト）とsandbox-exec.sh（コンテナ）の役割分担」・「未導入なら従来どおり」を明記する。
+# Codex側はLSPの同等機能が確認できていないため、宣言せず「非対応」の事実を残す。
+
+DOC154_GENERATOR_ROLE="${REPO_ROOT}/core/roles/generator.md"
+DOC154_OVERLAY_GENERATOR="${REPO_ROOT}/adapters/claude/overlays/generator.md"
+DOC154_CODEX_OVERLAY_GENERATOR="${REPO_ROOT}/adapters/codex/overlays/generator.toml"
+DOC154_AGENT_GENERATOR="${REPO_ROOT}/agents/generator.md"
+DOC154_CODEX_AGENT_GENERATOR="${REPO_ROOT}/codex-agents/generator.toml"
+DOC154_README="${REPO_ROOT}/README.md"
+
+# --- adapters/claude/overlays/generator.md: frontmatter の tools: に LSP ツールが含まれる ---
+
+if grep -Fq 'mcp__typescript-lsp__' "$DOC154_OVERLAY_GENERATOR" \
+  && grep -Fq 'mcp__lua-lsp__' "$DOC154_OVERLAY_GENERATOR" \
+  && grep -Fq 'mcp__gopls-lsp__' "$DOC154_OVERLAY_GENERATOR" \
+  && grep -Fq 'mcp__rust-analyzer-lsp__' "$DOC154_OVERLAY_GENERATOR"; then
+  pass "adapters/claude/overlays/generator.md: tools: に LSP ツール（typescript/lua/gopls/rust-analyzer）が含まれる（#154）"
+else
+  fail "adapters/claude/overlays/generator.md: tools: に LSP ツール（typescript/lua/gopls/rust-analyzer）が含まれる（#154）" \
+    "見つかりません: ${DOC154_OVERLAY_GENERATOR}"
+fi
+
+# --- 生成物（agents/generator.md）にも反映されている ---
+
+if [ -f "$DOC154_AGENT_GENERATOR" ] && grep -Fq 'mcp__typescript-lsp__' "$DOC154_AGENT_GENERATOR"; then
+  pass "agents/generator.md: 正本（overlay）の LSP ツール追加が反映されている（#154）"
+else
+  fail "agents/generator.md: 正本（overlay）の LSP ツール追加が反映されている（#154）" \
+    "見つかりません: ${DOC154_AGENT_GENERATOR}"
+fi
+
+# --- core/roles/generator.md: 「Grepの総当たりより先にLSPを引く」使用方針が書かれている ---
+
+if grep -Fq 'LSP' "$DOC154_GENERATOR_ROLE" \
+  && grep -Fq 'Grep の総当たり' "$DOC154_GENERATOR_ROLE" \
+  && grep -Fq '先に' "$DOC154_GENERATOR_ROLE"; then
+  pass "core/roles/generator.md: 「Grepの総当たりより先にLSPを引く」使用方針が書かれている（#154）"
+else
+  fail "core/roles/generator.md: 「Grepの総当たりより先にLSPを引く」使用方針が書かれている（#154）"
+fi
+
+# --- core/roles/generator.md: 「探索はLSP（ホスト）/ビルド・テストはsandbox-exec.sh（コンテナ）」の役割分担 ---
+
+if grep -Fq 'ホスト側' "$DOC154_GENERATOR_ROLE" \
+  && grep -Eq 'sandbox-exec\.sh|Docker sandbox' "$DOC154_GENERATOR_ROLE"; then
+  pass "core/roles/generator.md: LSP（ホスト）とビルド・テスト（コンテナ）の役割分担が明記されている（#154）"
+else
+  fail "core/roles/generator.md: LSP（ホスト）とビルド・テスト（コンテナ）の役割分担が明記されている（#154）"
+fi
+
+# --- core/roles/generator.md: LSPが使えない環境でも従来どおり動作する旨が明記されている ---
+
+DOC154_LSP_SECTION="$(awk '/定義・参照の追跡は、Grep の総当たりより先に LSP を引く/,/^### [0-9]/' "$DOC154_GENERATOR_ROLE")"
+
+if printf '%s' "$DOC154_LSP_SECTION" | grep -Fq '未導入なら従来どおり動く' \
+  && printf '%s' "$DOC154_LSP_SECTION" | grep -Fq 'Grep' \
+  && printf '%s' "$DOC154_LSP_SECTION" | grep -Fq '任意依存'; then
+  pass "core/roles/generator.md: LSPが使えない環境でも従来どおり動作する旨が明記されている（#154）"
+else
+  fail "core/roles/generator.md: LSPが使えない環境でも従来どおり動作する旨が明記されている（#154）" \
+    "section=[${DOC154_LSP_SECTION}]"
+fi
+
+# --- 生成物（agents/generator.md）にもLSP探索手順の記述が反映されている ---
+
+if [ -f "$DOC154_AGENT_GENERATOR" ] && grep -Fq 'Grep の総当たりより先に LSP を引く' "$DOC154_AGENT_GENERATOR"; then
+  pass "agents/generator.md: 正本のLSP探索手順の記述が反映されている（#154）"
+else
+  fail "agents/generator.md: 正本のLSP探索手順の記述が反映されている（#154）" \
+    "見つかりません: ${DOC154_AGENT_GENERATOR}"
+fi
+
+# --- Codex側: 同等機能が無い事実が明記されている（推測で書かず、非対応と明記） ---
+
+if grep -Fq 'Codex 側には同等の機能が無い' "$DOC154_CODEX_OVERLAY_GENERATOR"; then
+  pass "adapters/codex/overlays/generator.toml: LSPのCodex側非対応の事実が明記されている（#154）"
+else
+  fail "adapters/codex/overlays/generator.toml: LSPのCodex側非対応の事実が明記されている（#154）"
+fi
+
+if [ -f "$DOC154_CODEX_AGENT_GENERATOR" ] && grep -Fq 'Codex 側には同等の機能が無い' "$DOC154_CODEX_AGENT_GENERATOR"; then
+  pass "codex-agents/generator.toml: 正本のCodex非対応の記述が反映されている（#154）"
+else
+  fail "codex-agents/generator.toml: 正本のCodex非対応の記述が反映されている（#154）" \
+    "見つかりません: ${DOC154_CODEX_AGENT_GENERATOR}"
+fi
+
+# --- Codex側にはLSPのmcp_serversを宣言していない（推測で結線しない） ---
+
+if grep -Eq '^\[mcp_servers\.(typescript|lua|gopls|rust-analyzer)' "$DOC154_CODEX_OVERLAY_GENERATOR"; then
+  fail "adapters/codex/overlays/generator.toml: 未確認のLSP mcp_serversを宣言していない（#154）" \
+    "$(grep -E '^\[mcp_servers\.' "$DOC154_CODEX_OVERLAY_GENERATOR")"
+else
+  pass "adapters/codex/overlays/generator.toml: 未確認のLSP mcp_serversを宣言していない（#154）"
+fi
+
+# --- README.md: 利用者側の有効化方法（enabledPlugins）が「任意依存の外部ツール」節に書かれている ---
+
+if grep -Fq 'enabledPlugins' "$DOC154_README" && grep -Fq 'treflebonbon/dotfiles' "$DOC154_README"; then
+  pass "README.md: LSPの有効化方法（enabledPlugins・確認元）が明記されている（#154）"
+else
+  fail "README.md: LSPの有効化方法（enabledPlugins・確認元）が明記されている（#154）"
+fi
+
+# --- README.md: 「推奨settings.json」節にもenabledPluginsの例が書かれている ---
+
+DOC154_README_SETTINGS_SECTION="$(awk '/### 推奨 settings.json/,/^### パーミッション設定/' "$DOC154_README")"
+
+if printf '%s' "$DOC154_README_SETTINGS_SECTION" | grep -Fq 'enabledPlugins'; then
+  pass "README.md: 「推奨settings.json」節にenabledPluginsの例がある（#154）"
+else
+  fail "README.md: 「推奨settings.json」節にenabledPluginsの例がある（#154）"
+fi
+
+# --- build.sh --check が通る（生成物の直接編集が無いことの検査） ---
+
+DOC154_CLAUDE_BUILD_CHECK="$(bash "${REPO_ROOT}/adapters/claude/build.sh" --check 2>&1)"
+DOC154_CLAUDE_BUILD_CHECK_EXIT=$?
+assert_exit_code "adapters/claude/build.sh --check が通る（#154）" 0 "$DOC154_CLAUDE_BUILD_CHECK_EXIT"
+
+DOC154_CODEX_BUILD_CHECK="$(bash "${REPO_ROOT}/adapters/codex/build.sh" --check 2>&1)"
+DOC154_CODEX_BUILD_CHECK_EXIT=$?
+assert_exit_code "adapters/codex/build.sh --check が通る（#154）" 0 "$DOC154_CODEX_BUILD_CHECK_EXIT"
+
 echo "== Epic一括レビューに「変更50ファイル超」しきい値の3分岐を入れる（#74） =="
 
 # Epic #66 Phase 4（#74）: R1起動前の変更ファイル数しきい値を、既存の「変更50ファイル超」に
