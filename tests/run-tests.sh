@@ -9440,14 +9440,16 @@ case "$H97_GEN_SKIP" in
       "$H97_GEN_SKIP" ;;
 esac
 
-# --- core/roles/generator.md: 完了報告テンプレートがcount-skips.shの出力を貼る形になっている ---
+# --- core/roles/generator.md: 完了報告テンプレートのSKIP件数欄がcount-skips.shの出力キー（skips=）
+#     と同じ命名になっている（Task #156で「count-skips.shの出力をそのまま貼る」形から
+#     「証跡ファイルへの参照+1行」形へ変わったため、キー名の一致で検証する） ---
 H97_GEN_REPORT="$(awk '/^## 完了報告/{f=1} f' "${REPO_ROOT}/core/roles/generator.md")"
 
 case "$H97_GEN_REPORT" in
-  *'count-skips.sh'*'skips=[件数 または unknown]'*)
-    pass "core/roles/generator.md: 完了報告テンプレートのSKIP件数欄がcount-skips.shの出力を貼る形になっている（#97）" ;;
+  *'skips=[件数|unknown]'*)
+    pass "core/roles/generator.md: 完了報告テンプレートのSKIP件数欄がcount-skips.shの出力キー（skips=）と同じ命名になっている（#97/#156）" ;;
   *)
-    fail "core/roles/generator.md: 完了報告テンプレートのSKIP件数欄がcount-skips.shの出力を貼る形になっている（#97）" \
+    fail "core/roles/generator.md: 完了報告テンプレートのSKIP件数欄がcount-skips.shの出力キー（skips=）と同じ命名になっている（#97/#156）" \
       "$H97_GEN_REPORT" ;;
 esac
 
@@ -12883,6 +12885,209 @@ if [ "$H153_BUILD_CODEX_EXIT" -eq 0 ]; then
   pass "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#153）"
 else
   fail "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#153）" "$H153_BUILD_CODEX_CHECK"
+fi
+
+# ---------------------------------------------------------------------------
+# Task #156: 完了報告を「証跡はファイル、報告は1行」に変えて出力トークンを削る
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== 完了報告の証跡ファイル化・1行化（#156） =="
+
+FORMAT_LANE_RESULT_SCRIPT="${REPO_ROOT}/scripts/format-lane-result.sh"
+
+if [ -x "$FORMAT_LANE_RESULT_SCRIPT" ]; then
+  pass "scripts/format-lane-result.sh: 実行可能ファイルとして存在する（#156）"
+else
+  fail "scripts/format-lane-result.sh: 実行可能ファイルとして存在する（#156）" "見つからない、または実行権限が無い"
+fi
+
+# --- ケース1: 証跡ファイル1件（成功）から1レーン分の断片を組み立てる ---
+H156_EV_A1="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
+cat > "$H156_EV_A1" <<'FIXTURE'
+== dummy test output ==
+ok  	example.com/pkg	0.032s
+---
+task=5
+lane=A
+status=success
+start_epoch=1000
+end_epoch=1480
+start_hm=12:03
+end_hm=12:11
+duration_sec=480
+skips=0
+runner=go
+pattern=none
+FIXTURE
+
+H156_OUT_1="$(bash "$FORMAT_LANE_RESULT_SCRIPT" --lane A --file "$H156_EV_A1")"
+H156_EXIT_1=$?
+assert_exit_code "format-lane-result.sh: 単一の成功タスクは exit 0（#156）" 0 "$H156_EXIT_1"
+assert_eq "format-lane-result.sh: 単一の成功タスクの表示（#156）" "A=#5(12:03-12:11 8m00s)" "$H156_OUT_1"
+
+# --- ケース2: 同一レーンで複数タスク（1件失敗）を連続処理した場合、時刻区間は通しで、
+#     duration_secは合算し、失敗タスクには (失敗) を付記する ---
+H156_EV_A2="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
+cat > "$H156_EV_A2" <<'FIXTURE'
+== dummy test output ==
+---
+task=11
+lane=A
+status=fail
+start_epoch=1481
+end_epoch=1721
+start_hm=12:11
+end_hm=12:16
+duration_sec=240
+skips=unknown
+runner=unknown
+pattern=none
+FIXTURE
+
+H156_OUT_2="$(bash "$FORMAT_LANE_RESULT_SCRIPT" --lane A --file "$H156_EV_A1" --file "$H156_EV_A2")"
+assert_eq "format-lane-result.sh: 連続処理（成功+失敗）の表示（#156）" \
+  "A=#5,#11(失敗)(12:03-12:16 12m00s)" "$H156_OUT_2"
+
+# --- ケース3: start_hm/end_hm を持たない証跡ファイルは時刻区間を省略する ---
+H156_EV_NOHM="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
+cat > "$H156_EV_NOHM" <<'FIXTURE'
+task=20
+lane=C
+status=success
+duration_sec=60
+FIXTURE
+
+assert_eq "format-lane-result.sh: start_hm/end_hm欠落時は時刻区間を省略する（#156）" \
+  "C=#20(1m00s)" "$(bash "$FORMAT_LANE_RESULT_SCRIPT" --lane C --file "$H156_EV_NOHM")"
+
+# --- ケース4: 証跡ファイルが存在しない場合は exit 2 で fail loud（黙って進めない） ---
+bash "$FORMAT_LANE_RESULT_SCRIPT" --lane B --file "${TMPDIR:-/tmp}/dw-test-nonexistent-evidence-156" \
+  >/dev/null 2>/dev/null
+H156_MISSING_EXIT=$?
+assert_exit_code "format-lane-result.sh: 証跡ファイルが無い場合は exit 2（#156）" 2 "$H156_MISSING_EXIT"
+
+# --- ケース5: 必須フィールド（task=/status=/duration_sec=）欠落は exit 2 ---
+H156_EV_BROKEN="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
+cat > "$H156_EV_BROKEN" <<'FIXTURE'
+lane=A
+status=success
+FIXTURE
+bash "$FORMAT_LANE_RESULT_SCRIPT" --lane A --file "$H156_EV_BROKEN" >/dev/null 2>/dev/null
+assert_exit_code "format-lane-result.sh: 必須フィールド欠落は exit 2（#156）" 2 "$?"
+
+# --- ケース6: --lane / --file が無い場合は exit 2（引数エラー） ---
+bash "$FORMAT_LANE_RESULT_SCRIPT" >/dev/null 2>/dev/null
+assert_exit_code "format-lane-result.sh: --lane 省略は exit 2（#156）" 2 "$?"
+bash "$FORMAT_LANE_RESULT_SCRIPT" --lane A >/dev/null 2>/dev/null
+assert_exit_code "format-lane-result.sh: --file 省略は exit 2（#156）" 2 "$?"
+
+# --- core/roles/generator.md: 完了報告がタスク1件につき1行（5項目）になっている ---
+H156_GEN_ROLE="${REPO_ROOT}/core/roles/generator.md"
+H156_GEN_REPORT="$(awk '/^## 完了報告/{f=1} f' "$H156_GEN_ROLE")"
+case "$H156_GEN_REPORT" in
+  *'証跡はファイルに書き出し'*'パスと1行の判定だけを載せる'*)
+    pass "core/roles/generator.md: 完了報告が『証跡はファイル・報告は1行』の方針になっている（#156）" ;;
+  *)
+    fail "core/roles/generator.md: 完了報告が『証跡はファイル・報告は1行』の方針になっている（#156）" \
+      "$H156_GEN_REPORT" ;;
+esac
+
+case "$H156_GEN_REPORT" in
+  *'タスク番号'*'成功・見送り'*'SKIP件数'*'所要秒数'*'証跡ファイルのパス'*)
+    pass "core/roles/generator.md: 報告1行の必須5項目（タスク番号/成功・見送り/SKIP件数/所要秒数/証跡ファイルのパス）が明記されている（#156）" ;;
+  *)
+    fail "core/roles/generator.md: 報告1行の必須5項目が明記されている（#156）" "$H156_GEN_REPORT" ;;
+esac
+
+if grep -Fq 'dw-lane-evidence.XXXXXX' "$H156_GEN_ROLE"; then
+  pass "core/roles/generator.md: 証跡ファイルの命名規則が #145 の dw-lane-* 系列に揃っている（#156）"
+else
+  fail "core/roles/generator.md: 証跡ファイルの命名規則が #145 の dw-lane-* 系列に揃っている（#156）" \
+    "dw-lane-evidence.XXXXXX が見つからない"
+fi
+
+if grep -Fq '${TMPDIR:-/tmp}' "$H156_GEN_ROLE"; then
+  pass "core/roles/generator.md: 証跡ファイルが \${TMPDIR:-/tmp}（リポジトリ外）に置かれる（#156）"
+else
+  fail "core/roles/generator.md: 証跡ファイルが \${TMPDIR:-/tmp}（リポジトリ外）に置かれる（#156）" "見つからない"
+fi
+
+# --- 完了報告の節から「実出力を貼ること」という旧来の要求が消えている ---
+H156_GEN_REPORT_OLD_STRICT="$(printf '%s\n' "$H156_GEN_REPORT" | grep -c '実出力を貼る\|実出力をそのまま報告に貼る' || true)"
+assert_eq "core/roles/generator.md: 完了報告節に『実出力を貼る』という旧来の要求が残っていない（#156）" \
+  "0" "$H156_GEN_REPORT_OLD_STRICT"
+
+# --- skills/run/SKILL.md (+ references) Step 3: 1行報告・証跡ファイル・5項目の要求がある ---
+H156_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$RUN_SKILL_FLAT")"
+case "$H156_RS_STEP3" in
+  *'証跡はファイルに書き出し'*'パスと1行の判定だけを載せる'*)
+    pass "SKILL.md Step 3: レーンプロンプトが『証跡はファイル・報告は1行』の方針を要求している（#156）" ;;
+  *)
+    fail "SKILL.md Step 3: レーンプロンプトが『証跡はファイル・報告は1行』の方針を要求している（#156）" \
+      "$H156_RS_STEP3" ;;
+esac
+
+case "$H156_RS_STEP3" in
+  *'タスク番号'*'成功・見送り'*'SKIP件数'*'所要秒数'*'証跡ファイルのパス'*)
+    pass "SKILL.md Step 3: 報告1行の必須5項目が明記されている（#156）" ;;
+  *)
+    fail "SKILL.md Step 3: 報告1行の必須5項目が明記されている（#156）" "$H156_RS_STEP3" ;;
+esac
+
+if grep -Fq 'dw-lane-evidence.XXXXXX' "${REPO_ROOT}/skills/run/SKILL.md"; then
+  pass "skills/run/SKILL.md: 証跡ファイルの命名規則が #145 の dw-lane-* 系列に揃っている（#156）"
+else
+  fail "skills/run/SKILL.md: 証跡ファイルの命名規則が #145 の dw-lane-* 系列に揃っている（#156）" "見つからない"
+fi
+
+# --- skills/run/references/progress-display.md: レーン結果の組み立てをスクリプトへ切り出した ---
+H156_PROGRESS_DISPLAY="${REPO_ROOT}/skills/run/references/progress-display.md"
+if grep -Fq 'format-lane-result.sh' "$H156_PROGRESS_DISPLAY"; then
+  pass "progress-display.md: レーン結果の組み立てを scripts/format-lane-result.sh へ切り出している（#156）"
+else
+  fail "progress-display.md: レーン結果の組み立てを scripts/format-lane-result.sh へ切り出している（#156）" "見つからない"
+fi
+
+# --- skills-codex/dev-workflow-run/SKILL.md: Codex 版も同じ方針に揃っている ---
+H156_CODEX_SKILL="${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md"
+H156_CODEX_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$H156_CODEX_SKILL")"
+case "$H156_CODEX_STEP3" in
+  *'証跡はファイルに書き出し'*'パスと1行の判定だけを載せる'*)
+    pass "skills-codex SKILL.md Step 3: 『証跡はファイル・報告は1行』の方針を要求している（#156）" ;;
+  *)
+    fail "skills-codex SKILL.md Step 3: 『証跡はファイル・報告は1行』の方針を要求している（#156）" \
+      "$H156_CODEX_STEP3" ;;
+esac
+
+case "$H156_CODEX_STEP3" in
+  *'タスク番号'*'成功・見送り'*'SKIP件数'*'所要秒数'*'証跡ファイルのパス'*)
+    pass "skills-codex SKILL.md Step 3: 報告1行の必須5項目が明記されている（#156）" ;;
+  *)
+    fail "skills-codex SKILL.md Step 3: 報告1行の必須5項目が明記されている（#156）" "$H156_CODEX_STEP3" ;;
+esac
+
+if grep -Fq 'dw-lane-evidence.XXXXXX' "$H156_CODEX_SKILL"; then
+  pass "skills-codex SKILL.md: 証跡ファイルの命名規則が #145 の dw-lane-* 系列に揃っている（#156）"
+else
+  fail "skills-codex SKILL.md: 証跡ファイルの命名規則が #145 の dw-lane-* 系列に揃っている（#156）" "見つからない"
+fi
+
+# --- 生成物（agents/*.md・codex-agents/*.toml）が core/ と一致している（build.sh実行済み） ---
+H156_BUILD_CLAUDE_CHECK="$(bash "${REPO_ROOT}/adapters/claude/build.sh" --check 2>&1)"
+H156_BUILD_CLAUDE_EXIT=$?
+if [ "$H156_BUILD_CLAUDE_EXIT" -eq 0 ]; then
+  pass "adapters/claude/build.sh --check: agents/ が core/ と一致している（#156）"
+else
+  fail "adapters/claude/build.sh --check: agents/ が core/ と一致している（#156）" "$H156_BUILD_CLAUDE_CHECK"
+fi
+
+H156_BUILD_CODEX_CHECK="$(bash "${REPO_ROOT}/adapters/codex/build.sh" --check 2>&1)"
+H156_BUILD_CODEX_EXIT=$?
+if [ "$H156_BUILD_CODEX_EXIT" -eq 0 ]; then
+  pass "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#156）"
+else
+  fail "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#156）" "$H156_BUILD_CODEX_CHECK"
 fi
 
 # ---------------------------------------------------------------------------
