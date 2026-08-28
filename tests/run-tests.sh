@@ -39,7 +39,31 @@ for _ref in "${REPO_ROOT}"/core/references/*.md; do
   cat "$_ref" >> "$CORE_INSTRUCTIONS_FLAT"
 done
 unset _ref
-trap 'rm -f "$RUN_SKILL_FLAT" "$CORE_INSTRUCTIONS_FLAT"' EXIT
+
+# core/roles/evaluator.md も同じ構成（本体 + core/references/review-checklist-*.md 等）を
+# 採る（Task #151）。evaluator 用の平坦化ビューを2つ作る:
+# - EVALUATOR_ROLE_FLAT: 正本（core/roles/evaluator.md）+ core/references/*.md
+# - AGENT_EVALUATOR_FLAT: 生成物（agents/evaluator.md）+ core/references/*.md
+#   （生成物は <!-- include: --> で core/roles/evaluator.md をそのまま束ねるだけで
+#   core/references/*.md は束ねない＝実行時に evaluator が Read ツールで読む設計のため、
+#   生成物単体を見るテストは参照ファイルへ移った記述を取りこぼす）
+EVALUATOR_ROLE_FLAT="$(mktemp "${TMPDIR:-/tmp}/dw-evaluator-role-flat.XXXXXX")"
+cat "${REPO_ROOT}/core/roles/evaluator.md" > "$EVALUATOR_ROLE_FLAT"
+AGENT_EVALUATOR_FLAT="$(mktemp "${TMPDIR:-/tmp}/dw-agent-evaluator-flat.XXXXXX")"
+cat "${REPO_ROOT}/agents/evaluator.md" > "$AGENT_EVALUATOR_FLAT"
+CODEX_AGENT_EVALUATOR_FLAT="$(mktemp "${TMPDIR:-/tmp}/dw-codex-agent-evaluator-flat.XXXXXX")"
+cat "${REPO_ROOT}/codex-agents/evaluator.toml" > "$CODEX_AGENT_EVALUATOR_FLAT"
+for _ref in "${REPO_ROOT}"/core/references/*.md; do
+  [ -f "$_ref" ] || continue
+  printf '\n' >> "$EVALUATOR_ROLE_FLAT"
+  cat "$_ref" >> "$EVALUATOR_ROLE_FLAT"
+  printf '\n' >> "$AGENT_EVALUATOR_FLAT"
+  cat "$_ref" >> "$AGENT_EVALUATOR_FLAT"
+  printf '\n' >> "$CODEX_AGENT_EVALUATOR_FLAT"
+  cat "$_ref" >> "$CODEX_AGENT_EVALUATOR_FLAT"
+done
+unset _ref
+trap 'rm -f "$RUN_SKILL_FLAT" "$CORE_INSTRUCTIONS_FLAT" "$EVALUATOR_ROLE_FLAT" "$AGENT_EVALUATOR_FLAT" "$CODEX_AGENT_EVALUATOR_FLAT"' EXIT
 
 PASS=0
 FAIL=0
@@ -7099,14 +7123,15 @@ echo "== 「過剰実装・過剰設計」をレビュー観点に追加（#70�
 # 検出観点を core/roles/evaluator.md と core/instructions.md に規定する。
 # core/instructions.md は agents/*.md と codex-agents/*.toml の全ファイルに反映される。
 
-DOC70_EVALUATOR_ROLE="${REPO_ROOT}/core/roles/evaluator.md"
 DOC70_INSTRUCTIONS="${REPO_ROOT}/core/instructions.md"
 DOC70_AGENT_EVALUATOR="${REPO_ROOT}/agents/evaluator.md"
 DOC70_CODEX_AGENT_EVALUATOR="${REPO_ROOT}/codex-agents/evaluator.toml"
 
 # --- core/roles/evaluator.md のレビューチェックリストに「過剰実装・過剰設計」の小節がある ---
+# （Task #151で core/references/review-checklist-over-engineering.md へ退避されたため、
+#   平坦化ビュー EVALUATOR_ROLE_FLAT を見る）
 
-if grep -Fq '#### 過剰実装・過剰設計' "$DOC70_EVALUATOR_ROLE"; then
+if grep -Fq '#### 過剰実装・過剰設計' "$EVALUATOR_ROLE_FLAT"; then
   pass "core/roles/evaluator.md: レビューチェックリストに「過剰実装・過剰設計」の小節がある（#70）"
 else
   fail "core/roles/evaluator.md: レビューチェックリストに「過剰実装・過剰設計」の小節がある（#70）"
@@ -7114,7 +7139,7 @@ fi
 
 # --- チェックリストに「削ってはいけないものを削っていないか」の項目が含まれている ---
 
-if grep -Fq 'テスト・回帰確認・検証・セキュリティ・データ損失の扱いを「削減」していないか' "$DOC70_EVALUATOR_ROLE"; then
+if grep -Fq 'テスト・回帰確認・検証・セキュリティ・データ損失の扱いを「削減」していないか' "$EVALUATOR_ROLE_FLAT"; then
   pass "core/roles/evaluator.md: 「削ってはいけないものを削っていないか」の項目が含まれている（#70）"
 else
   fail "core/roles/evaluator.md: 「削ってはいけないものを削っていないか」の項目が含まれている（#70）"
@@ -7132,9 +7157,10 @@ else
 fi
 
 # --- 生成物（agents/evaluator.md・codex-agents/evaluator.toml）に反映されている ---
+# （agents/evaluator.md は core/references/*.md を束ねないため AGENT_EVALUATOR_FLAT を見る）
 
 if [ -f "$DOC70_AGENT_EVALUATOR" ] \
-  && grep -Fq '#### 過剰実装・過剰設計' "$DOC70_AGENT_EVALUATOR" \
+  && grep -Fq '#### 過剰実装・過剰設計' "$AGENT_EVALUATOR_FLAT" \
   && grep -Fq '過剰実装・過剰設計の重要度の当てはめ' "$DOC70_AGENT_EVALUATOR"; then
   pass "agents/evaluator.md: 正本の「過剰実装・過剰設計」追記内容が反映されている（#70）"
 else
@@ -7143,7 +7169,7 @@ else
 fi
 
 if [ -f "$DOC70_CODEX_AGENT_EVALUATOR" ] \
-  && grep -Fq '#### 過剰実装・過剰設計' "$DOC70_CODEX_AGENT_EVALUATOR" \
+  && grep -Fq '#### 過剰実装・過剰設計' "$CODEX_AGENT_EVALUATOR_FLAT" \
   && grep -Fq '過剰実装・過剰設計の重要度の当てはめ' "$DOC70_CODEX_AGENT_EVALUATOR"; then
   pass "codex-agents/evaluator.toml: 正本の「過剰実装・過剰設計」追記内容が反映されている（#70）"
 else
@@ -12431,6 +12457,124 @@ if grep -Fq 'wave-review' "$H147_CODEX_AGENT_EVALUATOR" 2>/dev/null; then
 else
   fail "codex-agents/evaluator.toml: core/roles/evaluator.mdのwave-review契約が生成物に反映されている（#147）" \
     "反映されていません"
+fi
+
+# ---------------------------------------------------------------------------
+# Task #151: evaluator プロンプトを観点別チェックリストに分割して薄くする
+#
+# core/roles/evaluator.md の「レビューチェックリスト」を観点ごとに
+# core/references/review-checklist-*.md へ分割する。本体には観点と参照先の対応表・
+# 「自分の観点だけを読む」指示・可読性原則の要点・JSON規約・判定基準を残す。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #151: evaluator チェックリストの観点別分割（薄化） =="
+
+H151_EVALUATOR_ROLE="${REPO_ROOT}/core/roles/evaluator.md"
+H151_REF_CORRECTNESS="${REPO_ROOT}/core/references/review-checklist-correctness.md"
+H151_REF_OVERENG="${REPO_ROOT}/core/references/review-checklist-over-engineering.md"
+H151_REF_SECURITY="${REPO_ROOT}/core/references/review-checklist-security.md"
+
+# --- 4つの参照ファイル（over-engineering / security / correctness、readabilityは本体）が存在する ---
+
+for h151_ref in "$H151_REF_CORRECTNESS" "$H151_REF_OVERENG" "$H151_REF_SECURITY"; do
+  if [ -f "$h151_ref" ]; then
+    pass "$(basename "$h151_ref") が存在する（#151）"
+  else
+    fail "$(basename "$h151_ref") が存在する（#151）" "見つかりません: ${h151_ref}"
+  fi
+done
+
+# --- 退避した記述が1文字も失われていない（各観点のチェックリスト項目が参照ファイルに残っている） ---
+
+if grep -Fq '#### コード品質' "$H151_REF_CORRECTNESS" && grep -Fq '#### アーキテクチャ' "$H151_REF_CORRECTNESS" \
+  && grep -Fq '#### テスト' "$H151_REF_CORRECTNESS" && grep -Fq '#### プロジェクト固有ルール' "$H151_REF_CORRECTNESS"; then
+  pass "review-checklist-correctness.md: コード品質・アーキテクチャ・テスト・プロジェクト固有ルールの小節が残っている（#151）"
+else
+  fail "review-checklist-correctness.md: コード品質・アーキテクチャ・テスト・プロジェクト固有ルールの小節が残っている（#151）" \
+    "$(cat "$H151_REF_CORRECTNESS" 2>&1)"
+fi
+
+if grep -Fq '#### セキュリティ' "$H151_REF_SECURITY" && grep -Fq '#### テスト安全性' "$H151_REF_SECURITY"; then
+  pass "review-checklist-security.md: セキュリティ・テスト安全性の小節が残っている（#151）"
+else
+  fail "review-checklist-security.md: セキュリティ・テスト安全性の小節が残っている（#151）" \
+    "$(cat "$H151_REF_SECURITY" 2>&1)"
+fi
+
+# --- 本体に観点と参照先の対応表があり、「自分の観点だけを読む」指示がある ---
+
+if grep -Fq 'core/references/review-checklist-correctness.md' "$H151_EVALUATOR_ROLE" \
+  && grep -Fq 'core/references/review-checklist-over-engineering.md' "$H151_EVALUATOR_ROLE" \
+  && grep -Fq 'core/references/review-checklist-security.md' "$H151_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: 観点と参照先の対応表がある（#151）"
+else
+  fail "core/roles/evaluator.md: 観点と参照先の対応表がある（#151）"
+fi
+
+if grep -Fq '自分に指定された観点の参照ファイルだけを読む' "$H151_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: 「自分の観点の参照ファイルだけを読む」指示がある（#151）"
+else
+  fail "core/roles/evaluator.md: 「自分の観点の参照ファイルだけを読む」指示がある（#151）"
+fi
+
+# --- 観点未指定時は全参照ファイルを読む旨が明記されている（後方互換） ---
+
+if grep -Fq 'この場合は上記表の**全ファイルを読む**' "$H151_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: 観点未指定時は全参照ファイルを読む旨が明記されている（#151）"
+else
+  fail "core/roles/evaluator.md: 観点未指定時は全参照ファイルを読む旨が明記されている（#151）"
+fi
+
+# --- 可読性原則の要点が本体に残っている ---
+
+if grep -Fq '#### 可読性（最優先・違反は即REQUEST_CHANGES' "$H151_EVALUATOR_ROLE" \
+  && grep -Fq 'どの観点で起動されても、可読性原則違反は見逃してよいわけではない' "$H151_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: 可読性原則の要点が本体に残っている（#151）"
+else
+  fail "core/roles/evaluator.md: 可読性原則の要点が本体に残っている（#151）"
+fi
+
+# --- JSONの規約・判定基準が本体から動いていない（既存 #147 の検査と同じ H147_EVALUATOR_ROLE 相当を再確認） ---
+
+if grep -Fq '"verdict"' "$H151_EVALUATOR_ROLE" && grep -Fq '"reviewed_commit"' "$H151_EVALUATOR_ROLE" \
+  && grep -Fq '## 判定基準' "$H151_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: JSONの規約・判定基準が本体に残っている（#151）"
+else
+  fail "core/roles/evaluator.md: JSONの規約・判定基準が本体に残っている（#151）"
+fi
+
+# --- core/roles/evaluator.md が薄くなっている（目安 180行以下。行数競技にはしない） ---
+
+H151_LINES="$(wc -l < "$H151_EVALUATOR_ROLE" | tr -d ' ')"
+if [ "$H151_LINES" -le 180 ]; then
+  pass "core/roles/evaluator.md: 180行以下に薄くなっている（実測 ${H151_LINES} 行）（#151）"
+else
+  fail "core/roles/evaluator.md: 180行以下に薄くなっている（実測 ${H151_LINES} 行）（#151）" \
+    "目安の180行を超えています"
+fi
+
+# --- 生成物（agents/evaluator.md・codex-agents/evaluator.toml）に対応表・可読性要点が反映されている ---
+
+H151_AGENT_EVALUATOR="${REPO_ROOT}/agents/evaluator.md"
+H151_CODEX_AGENT_EVALUATOR="${REPO_ROOT}/codex-agents/evaluator.toml"
+
+if [ -f "$H151_AGENT_EVALUATOR" ] \
+  && grep -Fq 'core/references/review-checklist-correctness.md' "$H151_AGENT_EVALUATOR" \
+  && grep -Fq '自分に指定された観点の参照ファイルだけを読む' "$H151_AGENT_EVALUATOR"; then
+  pass "agents/evaluator.md: 正本のチェックリスト分割内容が反映されている（#151）"
+else
+  fail "agents/evaluator.md: 正本のチェックリスト分割内容が反映されている（#151）" \
+    "見つかりません: ${H151_AGENT_EVALUATOR}"
+fi
+
+if [ -f "$H151_CODEX_AGENT_EVALUATOR" ] \
+  && grep -Fq 'core/references/review-checklist-correctness.md' "$H151_CODEX_AGENT_EVALUATOR" \
+  && grep -Fq '自分に指定された観点の参照ファイルだけを読む' "$H151_CODEX_AGENT_EVALUATOR"; then
+  pass "codex-agents/evaluator.toml: 正本のチェックリスト分割内容が反映されている（#151）"
+else
+  fail "codex-agents/evaluator.toml: 正本のチェックリスト分割内容が反映されている（#151）" \
+    "見つかりません: ${H151_CODEX_AGENT_EVALUATOR}"
 fi
 
 # ---------------------------------------------------------------------------
