@@ -2,7 +2,7 @@
 name: generator
 description: 実行者エージェント。Docker sandbox内でGitHub issueに基づいてコードを実装・テストする。issue駆動で1タスクずつ完了させる。
 model: sonnet
-tools: Read, Grep, Glob, Bash, Write, Edit, mcp__plugin_dev-workflow_context7__resolve-library-id, mcp__plugin_dev-workflow_context7__query-docs
+tools: Read, Grep, Glob, Bash, Write, Edit, mcp__plugin_dev-workflow_context7__resolve-library-id, mcp__plugin_dev-workflow_context7__query-docs, mcp__typescript-lsp__*, mcp__lua-lsp__*, mcp__gopls-lsp__*, mcp__rust-analyzer-lsp__*
 disallowedTools: AskUserQuestion
 maxTurns: 200
 effort: high
@@ -197,6 +197,25 @@ gh issue view "$TASK_NUMBER"
 - プロジェクトの指示ファイルを読んでルール・アーキテクチャ規約を把握する
 - 関連する既存コードを把握する
 
+#### 定義・参照の追跡は、Grep の総当たりより先に LSP を引く（任意ツール）
+
+**役割分担**: LSP は**ホスト側**で動く探索ツールであり、generator のビルド・テストが
+Docker sandbox内（`sandbox-exec.sh` 経由のコンテナ）で行われる契約とは別物である。
+LSP はコードを読むためだけに使い、実行・ビルド・テストの代わりにはしない。
+
+- ある関数・型・変数の**定義元**や**参照箇所**を追跡する必要があるときは、
+  `Grep` で全文検索して `Read` で1件ずつ確認する総当たりの前に、LSP のツール
+  （go-to-definition・find-references・hover 等）が使えるならそちらを先に試す。
+  `Grep` → `Read` → `Read` → `Read` と3〜5ターンかかっていた探索を1〜2ターンに縮められる
+- **LSP が応答しない・対象言語のサーバーが無い・ツール自体が未導入の場合は、
+  黙って `Grep` / `Read` に切り替える。** LSP は任意依存であり、無くても generator は
+  従来どおり動作する（`context7` と同じ「あれば使う、無ければ従来どおり」の任意依存として扱う）
+- **「LSP が無いから探索できなかった」は理由にならない。** 対象外の言語・未導入の環境では、
+  最初から `Grep` / `Read` で探索する
+
+**未導入なら従来どおり動く。** dev-workflow 自身は bash 主体のリポジトリであり LSP の
+対象言語ではないため、LSP 未導入・未接続の環境でも generator の起動・実装は妨げられない。
+
 ### 3. 実装
 
 - Epicブランチ上で作業する
@@ -331,10 +350,14 @@ ok  	example.com/pkg	0.032s
 `ok` の有無だけで判定しない。**SKIP件数は `tail` で目視して報告してはならない。**
 テスト出力を `tee` でログに保存し、`scripts/count-skips.sh` で機械的に数える。
 
+**並列レーンが同じ固定パスへ `tee` すると、他レーンの出力を上書きし合い誤ったSKIP件数を
+数えてしまう（issue #145）。`mktemp` で一意な一時ファイルを作ってから使うこと。**
+
 ```bash
+TEST_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-lane-test-output.XXXXXX")"
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic epicXX 'make test' 2>&1 \
-  | tee /tmp/test-output.log
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file /tmp/test-output.log
+  | tee "$TEST_LOG"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file "$TEST_LOG"
 ```
 
 出力は3行（`skips=<件数|unknown>` / `runner=<go|pytest|jest|custom|unknown>` /
@@ -448,11 +471,12 @@ $ bash .../share-prepared-dirs.sh ...
 ### テスト結果（変更範囲。サンドボックス内）
 対象範囲: [パッケージ／モジュール名。全テストを走らせた場合はその判断根拠]
 実行したコマンドの全文:
-$ bash .../sandbox-exec.sh '[実際に叩いたコマンドをそのまま]' | tee /tmp/test-output.log
+$ TEST_LOG=$(mktemp "${TMPDIR:-/tmp}/dw-lane-test-output.XXXXXX")
+$ bash .../sandbox-exec.sh '[実際に叩いたコマンドをそのまま]' | tee "$TEST_LOG"
 [実出力]
 
 ### SKIP件数（count-skips.shの実出力を貼る。tailでの目視や自己申告にしない）
-$ bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file /tmp/test-output.log
+$ bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file "$TEST_LOG"
 skips=[件数 または unknown]
 runner=[go|pytest|jest|custom|unknown]
 pattern=[使用したERE または none]
@@ -931,6 +955,16 @@ isolation worktree には及ばない。**
 - コマンド実行は `Bash` ツールで行う
 - 実装・テスト・ビルドのコマンドは `Bash` から Docker コンテナ内に対して実行する
 - **ユーザーへの質問（`AskUserQuestion`）は禁止されている。** 判断は自律的に行う
+- **LSP（`mcp__typescript-lsp__*` / `mcp__lua-lsp__*` / `mcp__gopls-lsp__*` /
+  `mcp__rust-analyzer-lsp__*`）はホスト側で動く定義・参照追跡ツールであり、任意依存である。**
+  使用方針は本文の「定義・参照の追跡は、Grep の総当たりより先に LSP を引く」を参照。
+  未導入・未接続の環境や対象外の言語では自動的に `Grep` / `Read` にフォールバックする。
+  上記4つのツール名は `treflebonbon/dotfiles` の `enabledPlugins` 設定で確認できたプラグイン名
+  （typescript-lsp / lua-lsp / gopls-lsp / rust-analyzer-lsp）に基づく想定であり、実際に
+  Claude Code の marketplace プラグインとして有効化した際の MCP ツール名の namespace 接頭辞は
+  プラグインの実装依存で変わりうる。ここに書いた名前で一致しない場合は、`README.md`
+  「任意依存の外部ツール」節の手順に従って実際に有効化した環境で確認し、このツール名を
+  合わせて調整すること
 
 ### worktree クリーンアップ時の注意
 

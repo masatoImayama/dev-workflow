@@ -181,6 +181,25 @@ gh issue view "$TASK_NUMBER"
 - プロジェクトの指示ファイルを読んでルール・アーキテクチャ規約を把握する
 - 関連する既存コードを把握する
 
+#### 定義・参照の追跡は、Grep の総当たりより先に LSP を引く（任意ツール）
+
+**役割分担**: LSP は**ホスト側**で動く探索ツールであり、generator のビルド・テストが
+Docker sandbox内（`sandbox-exec.sh` 経由のコンテナ）で行われる契約とは別物である。
+LSP はコードを読むためだけに使い、実行・ビルド・テストの代わりにはしない。
+
+- ある関数・型・変数の**定義元**や**参照箇所**を追跡する必要があるときは、
+  `Grep` で全文検索して `Read` で1件ずつ確認する総当たりの前に、LSP のツール
+  （go-to-definition・find-references・hover 等）が使えるならそちらを先に試す。
+  `Grep` → `Read` → `Read` → `Read` と3〜5ターンかかっていた探索を1〜2ターンに縮められる
+- **LSP が応答しない・対象言語のサーバーが無い・ツール自体が未導入の場合は、
+  黙って `Grep` / `Read` に切り替える。** LSP は任意依存であり、無くても generator は
+  従来どおり動作する（`context7` と同じ「あれば使う、無ければ従来どおり」の任意依存として扱う）
+- **「LSP が無いから探索できなかった」は理由にならない。** 対象外の言語・未導入の環境では、
+  最初から `Grep` / `Read` で探索する
+
+**未導入なら従来どおり動く。** dev-workflow 自身は bash 主体のリポジトリであり LSP の
+対象言語ではないため、LSP 未導入・未接続の環境でも generator の起動・実装は妨げられない。
+
 ### 3. 実装
 
 - Epicブランチ上で作業する
@@ -315,10 +334,14 @@ ok  	example.com/pkg	0.032s
 `ok` の有無だけで判定しない。**SKIP件数は `tail` で目視して報告してはならない。**
 テスト出力を `tee` でログに保存し、`scripts/count-skips.sh` で機械的に数える。
 
+**並列レーンが同じ固定パスへ `tee` すると、他レーンの出力を上書きし合い誤ったSKIP件数を
+数えてしまう（issue #145）。`mktemp` で一意な一時ファイルを作ってから使うこと。**
+
 ```bash
+TEST_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-lane-test-output.XXXXXX")"
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic epicXX 'make test' 2>&1 \
-  | tee /tmp/test-output.log
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file /tmp/test-output.log
+  | tee "$TEST_LOG"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file "$TEST_LOG"
 ```
 
 出力は3行（`skips=<件数|unknown>` / `runner=<go|pytest|jest|custom|unknown>` /
@@ -432,11 +455,12 @@ $ bash .../share-prepared-dirs.sh ...
 ### テスト結果（変更範囲。サンドボックス内）
 対象範囲: [パッケージ／モジュール名。全テストを走らせた場合はその判断根拠]
 実行したコマンドの全文:
-$ bash .../sandbox-exec.sh '[実際に叩いたコマンドをそのまま]' | tee /tmp/test-output.log
+$ TEST_LOG=$(mktemp "${TMPDIR:-/tmp}/dw-lane-test-output.XXXXXX")
+$ bash .../sandbox-exec.sh '[実際に叩いたコマンドをそのまま]' | tee "$TEST_LOG"
 [実出力]
 
 ### SKIP件数（count-skips.shの実出力を貼る。tailでの目視や自己申告にしない）
-$ bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file /tmp/test-output.log
+$ bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file "$TEST_LOG"
 skips=[件数 または unknown]
 runner=[go|pytest|jest|custom|unknown]
 pattern=[使用したERE または none]

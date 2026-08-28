@@ -70,18 +70,44 @@ claude --plugin-dir /path/to/dev-workflow
 
 ## 任意依存の外部ツール
 
-dev-workflow は2つの外部 MCP ツール（context7 / code-review-graph）を**任意依存**として利用します。
+dev-workflow は複数の外部ツール（context7 / code-review-graph / LSP）を**任意依存**として利用します。
 **必須依存ではありません。入れなくても dev-workflow は従来どおり動作します。**
 
 | ツール | 結線先 | 未導入時の挙動 |
 |---|---|---|
 | [context7](https://github.com/upstash/context7)（MIT） | generator のみ | generator はライブラリ API を context7 で確認しません。推測に頼らず、既存利用箇所・公式ドキュメントで確認する従来どおりの手順になります |
 | [code-review-graph](https://github.com/tirth8205/code-review-graph)（MIT） | evaluator のみ（大規模差分のみ） | evaluator は blast radius（影響範囲）を使った優先順位付けをしません。従来どおり Phase 単位に分割してレビューする手順になります |
+| LSP（typescript-lsp / lua-lsp / gopls-lsp / rust-analyzer-lsp 等） | generator のみ（Claude Code のみ。下記参照） | generator は定義・参照の追跡を `Grep` の総当たり＋`Read` で行います（従来どおり） |
 
 **いずれもワークフローを止めません。** テスト・レビューはツールの有無に関わらず従来どおり完走します。
 
 - **入れ方**: 導入手順・結線方式の実測結果・MCPツール名は [`docs/optional-mcp-tools.md`](docs/optional-mcp-tools.md) が正本です（README では二重管理しません）
 - **効かなければ外す判断基準**: `docs/optional-mcp-tools.md` の「外す判断基準」節を参照してください。複数 Epic を通してトークン消費が減らず、レビュー品質の向上も観測できない場合は結線を外してかまいません
+
+### LSP（探索ターン数の削減。Claude Code のみ。issue #154）
+
+`Grep` → `Read` → `Read` → `Read` と3〜5ターンかかっていた定義・参照の追跡を、LSP
+（go-to-definition・find-references・hover 等）が使えるときは1〜2ターンに縮められます。
+**LSP はホスト側で動く探索ツールであり、generator のビルド・テストが行われる Docker sandbox
+（`sandbox-exec.sh` 経由のコンテナ）とは別物です。** ビルド・テストの代わりにはなりません。
+
+**有効化方法（実際に確認できた方法）**: `treflebonbon/dotfiles` の
+`private_dot_claude/settings.json.tmpl` が、`enabledPlugins` で typescript-lsp / lua-lsp /
+gopls-lsp / rust-analyzer-lsp を常時有効にしている例を確認しています。ユーザースコープの
+`~/.claude/settings.json` に対象言語の LSP プラグインを `enabledPlugins` で有効化すると、
+generator の frontmatter（`adapters/claude/overlays/generator.md` の `tools:`）に列挙済みの
+`mcp__typescript-lsp__*` 等のツールが使えるようになります。
+
+**未確認の注意点**: 有効化した LSP プラグインが実際に公開する MCP ツール名の namespace
+接頭辞は、プラグインの実装依存で変わりえます。`tools:` に書いた名前と一致しない場合は、
+有効化した環境で実際のツール名を確認し、`adapters/claude/overlays/generator.md` を修正して
+`bash adapters/claude/build.sh` で再生成してください。
+
+**Codex には同等の機能がありません。** Codex には Claude Code の marketplace プラグイン /
+`enabledPlugins` に相当する、ユーザーが任意に有効化できる LSP プラグインの仕組みが
+確認できていないため、`adapters/codex/overlays/generator.toml` は LSP の MCP サーバーを
+宣言していません（詳細は同ファイルのコメント参照）。Codex 版の generator は常に
+`Grep` / `Read` で探索します。
 
 ## Docker sandbox のセットアップ
 
@@ -606,6 +632,27 @@ run 本体（`/dev-workflow:run` を解釈しているセッション）は Epic
 - **これは推奨であって前提条件ではない。** 未設定でも run は動作する。run は起動時に現在の
   構成を表示するだけで、停止はしない（「停止させるものと、記録して進めるもの」の原則）
 
+**LSP（任意。上記「LSP」節参照）を有効化する場合**は、同じ `settings.json` に
+`enabledPlugins` を追加する。`treflebonbon/dotfiles` の `private_dot_claude/settings.json.tmpl`
+で確認できた例:
+
+```json
+{
+  "model": "sonnet",
+  "advisorModel": "opus",
+  "effortLevel": "xhigh",
+  "env": { "ENABLE_TOOL_SEARCH": "true" },
+  "enabledPlugins": {
+    "typescript-lsp": true,
+    "gopls-lsp": true,
+    "rust-analyzer-lsp": true,
+    "lua-lsp": true
+  }
+}
+```
+
+未設定でも generator は `Grep` / `Read` で従来どおり動作する（前述「LSP」節の「未確認の注意点」参照）。
+
 ### パーミッション設定（必須）
 
 YOLOモードではClaude Code本体のパーミッション確認を無効化する必要がある。
@@ -804,6 +851,42 @@ Dockerfile の挙動は従来どおり `dirname(Dockerfile)` のままで変わ�
 非対称であることの唯一の実害は `--reset-cache` の誤爆（他 epic のキャッシュまで巻き込む）なので、
 そこだけを running コンテナ検出のガードで潰しています（後述）。
 
+#### 検証結果のスタンプ（呼び出しごとの固定オーバーヘッド削減。issue #145）
+
+dockerfile モードは1回の呼び出しで前置きの検証（イメージ存在・コンテナ存在・マウント元・
+イメージIDスキュー・running確認）に docker CLI が最大7回呼ばれ、Windows実測で約1.7秒かかります
+（Epicあたり数分の固定オーバーヘッド）。これを毎回やり直す代わりに、フル検証が成功した直後に
+「コンテナ名・解決イメージID・正規化済みマウント元」を**スタンプ**として
+`${DEV_WORKFLOW_STAMP_HOME:-${HOME}/.claude/dev-workflow/stamps}` 配下に残します。次回以降は
+この3点が現在の状態と一致し、かつコンテナが running のときだけ、前置き検証を「現在のイメージID
+再確認＋running確認」の2回に短縮し `docker exec` へ直行します（fast path）。
+
+**fail-safe**: スタンプが無い・読めない・3点のいずれかが不一致・`--rebuild` 指定時は、
+必ず従来どおりのフル検証に戻ります。`--down` / `--reset-cache` はコンテナ削除と同時にスタンプも
+無効化します。スタンプはリポジトリの追跡ファイルにせず `${HOME}` 配下に置くため、ハーネス非注入
+原則に適合します（Epic 専用 worktree と各レーンの isolation worktree の両方から共通に読めます）。
+`--print-plan` はスタンプの有無に関わらず docker に一切触れません（従来どおり）。
+compose モードは対象外です（詳細は `docs/adr/0002-sandbox-overhead-reduction.md`）。
+
+#### レーンスコープ・キャッシュ（並列レーンの資源競合の緩和。issue #145）
+
+キャッシュ volume はリポジトリ単位で共有するため、cargo registry・yarn v1 等
+**グローバルロックを取るキャッシュ**では並列レーンが直列化することがあります。volume 自体は
+分割せず、`DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV` で宣言した環境変数だけを、同じ volume 内の
+レーン別サブディレクトリ（`<宣言パス>/lanes/<レーンスコープ>`）に向けます。
+
+```bash
+DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV='CARGO_HOME=/root/.cargo/registry'
+```
+
+レーンスコープは呼び出し元 worktree から自動的に決まります: `.claude/worktrees/agent-*`
+（generator の isolation worktree）から呼ばれたら `agent-xxxx`、それ以外（リポジトリルート・
+epic worktree）は `shared` です。`shared` のときは env 上書きを行わず、従来どおり共有
+ディレクトリを使います。**既定は未宣言（空）で、現行と完全に同一の挙動です。** volume 名・
+`--reset-cache` / `--ls` / `--down` の作用範囲は変わりません（レーン別サブディレクトリも
+同じ volume 内にあるため `--reset-cache` で一緒に消えます）。設計判断の詳細は
+`docs/adr/0002-sandbox-overhead-reduction.md` を参照してください。
+
 ### サンドボックスへのコマンド投入
 
 `docker run` を直接組み立てず、`sandbox-exec.sh` を使います。
@@ -862,6 +945,10 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic epic259 --print-plan
 2. 同一リポジトリの管理コンテナが**1つでも running なら中断**し、`--force` の指定を促します
    （他 epic が実行中にキャッシュを壊さないためのガード）。
 3. `--force` を指定した場合のみ、running なコンテナがあっても実行します。
+
+volume 自体は分割していないため、`DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV` で作ったレーン別
+サブディレクトリ（`<パス>/lanes/<レーンスコープ>`）も同じ volume 内にあり、`--reset-cache` で
+まとめて削除されます（前述「レーンスコープ・キャッシュ」参照）。
 
 #### `--rebuild` の使いどころ
 

@@ -1179,6 +1179,13 @@ IMG_TEST_RUNNING_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-test-imgrunning.XXXXXX")"
 run_img_case() {
   # run_img_case <container_exists 0/1> <container_running true/false> <container_image_id>
   #              <container_mount> <image_exists 0/1> <image_id> [追加の sandbox-exec.sh 引数...]
+  #
+  # DEV_WORKFLOW_STAMP_HOME は呼び出しごとに新規の空ディレクトリにする。スタンプ機構
+  # （issue #145）はコンテナ名・イメージID・マウント元が一致すればフル検証を省略するため、
+  # このヘルパーで固定の値を使い回すと、ケースをまたいでスタンプが再利用されてしまい
+  # （実際に発生した：後続ケースが期待するフル検証がスキップされ、削除/作り直しの
+  # アサーションが失敗した）、かつ既定値のままだと実ホストの $HOME を汚染する。
+  # このヘルパーが検証する対象はあくまで「フル検証」なので、常にスタンプ不在から始める。
   local container_exists="$1" container_running="$2" container_image_id="$3" container_mount="$4"
   local image_exists="$5" image_id="$6"
   shift 6
@@ -1192,7 +1199,8 @@ run_img_case() {
 
   (
     cd "$IMG_REPO" || exit 1
-    DW_IMG_LOG="$IMG_TEST_LOG" \
+    DEV_WORKFLOW_STAMP_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-imgstamp.XXXXXX")" \
+      DW_IMG_LOG="$IMG_TEST_LOG" \
       DW_IMG_RM_LOG="$IMG_TEST_RM_LOG" \
       DW_IMG_RUN_LOG="$IMG_TEST_RUN_LOG" \
       DW_IMG_EXEC_LOG="$IMG_TEST_EXEC_LOG" \
@@ -1398,6 +1406,221 @@ assert_eq "マウント元が別表現（Docker Desktop 形式等）でも同一
 
 IMG_H_RUN_COUNT="$(grep -c '^run ' "$IMG_TEST_LOG" || true)"
 assert_eq "マウント元が別表現（Docker Desktop 形式等）でも同一ツリーなら作り直さない（issue #25 / #30）" "0" "$IMG_H_RUN_COUNT"
+
+# ---------------------------------------------------------------------------
+# 検証結果のスタンプ（fast path。issue #145、docs/adr/0002-sandbox-overhead-reduction.md 決定1）
+#
+# run_img_case とは異なり、複数回の呼び出しにまたがって同一の DEV_WORKFLOW_STAMP_HOME を
+# 使い回すことで「1回目のフル検証で書いたスタンプを2回目が読む」という時系列を検証する。
+# ---------------------------------------------------------------------------
+
+echo "== 検証結果のスタンプ（fast path・issue #145） =="
+
+STAMP_TEST_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-stamphome.XXXXXX")"
+
+run_img_case_stamped() {
+  # run_img_case_stamped <stamp_home> <container_exists> <container_running> <container_image_id>
+  #                       <container_mount> <image_exists> <image_id> [追加の sandbox-exec.sh 引数...]
+  local stamp_home="$1" container_exists="$2" container_running="$3" container_image_id="$4"
+  local container_mount="$5" image_exists="$6" image_id="$7"
+  shift 7
+
+  : > "$IMG_TEST_LOG"
+  : > "$IMG_TEST_RM_LOG"
+  : > "$IMG_TEST_RUN_LOG"
+  : > "$IMG_TEST_EXEC_LOG"
+  printf '%s' "$container_exists" > "$IMG_TEST_STATE_FILE"
+  printf '%s\n' "$container_running" > "$IMG_TEST_RUNNING_FILE"
+
+  (
+    cd "$IMG_REPO" || exit 1
+    DEV_WORKFLOW_STAMP_HOME="$stamp_home" \
+      DW_IMG_LOG="$IMG_TEST_LOG" \
+      DW_IMG_RM_LOG="$IMG_TEST_RM_LOG" \
+      DW_IMG_RUN_LOG="$IMG_TEST_RUN_LOG" \
+      DW_IMG_EXEC_LOG="$IMG_TEST_EXEC_LOG" \
+      DW_IMG_CONTAINER_STATE="$IMG_TEST_STATE_FILE" \
+      DW_IMG_CONTAINER_RUNNING_STATE="$IMG_TEST_RUNNING_FILE" \
+      DW_IMG_CONTAINER_IMAGE_ID="$container_image_id" \
+      DW_IMG_CONTAINER_MOUNT="$container_mount" \
+      DW_IMG_IMAGE_EXISTS="$image_exists" \
+      DW_IMG_IMAGE_ID="$image_id" \
+      PATH="${FAKE_DOCKER_IMAGE_DIR}:${PATH}" \
+      bash scripts/sandbox-exec.sh "$@"
+  )
+}
+
+stamp_call_count() { wc -l < "$IMG_TEST_LOG" | tr -d ' '; }
+
+# --- 1回目: スタンプが無いのでフル検証する ---
+STAMP1_EXIT=0
+run_img_case_stamped "$STAMP_TEST_HOME" 1 true "sha256:same" "$IMG_MOUNT_SOURCE" 1 "sha256:same" 'true' \
+  >/dev/null 2>&1 || STAMP1_EXIT=$?
+assert_exit_code "スタンプ: 1回目（スタンプ無し・フル検証）は成功する" 0 "$STAMP1_EXIT"
+STAMP1_CALLS="$(stamp_call_count)"
+
+# --- 2回目: 直前と同じ状態で再実行すると fast path になり、docker CLI 呼び出しが減る ---
+STAMP2_EXIT=0
+run_img_case_stamped "$STAMP_TEST_HOME" 1 true "sha256:same" "$IMG_MOUNT_SOURCE" 1 "sha256:same" 'true' \
+  >/dev/null 2>&1 || STAMP2_EXIT=$?
+assert_exit_code "スタンプ: 2回目（fast path）も成功する" 0 "$STAMP2_EXIT"
+STAMP2_CALLS="$(stamp_call_count)"
+
+if [ "$STAMP2_CALLS" -lt "$STAMP1_CALLS" ]; then
+  pass "スタンプ: fast path は1回目より docker CLI 呼び出しが少ない（1回目=${STAMP1_CALLS}件 → 2回目=${STAMP2_CALLS}件）"
+else
+  fail "スタンプ: fast path は1回目より docker CLI 呼び出しが少ない" "1回目=${STAMP1_CALLS}件 2回目=${STAMP2_CALLS}件"
+fi
+
+assert_eq "スタンプ: fast path では既存コンテナを削除しない" "0" "$(grep -c . "$IMG_TEST_RM_LOG" || true)"
+assert_eq "スタンプ: fast path ではコンテナを作り直さない" "0" "$(grep -c '^run ' "$IMG_TEST_LOG" || true)"
+assert_eq "スタンプ: fast path でも docker exec は実行される" "1" "$(grep -c . "$IMG_TEST_EXEC_LOG" || true)"
+
+# --- 3回目: イメージIDが変わっている場合はスタンプを無視してフル検証に戻る（バージョンスキュー解消） ---
+STAMP3_EXIT=0
+run_img_case_stamped "$STAMP_TEST_HOME" 1 true "sha256:same" "$IMG_MOUNT_SOURCE" 1 "sha256:different" 'true' \
+  >/dev/null 2>&1 || STAMP3_EXIT=$?
+assert_exit_code "スタンプ: イメージID変更時も成功する" 0 "$STAMP3_EXIT"
+STAMP3_CALLS="$(stamp_call_count)"
+
+if [ "$STAMP3_CALLS" -ge "$STAMP1_CALLS" ]; then
+  pass "スタンプ: イメージID変更時はフル検証に戻る（呼び出し数=${STAMP3_CALLS}件、1回目=${STAMP1_CALLS}件）"
+else
+  fail "スタンプ: イメージID変更時はフル検証に戻る" "呼び出し数=${STAMP3_CALLS}件（1回目=${STAMP1_CALLS}件）"
+fi
+assert_eq "スタンプ: イメージID変更時は既存コンテナを削除して作り直す" "1" "$(grep -c . "$IMG_TEST_RM_LOG" || true)"
+
+# --- マウント元不一致: スタンプへ直接、現在の状態と異なるマウント元を書き込み、
+#     フル検証に戻ることを確認する（実際の呼び出し元の違いによる不一致を模擬） ---
+STAMP_CONTAINER_SLUG="$(printf '%s' "$IMG_CONTAINER" | tr -c 'A-Za-z0-9_.-' '-')"
+STAMP_BOGUS_FILE="${STAMP_TEST_HOME}/${STAMP_CONTAINER_SLUG}.stamp"
+{
+  printf 'CONTAINER=%s\n'    "$IMG_CONTAINER"
+  printf 'IMAGE_ID=%s\n'     "sha256:same"
+  printf 'MOUNT_SOURCE=%s\n' "/some/other/tree"
+} > "$STAMP_BOGUS_FILE"
+
+STAMP4_EXIT=0
+run_img_case_stamped "$STAMP_TEST_HOME" 1 true "sha256:same" "$IMG_MOUNT_SOURCE" 1 "sha256:same" 'true' \
+  >/dev/null 2>&1 || STAMP4_EXIT=$?
+assert_exit_code "スタンプ: マウント元不一致時も成功する" 0 "$STAMP4_EXIT"
+STAMP4_CALLS="$(stamp_call_count)"
+
+if [ "$STAMP4_CALLS" -ge "$STAMP1_CALLS" ]; then
+  pass "スタンプ: マウント元不一致時はフル検証に戻る（呼び出し数=${STAMP4_CALLS}件）"
+else
+  fail "スタンプ: マウント元不一致時はフル検証に戻る" "呼び出し数=${STAMP4_CALLS}件（1回目=${STAMP1_CALLS}件）"
+fi
+
+# --- --rebuild: スタンプが（直前の呼び出しで）温まっていても必ずフル検証・再ビルドする ---
+STAMP5_EXIT=0
+run_img_case_stamped "$STAMP_TEST_HOME" 1 true "sha256:same" "$IMG_MOUNT_SOURCE" 1 "sha256:same" --rebuild 'true' \
+  >/dev/null 2>&1 || STAMP5_EXIT=$?
+assert_exit_code "スタンプ: --rebuild 指定時も成功する" 0 "$STAMP5_EXIT"
+assert_eq "スタンプ: --rebuild 指定時はスタンプがあってもビルドする" "1" "$(grep -c '^build ' "$IMG_TEST_LOG" || true)"
+
+# --- スタンプ不在（新規の空ディレクトリ）では必ずフル検証になる ---
+STAMP_EMPTY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-stampempty.XXXXXX")"
+STAMP6_EXIT=0
+run_img_case_stamped "$STAMP_EMPTY_HOME" 1 true "sha256:same" "$IMG_MOUNT_SOURCE" 1 "sha256:same" 'true' \
+  >/dev/null 2>&1 || STAMP6_EXIT=$?
+assert_exit_code "スタンプ: スタンプ不在（新規ディレクトリ）でも成功する" 0 "$STAMP6_EXIT"
+STAMP6_CALLS="$(stamp_call_count)"
+if [ "$STAMP6_CALLS" -ge "$STAMP1_CALLS" ]; then
+  pass "スタンプ: スタンプ不在時はフル検証になる（呼び出し数=${STAMP6_CALLS}件）"
+else
+  fail "スタンプ: スタンプ不在時はフル検証になる" "呼び出し数=${STAMP6_CALLS}件（1回目=${STAMP1_CALLS}件）"
+fi
+
+# --- --print-plan はスタンプの有無に関わらず docker に一切触れない ---
+STAMP_PLAN_MARKER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-stampplanmarker.XXXXXX")"
+STAMP_PLAN_MARKER="${STAMP_PLAN_MARKER_DIR}/docker-called-marker"
+cat > "${STAMP_PLAN_MARKER_DIR}/docker" <<FAKE_DOCKER_PLAN_STAMP
+#!/bin/bash
+echo "\$@" >> "${STAMP_PLAN_MARKER}"
+exit 1
+FAKE_DOCKER_PLAN_STAMP
+chmod +x "${STAMP_PLAN_MARKER_DIR}/docker"
+
+(
+  cd "$IMG_REPO" || exit 1
+  DEV_WORKFLOW_STAMP_HOME="$STAMP_TEST_HOME" \
+    PATH="${STAMP_PLAN_MARKER_DIR}:${PATH}" \
+    bash scripts/sandbox-exec.sh --print-plan
+) >/dev/null 2>&1
+
+if [ -f "$STAMP_PLAN_MARKER" ]; then
+  fail "スタンプ: --print-plan はスタンプ有効時も docker を起動しない" "docker が呼ばれました: $(cat "$STAMP_PLAN_MARKER")"
+else
+  pass "スタンプ: --print-plan はスタンプ有効時も docker を起動しない"
+fi
+
+# ---------------------------------------------------------------------------
+# レーンスコープ・キャッシュ（issue #145、docs/adr/0002-sandbox-overhead-reduction.md 決定2）
+#
+# --print-plan のドライラン出力（lane_scope / lane_cache_env）と、dockerfile モードでの
+# 実行時の -e 付与・mkdir 実行を検証する。
+# ---------------------------------------------------------------------------
+
+echo "== レーンスコープ・キャッシュ（issue #145） =="
+
+assert_eq "lane_scope: リポジトリルートは shared" "shared" "$(plan_value lane_scope "$CASE1_OUTPUT")"
+assert_eq "lane_scope: epic worktree も shared" "shared" "$(plan_value lane_scope "$CASE2_OUTPUT")"
+assert_eq "lane_scope: agent worktree（.claude/worktrees/agent-x）は agent-x" "agent-x" "$(plan_value lane_scope "$CASE3_OUTPUT")"
+
+LANE_ENV_UNDECLARED_COUNT="$(printf '%s\n' "$CASE3_OUTPUT" | grep -c '^lane_cache_env=' || true)"
+assert_eq "lane_cache_env: 未宣言時は0行（既定は現行と同一の挙動）" "0" "$LANE_ENV_UNDECLARED_COUNT"
+
+LANE_ENV_OUTPUT="$(
+  cd "$AGENT_WORKTREE_DIR" || exit 1
+  DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV='CARGO_HOME=/root/.cargo/registry' \
+    PATH="${FAKE_BIN_DIR}:${PATH}" bash scripts/sandbox-exec.sh --print-plan
+)"
+assert_eq "lane_cache_env: 宣言時に <ENV>=<path>/lanes/<scope> が出る" \
+  "CARGO_HOME=/root/.cargo/registry/lanes/agent-x" "$(plan_value lane_cache_env "$LANE_ENV_OUTPUT")"
+
+# --- dockerfile モード実行時: agent worktree では -e と mkdir が実際に効く ---
+DOCKER_LANE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-dockerlanecache.XXXXXX")"
+DOCKER_LANE_BASE="${DOCKER_LANE_TMP}/cargo-registry"
+
+: > "$IMG_TEST_LOG"
+: > "$IMG_TEST_RM_LOG"
+: > "$IMG_TEST_RUN_LOG"
+: > "$IMG_TEST_EXEC_LOG"
+printf '0' > "$IMG_TEST_STATE_FILE"
+printf 'false\n' > "$IMG_TEST_RUNNING_FILE"
+
+DOCKER_LANE_EXIT=0
+(
+  cd "$AGENT_WORKTREE_DIR" || exit 1
+  DEV_WORKFLOW_STAMP_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-dockerlanestamp.XXXXXX")" \
+    DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV="CARGO_HOME=${DOCKER_LANE_BASE}" \
+    DW_IMG_LOG="$IMG_TEST_LOG" \
+    DW_IMG_RM_LOG="$IMG_TEST_RM_LOG" \
+    DW_IMG_RUN_LOG="$IMG_TEST_RUN_LOG" \
+    DW_IMG_EXEC_LOG="$IMG_TEST_EXEC_LOG" \
+    DW_IMG_CONTAINER_STATE="$IMG_TEST_STATE_FILE" \
+    DW_IMG_CONTAINER_RUNNING_STATE="$IMG_TEST_RUNNING_FILE" \
+    DW_IMG_IMAGE_EXISTS=0 \
+    PATH="${FAKE_DOCKER_IMAGE_DIR}:${PATH}" \
+    bash scripts/sandbox-exec.sh 'true'
+) >/dev/null 2>&1 || DOCKER_LANE_EXIT=$?
+assert_exit_code "dockerfile: レーンスコープ・キャッシュ宣言時も成功する（agent worktree）" 0 "$DOCKER_LANE_EXIT"
+
+DOCKER_LANE_LAST_LINE="$(tail -n1 "$IMG_TEST_LOG")"
+case "$DOCKER_LANE_LAST_LINE" in
+  *"-e CARGO_HOME=${DOCKER_LANE_BASE}/lanes/agent-x"*)
+    pass "dockerfile: agent worktree では docker exec に -e <ENV>=<path>/lanes/<scope> が渡る" ;;
+  *)
+    fail "dockerfile: agent worktree では docker exec に -e <ENV>=<path>/lanes/<scope> が渡る" \
+      "last_line=[${DOCKER_LANE_LAST_LINE}]" ;;
+esac
+
+if [ -d "${DOCKER_LANE_BASE}/lanes/agent-x" ]; then
+  pass "dockerfile: 実行前にレーン別キャッシュディレクトリが作られる"
+else
+  fail "dockerfile: 実行前にレーン別キャッシュディレクトリが作られる" "作られていません: ${DOCKER_LANE_BASE}/lanes/agent-x"
+fi
 
 # ---------------------------------------------------------------------------
 # ケース10: compose_conflict_warnings（Docker 非依存の衝突検出関数、Task #9）
@@ -7212,6 +7435,134 @@ else
   fail "codex-agents/generator.toml: 正本のcontext7使いどころ追記内容が反映されている（#72）" \
     "見つかりません: ${DOC72_CODEX_AGENT_GENERATOR}"
 fi
+
+echo "== generator に LSP ツールを与え、探索のターン数を減らす（#154） =="
+
+# Epic #143（#154）: generatorのfrontmatterにLSPのMCPツールを追加し、正本
+# （core/roles/generator.md）に「Grepの総当たりより先にLSPを引く」使用方針・
+# 「LSP（ホスト）とsandbox-exec.sh（コンテナ）の役割分担」・「未導入なら従来どおり」を明記する。
+# Codex側はLSPの同等機能が確認できていないため、宣言せず「非対応」の事実を残す。
+
+DOC154_GENERATOR_ROLE="${REPO_ROOT}/core/roles/generator.md"
+DOC154_OVERLAY_GENERATOR="${REPO_ROOT}/adapters/claude/overlays/generator.md"
+DOC154_CODEX_OVERLAY_GENERATOR="${REPO_ROOT}/adapters/codex/overlays/generator.toml"
+DOC154_AGENT_GENERATOR="${REPO_ROOT}/agents/generator.md"
+DOC154_CODEX_AGENT_GENERATOR="${REPO_ROOT}/codex-agents/generator.toml"
+DOC154_README="${REPO_ROOT}/README.md"
+
+# --- adapters/claude/overlays/generator.md: frontmatter の tools: に LSP ツールが含まれる ---
+
+if grep -Fq 'mcp__typescript-lsp__' "$DOC154_OVERLAY_GENERATOR" \
+  && grep -Fq 'mcp__lua-lsp__' "$DOC154_OVERLAY_GENERATOR" \
+  && grep -Fq 'mcp__gopls-lsp__' "$DOC154_OVERLAY_GENERATOR" \
+  && grep -Fq 'mcp__rust-analyzer-lsp__' "$DOC154_OVERLAY_GENERATOR"; then
+  pass "adapters/claude/overlays/generator.md: tools: に LSP ツール（typescript/lua/gopls/rust-analyzer）が含まれる（#154）"
+else
+  fail "adapters/claude/overlays/generator.md: tools: に LSP ツール（typescript/lua/gopls/rust-analyzer）が含まれる（#154）" \
+    "見つかりません: ${DOC154_OVERLAY_GENERATOR}"
+fi
+
+# --- 生成物（agents/generator.md）にも反映されている ---
+
+if [ -f "$DOC154_AGENT_GENERATOR" ] && grep -Fq 'mcp__typescript-lsp__' "$DOC154_AGENT_GENERATOR"; then
+  pass "agents/generator.md: 正本（overlay）の LSP ツール追加が反映されている（#154）"
+else
+  fail "agents/generator.md: 正本（overlay）の LSP ツール追加が反映されている（#154）" \
+    "見つかりません: ${DOC154_AGENT_GENERATOR}"
+fi
+
+# --- core/roles/generator.md: 「Grepの総当たりより先にLSPを引く」使用方針が書かれている ---
+
+if grep -Fq 'LSP' "$DOC154_GENERATOR_ROLE" \
+  && grep -Fq 'Grep の総当たり' "$DOC154_GENERATOR_ROLE" \
+  && grep -Fq '先に' "$DOC154_GENERATOR_ROLE"; then
+  pass "core/roles/generator.md: 「Grepの総当たりより先にLSPを引く」使用方針が書かれている（#154）"
+else
+  fail "core/roles/generator.md: 「Grepの総当たりより先にLSPを引く」使用方針が書かれている（#154）"
+fi
+
+# --- core/roles/generator.md: 「探索はLSP（ホスト）/ビルド・テストはsandbox-exec.sh（コンテナ）」の役割分担 ---
+
+if grep -Fq 'ホスト側' "$DOC154_GENERATOR_ROLE" \
+  && grep -Eq 'sandbox-exec\.sh|Docker sandbox' "$DOC154_GENERATOR_ROLE"; then
+  pass "core/roles/generator.md: LSP（ホスト）とビルド・テスト（コンテナ）の役割分担が明記されている（#154）"
+else
+  fail "core/roles/generator.md: LSP（ホスト）とビルド・テスト（コンテナ）の役割分担が明記されている（#154）"
+fi
+
+# --- core/roles/generator.md: LSPが使えない環境でも従来どおり動作する旨が明記されている ---
+
+DOC154_LSP_SECTION="$(awk '/定義・参照の追跡は、Grep の総当たりより先に LSP を引く/,/^### [0-9]/' "$DOC154_GENERATOR_ROLE")"
+
+if printf '%s' "$DOC154_LSP_SECTION" | grep -Fq '未導入なら従来どおり動く' \
+  && printf '%s' "$DOC154_LSP_SECTION" | grep -Fq 'Grep' \
+  && printf '%s' "$DOC154_LSP_SECTION" | grep -Fq '任意依存'; then
+  pass "core/roles/generator.md: LSPが使えない環境でも従来どおり動作する旨が明記されている（#154）"
+else
+  fail "core/roles/generator.md: LSPが使えない環境でも従来どおり動作する旨が明記されている（#154）" \
+    "section=[${DOC154_LSP_SECTION}]"
+fi
+
+# --- 生成物（agents/generator.md）にもLSP探索手順の記述が反映されている ---
+
+if [ -f "$DOC154_AGENT_GENERATOR" ] && grep -Fq 'Grep の総当たりより先に LSP を引く' "$DOC154_AGENT_GENERATOR"; then
+  pass "agents/generator.md: 正本のLSP探索手順の記述が反映されている（#154）"
+else
+  fail "agents/generator.md: 正本のLSP探索手順の記述が反映されている（#154）" \
+    "見つかりません: ${DOC154_AGENT_GENERATOR}"
+fi
+
+# --- Codex側: 同等機能が無い事実が明記されている（推測で書かず、非対応と明記） ---
+
+if grep -Fq 'Codex 側には同等の機能が無い' "$DOC154_CODEX_OVERLAY_GENERATOR"; then
+  pass "adapters/codex/overlays/generator.toml: LSPのCodex側非対応の事実が明記されている（#154）"
+else
+  fail "adapters/codex/overlays/generator.toml: LSPのCodex側非対応の事実が明記されている（#154）"
+fi
+
+if [ -f "$DOC154_CODEX_AGENT_GENERATOR" ] && grep -Fq 'Codex 側には同等の機能が無い' "$DOC154_CODEX_AGENT_GENERATOR"; then
+  pass "codex-agents/generator.toml: 正本のCodex非対応の記述が反映されている（#154）"
+else
+  fail "codex-agents/generator.toml: 正本のCodex非対応の記述が反映されている（#154）" \
+    "見つかりません: ${DOC154_CODEX_AGENT_GENERATOR}"
+fi
+
+# --- Codex側にはLSPのmcp_serversを宣言していない（推測で結線しない） ---
+
+if grep -Eq '^\[mcp_servers\.(typescript|lua|gopls|rust-analyzer)' "$DOC154_CODEX_OVERLAY_GENERATOR"; then
+  fail "adapters/codex/overlays/generator.toml: 未確認のLSP mcp_serversを宣言していない（#154）" \
+    "$(grep -E '^\[mcp_servers\.' "$DOC154_CODEX_OVERLAY_GENERATOR")"
+else
+  pass "adapters/codex/overlays/generator.toml: 未確認のLSP mcp_serversを宣言していない（#154）"
+fi
+
+# --- README.md: 利用者側の有効化方法（enabledPlugins）が「任意依存の外部ツール」節に書かれている ---
+
+if grep -Fq 'enabledPlugins' "$DOC154_README" && grep -Fq 'treflebonbon/dotfiles' "$DOC154_README"; then
+  pass "README.md: LSPの有効化方法（enabledPlugins・確認元）が明記されている（#154）"
+else
+  fail "README.md: LSPの有効化方法（enabledPlugins・確認元）が明記されている（#154）"
+fi
+
+# --- README.md: 「推奨settings.json」節にもenabledPluginsの例が書かれている ---
+
+DOC154_README_SETTINGS_SECTION="$(awk '/### 推奨 settings.json/,/^### パーミッション設定/' "$DOC154_README")"
+
+if printf '%s' "$DOC154_README_SETTINGS_SECTION" | grep -Fq 'enabledPlugins'; then
+  pass "README.md: 「推奨settings.json」節にenabledPluginsの例がある（#154）"
+else
+  fail "README.md: 「推奨settings.json」節にenabledPluginsの例がある（#154）"
+fi
+
+# --- build.sh --check が通る（生成物の直接編集が無いことの検査） ---
+
+DOC154_CLAUDE_BUILD_CHECK="$(bash "${REPO_ROOT}/adapters/claude/build.sh" --check 2>&1)"
+DOC154_CLAUDE_BUILD_CHECK_EXIT=$?
+assert_exit_code "adapters/claude/build.sh --check が通る（#154）" 0 "$DOC154_CLAUDE_BUILD_CHECK_EXIT"
+
+DOC154_CODEX_BUILD_CHECK="$(bash "${REPO_ROOT}/adapters/codex/build.sh" --check 2>&1)"
+DOC154_CODEX_BUILD_CHECK_EXIT=$?
+assert_exit_code "adapters/codex/build.sh --check が通る（#154）" 0 "$DOC154_CODEX_BUILD_CHECK_EXIT"
 
 echo "== Epic一括レビューに「変更50ファイル超」しきい値の3分岐を入れる（#74） =="
 
