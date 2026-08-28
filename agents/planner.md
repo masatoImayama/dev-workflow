@@ -183,10 +183,15 @@ Epic issue 本文に `## 編集時チェック` 節を書ける（任意。無�
 ## 編集時チェック
 
 ```
-*.go  gofmt -l {file}
-*.ts  npx tsc --noEmit {file}
+*.go   test -z "$(gofmt -l {file})"
+*.py   ruff check {file}
+*.ts   npx tsc --noEmit -p tsconfig.json
 ```
 ````
+
+**非0終了でのみ差し戻すため、違反を終了コードで表現できるコマンドを書くこと**
+（`gofmt -l` のように違反ファイルを一覧に出すだけで終了コードが常に0のコマンドは、違反が
+あっても永久にブロックしない。`test -z "$(gofmt -l {file})"` のように終了コードへ変換する）。
 
 節があれば run が Epic 開始時にマーカーファイルへ書き出し、`scripts/edit-check.sh`
 （PostToolUseフック）がそれを読んで動く。**このチェックはホスト側で実行される**ため、

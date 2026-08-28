@@ -692,11 +692,16 @@ node_modules  yarn.lock package.json
 ## 編集時チェック
 
 ```
-*.go  gofmt -l {file}
-*.ts  npx tsc --noEmit {file}
+*.go   test -z "$(gofmt -l {file})"
+*.py   ruff check {file}
+*.ts   npx tsc --noEmit -p tsconfig.json
 ```
 ````
 
+- **非0終了でのみ差し戻すため、違反を終了コードで表現できるコマンドを書くこと**
+  （`gofmt -l` のように違反ファイルを一覧に出すだけで終了コードが常に0のコマンドは、
+  違反があっても永久にブロックしない。`test -z "$(gofmt -l {file})"` のように終了コードへ
+  変換すること。レビュー #165）
 - **節が無ければ何もしない**（既存 Epic の挙動を変えない）
 - 節があれば run が Epic 開始時に `scripts/edit-check.sh --write` でマーカーファイル
   （`.claude/.dev-workflow-edit-check`。`scripts/lib/marker-root.sh` が解決するメインリポの
