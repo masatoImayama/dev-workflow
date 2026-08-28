@@ -38,17 +38,28 @@ R1（発見役・sonnet・観点別4本並列）はスピード優先のため�
 issue化しないため確度判定は不要。共通ルールの「レビュー基準」の3段階は変更しない）。
 high/medium が1件も無ければこのステップ自体を省略し、そのままR2（0件のissue化）へ進む。
 
+**この呼び出しは、プロンプト本文の指示ではなく Task/Agent ツールの起動時パラメータで
+モデルを上書きして起動する。** ADR-0006 が確認したとおり、Claude Code の Task/Agent 起動には
+エージェント定義 frontmatter の `model:` を上書きする起動時パラメータが実在し、
+`sonnet` / `opus` / `haiku` / `fable` を取る。**R1（発見役）と同じ `@evaluator` 定義のまま、
+この1本だけ起動パラメータに `model: opus` を渡す。**プロンプト本文に「model: opus」という
+1行を書き添えるだけでは、それを転記するだけの起動経路では上書きが効かないまま既定の sonnet で
+動いてしまい、しかも空振りしても検知できない。そのため、プロンプト本文からはモデル指定の指示行を
+外し、run（オーケストレータ）自身が起動時パラメータとして `model: opus` を渡す責務を負う。
+
 ```
+Task/Agent起動パラメータ: model: opus
 @evaluator
 Epic #$ARGUMENTS のレビュー指摘の確度を判定してください。
 - モード: confidence-check
-- 起動時モデル指定: model: opus（この定義の既定は sonnet のため、ここで明示的に上書きする）
+- この呼び出しは opus で起動されている前提である
 - 対象: 以下はR1マージ後のfindings（high/mediumのみ）
 [マージ済みfindingsのJSON配列をそのまま貼る]
 - 差分範囲: main...[epic/epicXX/機能名]
 - 各findingについて実際にコードを確認し、confidence（high-confidence / low-confidence）を判定すること
 - 新しい指摘を追加しないこと（発見はR1が完了済み。ここでの役割は確度判定のみ）
-- 最後に必ずJSONブロック（各findingに`confidence`フィールドを追加したfindings配列）を出力すること
+- 最後に必ずJSONブロック（各findingに`confidence`フィールドを追加したfindings配列。
+  トップレベルに実際に動いたモデル名を`model`フィールドとして含めること）を出力すること
 ```
 
 **`low-confidence` と判定された指摘は、破棄せず「レビューで挙がった軽微な指摘」（PR本文。
@@ -57,12 +68,20 @@ issue化せず記録のみ）へ格下げして記録する。** 既存の low s
 経ずに黙って捨てる経路は無い。** `high-confidence` と判定された指摘だけが、続く
 「R2: 指摘をissue化」の対象になる。
 
-確度判定呼び出しのトークン消費もR1と同じ作法で記録する（`--mode confidence-check`）:
+**起動時モデル上書きが実際に効いたかは検知手段が無いと空振りに気づけない。** 確度判定呼び出しの
+トークン消費を記録する際、返ってきたJSONの`model`フィールド（読み取れた場合のみ）を
+`--note`に含め、R1と同じ作法で記録する（`--mode confidence-check`）:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
-  --epic "$EPIC_NUM" --role evaluator --mode confidence-check --tokens [読み取ったトークン数]
+  --epic "$EPIC_NUM" --role evaluator --mode confidence-check \
+  --note "model=[JSONのmodelフィールド。読み取れなければ'unknown']" --tokens [読み取ったトークン数]
 ```
+
+**起動時モデル上書きが技術的に実現できなかった場合（`model`パラメータ自体が使えない等）**は、
+確度判定を発見役と同一モデル（sonnet）のまま据え置いて実行し、その事実を Epic issue と PR 本文に
+記録する（ADR-0006 決定Cと同じ「記録して進む」枠。据え置きであってもステップ自体は省略しない。
+黙って sonnet のまま実行してこの事実を記録しない経路は無い）。
 
 確度判定呼び出しが失敗・応答不能だった場合は、**high/mediumの指摘を無条件でissue化せず
 握り潰しもしない**。「記録して進む」に分類し、確度判定未実施の事実をEpic issueとPR本文に

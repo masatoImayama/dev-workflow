@@ -12753,7 +12753,10 @@ else
     "R1=${H157_REVIEW_R1_LINE} 確度判定=${H157_REVIEW_CONF_LINE} R2=${H157_REVIEW_R2_LINE}"
 fi
 
-if grep -Fq 'model: opus（この定義の既定は sonnet のため、ここで明示的に上書きする）' "$H157_REVIEW_REF"; then
+# --- #162で、プロンプト本文の1行ではなくTask/Agentツールの起動時パラメータで
+#     model: opusを渡す手順に変わった（詳細な検証は下記『Review #162』ブロック）。
+#     ここではその移行後も「確度判定はopusで上書きする」という趣旨自体は残っていることだけを見る ---
+if grep -Fq 'Task/Agent起動パラメータ: model: opus' "$H157_REVIEW_REF"; then
   pass "review.md: 確度判定の呼び出しでmodel: opusを明示的に上書きする指示がある（#157）"
 else
   fail "review.md: 確度判定の呼び出しでmodel: opusを明示的に上書きする指示がある（#157）"
@@ -13263,6 +13266,96 @@ for h163_doc in "$CORE_INSTRUCTIONS_FLAT:core/instructions.md" "$H163_README:REA
         "内訳の記述が見つかりません" ;;
   esac
 done
+
+# ---------------------------------------------------------------------------
+# Review #162: 確度判定役のopus指定が、Task/Agentツールの起動時パラメータとして渡す手順
+#              になっており、プロンプト本文の1行に留まっていないこと
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Review #162: 確度判定役のopus起動がTask/Agentの起動時パラメータになっている =="
+
+H162_REVIEW_REF="${REPO_ROOT}/skills/run/references/review.md"
+H162_CONFIDENCE_SECTION="$(awk '/^### 確度判定（R1 と R2 の間/{f=1} /^### R2: 指摘をissue化/{f=0} f' \
+  "$H162_REVIEW_REF")"
+
+if [ -z "$H162_CONFIDENCE_SECTION" ]; then
+  fail "review.md: 『### 確度判定』節が見つかる（#162）" "節が空でした"
+else
+  pass "review.md: 『### 確度判定』節が見つかる（#162）"
+fi
+
+# --- プロンプト本文の中の1行（- 起動時モデル指定: model: opus）に留まっていない ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'- 起動時モデル指定: model: opus'*)
+    fail "review.md: 確度判定のopus指定がプロンプト本文の1行に留まっていない（#162）" \
+      "旧来の『- 起動時モデル指定: model: opus』行が残っています" ;;
+  *)
+    pass "review.md: 確度判定のopus指定がプロンプト本文の1行に留まっていない（#162）" ;;
+esac
+
+# --- Task/Agentツールの起動時パラメータとしてmodelを渡す手順が明記されている ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'Task/Agent ツールの起動時パラメータ'*'model: opus'*)
+    pass "review.md: Task/Agentツールの起動時パラメータでmodel: opusを渡す手順が明記されている（#162）" ;;
+  *)
+    fail "review.md: Task/Agentツールの起動時パラメータでmodel: opusを渡す手順が明記されている（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+# --- プロンプト雛形自体にも起動時パラメータの行がある ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'Task/Agent起動パラメータ: model: opus'*)
+    pass "review.md: 確度判定のプロンプト雛形にTask/Agent起動パラメータの行がある（#162）" ;;
+  *)
+    fail "review.md: 確度判定のプロンプト雛形にTask/Agent起動パラメータの行がある（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+# --- 上書きが効いたかを確認できるよう、出力JSONにモデル名を含めさせる、または
+#     record-agent-tokens.shのnoteにモデル名を記録する手順がある ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'model'*'フィールド'*)
+    pass "review.md: 確度判定の出力JSONに実際に動いたモデル名を含めさせる規定がある（#162）" ;;
+  *)
+    fail "review.md: 確度判定の出力JSONに実際に動いたモデル名を含めさせる規定がある（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+case "$H162_CONFIDENCE_SECTION" in
+  *'--note'*'model='*)
+    pass "review.md: record-agent-tokens.shの--noteにモデル名を記録する手順がある（#162）" ;;
+  *)
+    fail "review.md: record-agent-tokens.shの--noteにモデル名を記録する手順がある（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+# --- 起動時モデル上書きが実現できなかった場合の扱い（据え置き＝発見役と同一モデルで
+#     確度判定する旨）がADR-0006の決定Cと同じ「記録して進む」枠で明記されている ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'技術的に実現できなかった場合'*'同一モデル'*'記録して進む'*)
+    pass "review.md: 起動時モデル上書きが実現できなかった場合の据え置き扱いが明記されている（#162）" ;;
+  *)
+    fail "review.md: 起動時モデル上書きが実現できなかった場合の据え置き扱いが明記されている（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+# --- ADR-0006の(b)起動時モデル上書きが確認済みの事実として引用されている ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'ADR-0006'*'確認したとおり'*)
+    pass "review.md: ADR-0006が確認した事実として起動時モデル上書きを引用している（#162）" ;;
+  *)
+    fail "review.md: ADR-0006が確認した事実として起動時モデル上書きを引用している（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+# --- 生成物側（core/roles/evaluator.md由来）は変更していないので、既存の記述と矛盾しない ---
+if grep -Fq '起動時に `model: opus` を明示して上書き' "${REPO_ROOT}/core/roles/evaluator.md"; then
+  pass "core/roles/evaluator.md: 確度判定役は起動時にmodel: opusを明示して上書きする旨が維持されている（#162）"
+else
+  fail "core/roles/evaluator.md: 確度判定役は起動時にmodel: opusを明示して上書きする旨が維持されている（#162）" \
+    "記述が見つかりません"
+fi
 
 # ---------------------------------------------------------------------------
 # Task #153: レーンをウェーブ横断で維持し generator の cold start を除去する
