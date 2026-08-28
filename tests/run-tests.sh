@@ -28,6 +28,19 @@ done
 unset _ref
 trap 'rm -f "$RUN_SKILL_FLAT"' EXIT
 
+# core/instructions.md も同じ progressive disclosure 構成（本体 + core/references/*.md）を
+# 採る（Task #146）。本体だけを見ると参照ファイルへ移した記述を取りこぼすため、同じ作法で
+# 平坦化ビューを1つ作る。
+CORE_INSTRUCTIONS_FLAT="$(mktemp "${TMPDIR:-/tmp}/dw-core-instructions-flat.XXXXXX")"
+cat "${REPO_ROOT}/core/instructions.md" > "$CORE_INSTRUCTIONS_FLAT"
+for _ref in "${REPO_ROOT}"/core/references/*.md; do
+  [ -f "$_ref" ] || continue
+  printf '\n' >> "$CORE_INSTRUCTIONS_FLAT"
+  cat "$_ref" >> "$CORE_INSTRUCTIONS_FLAT"
+done
+unset _ref
+trap 'rm -f "$RUN_SKILL_FLAT" "$CORE_INSTRUCTIONS_FLAT"' EXIT
+
 PASS=0
 FAIL=0
 SKIP=0
@@ -6735,7 +6748,8 @@ echo "== ドキュメント（共通ルール・generator・README）とアダ�
 
 DOC55_CLAUDE_PLUGIN_JSON="${REPO_ROOT}/.claude-plugin/plugin.json"
 DOC55_CODEX_PLUGIN_JSON="${REPO_ROOT}/.codex-plugin/plugin.json"
-DOC55_INSTRUCTIONS="${REPO_ROOT}/core/instructions.md"
+# core/instructions.md 本体だけでなく core/references/*.md への退避先も見る（#146）。
+DOC55_INSTRUCTIONS="$CORE_INSTRUCTIONS_FLAT"
 DOC55_GENERATOR_ROLE="${REPO_ROOT}/core/roles/generator.md"
 DOC55_README="${REPO_ROOT}/README.md"
 DOC55_AGENT_GENERATOR="${REPO_ROOT}/agents/generator.md"
@@ -9635,22 +9649,23 @@ case "$PLANNER_SKIP_SECTION" in
       "$PLANNER_SKIP_SECTION" ;;
 esac
 
-# --- core/instructions.md: 「## 準備コマンド」節と対称に「Epic本文の『## SKIPパターン』節」が
-#     planner が判断する規定として存在する ---
-INSTR_SKIP_SECTION="$(awk '/^### Epic 本文の `## SKIPパターン` 節/{f=1} /^## 安全ルール/{f=0} f' \
-  "${REPO_ROOT}/core/instructions.md")"
+# --- core/references/epic-sections.md: 「## 準備コマンド」節と対称に「Epic本文の『## SKIPパターン』節」が
+#     planner が判断する規定として存在する（詳細は core/instructions.md 本体から
+#     core/references/epic-sections.md へ退避されている・#146） ---
+INSTR_SKIP_SECTION="$(awk '/^### Epic 本文の `## SKIPパターン` 節/{f=1} f' \
+  "${REPO_ROOT}/core/references/epic-sections.md")"
 
 if [ -z "$INSTR_SKIP_SECTION" ]; then
-  fail "core/instructions.md: 『### Epic 本文の \`## SKIPパターン\` 節』が見つかる（#102）" "節が空でした"
+  fail "core/references/epic-sections.md: 『### Epic 本文の \`## SKIPパターン\` 節』が見つかる（#102）" "節が空でした"
 else
-  pass "core/instructions.md: 『### Epic 本文の \`## SKIPパターン\` 節』が見つかる（#102）"
+  pass "core/references/epic-sections.md: 『### Epic 本文の \`## SKIPパターン\` 節』が見つかる（#102）"
 fi
 
 case "$INSTR_SKIP_SECTION" in
   *'節を書くかどうかの判断は'*'準備コマンド'*'節と同様に planner が行う'*)
-    pass "core/instructions.md: SKIPパターン節を書くかどうかの判断もplannerが行う旨が準備コマンド節と対称に規定されている（#102）" ;;
+    pass "core/references/epic-sections.md: SKIPパターン節を書くかどうかの判断もplannerが行う旨が準備コマンド節と対称に規定されている（#102）" ;;
   *)
-    fail "core/instructions.md: SKIPパターン節を書くかどうかの判断もplannerが行う旨が準備コマンド節と対称に規定されている（#102）" \
+    fail "core/references/epic-sections.md: SKIPパターン節を書くかどうかの判断もplannerが行う旨が準備コマンド節と対称に規定されている（#102）" \
       "$INSTR_SKIP_SECTION" ;;
 esac
 
@@ -10939,46 +10954,50 @@ case "$INSTR_PREREQ_SECTION" in
       "$INSTR_PREREQ_SECTION" ;;
 esac
 
-# --- core/instructions.md: 「## ハーネス非注入原則」が「## サンドボックス方針」の後・
-#     「## 安全ルール（例外なし）」の前に新設されている ---
-INSTR_NOINJECT_SECTION="$(awk '/^## ハーネス非注入原則/{f=1} /^## 安全ルール（例外なし）/{f=0} f' \
+# --- core/instructions.md 本体に「## ハーネス非注入原則」の見出し・原則1文・検証コマンドが
+#     残っている。詳細な対応表・背景は core/references/harness-hygiene.md へ退避されている
+#     （#125。退避は #146） ---
+INSTR_NOINJECT_MAIN_SECTION="$(awk '/^## ハーネス非注入原則/{f=1} /^## 停止させるものと、記録して進めるもの/{f=0} f' \
   "${REPO_ROOT}/core/instructions.md")"
 
-if [ -z "$INSTR_NOINJECT_SECTION" ]; then
+if [ -z "$INSTR_NOINJECT_MAIN_SECTION" ]; then
   fail "core/instructions.md: 『## ハーネス非注入原則』節が見つかる（#125）" "節が空でした"
 else
   pass "core/instructions.md: 『## ハーネス非注入原則』節が見つかる（#125）"
 fi
 
-case "$INSTR_NOINJECT_SECTION" in
+case "$INSTR_NOINJECT_MAIN_SECTION" in
   *'駆動先の業務リポジトリに注入しない'*)
     pass "core/instructions.md: ハーネス非注入原則の宣言文がある（#125）" ;;
   *)
     fail "core/instructions.md: ハーネス非注入原則の宣言文がある（#125）" \
-      "$INSTR_NOINJECT_SECTION" ;;
+      "$INSTR_NOINJECT_MAIN_SECTION" ;;
 esac
 
-case "$INSTR_NOINJECT_SECTION" in
-  *'サンドボックス定義'*'~/.claude/dev-workflow/sandbox/<repo>/'*'YOLO 用の permission 設定'*'.claude/settings.local.json'*'マーカー・状態ファイル・worktree'*'.git/info/exclude'*'.gitignore'*'駆動先の共有ファイルなので触らない'*)
-    pass "core/instructions.md: ハーネス由来のものと置き場所の対応表（3行）が明記されている（#125）" ;;
-  *)
-    fail "core/instructions.md: ハーネス由来のものと置き場所の対応表（3行）が明記されている（#125）" \
-      "$INSTR_NOINJECT_SECTION" ;;
-esac
-
-case "$INSTR_NOINJECT_SECTION" in
+case "$INSTR_NOINJECT_MAIN_SECTION" in
   *'check-repo-hygiene.sh'*)
     pass "core/instructions.md: 検証はscripts/check-repo-hygiene.shが行う旨が明記されている（#125）" ;;
   *)
     fail "core/instructions.md: 検証はscripts/check-repo-hygiene.shが行う旨が明記されている（#125）" \
+      "$INSTR_NOINJECT_MAIN_SECTION" ;;
+esac
+
+# --- core/references/harness-hygiene.md に対応表・詳細な背景が退避されている（#146） ---
+INSTR_NOINJECT_SECTION="$(cat "${REPO_ROOT}/core/references/harness-hygiene.md")"
+
+case "$INSTR_NOINJECT_SECTION" in
+  *'サンドボックス定義'*'~/.claude/dev-workflow/sandbox/<repo>/'*'YOLO 用の permission 設定'*'.claude/settings.local.json'*'マーカー・状態ファイル・worktree'*'.git/info/exclude'*'.gitignore'*'駆動先の共有ファイルなので触らない'*)
+    pass "core/references/harness-hygiene.md: ハーネス由来のものと置き場所の対応表（3行）が明記されている（#125）" ;;
+  *)
+    fail "core/references/harness-hygiene.md: ハーネス由来のものと置き場所の対応表（3行）が明記されている（#125）" \
       "$INSTR_NOINJECT_SECTION" ;;
 esac
 
 case "$INSTR_NOINJECT_SECTION" in
   *'DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS=1'*'同意なく適用される'*)
-    pass "core/instructions.md: git追跡されたsettings.local.jsonはrunをブロックする旨とその理由が明記されている（#125）" ;;
+    pass "core/references/harness-hygiene.md: git追跡されたsettings.local.jsonはrunをブロックする旨とその理由が明記されている（#125）" ;;
   *)
-    fail "core/instructions.md: git追跡されたsettings.local.jsonはrunをブロックする旨とその理由が明記されている（#125）" \
+    fail "core/references/harness-hygiene.md: git追跡されたsettings.local.jsonはrunをブロックする旨とその理由が明記されている（#125）" \
       "$INSTR_NOINJECT_SECTION" ;;
 esac
 
@@ -11165,28 +11184,31 @@ esac
 
 # --- core/instructions.md: 「Epic 本文の『## SKIPパターン』節」と対称な位置に
 #     「Epic 本文の『## 共有ディレクトリ』節」がある ---
+# --- core/references/epic-sections.md: 「Epic 本文の『## SKIPパターン』節」と対称な位置に
+#     「Epic 本文の『## 共有ディレクトリ』節」がある（詳細は core/instructions.md 本体から
+#     core/references/epic-sections.md へ退避されている・#146） ---
 INSTR_SHAREDIR_SECTION="$(awk '/^### Epic 本文の `## 共有ディレクトリ` 節/{f=1} /^### Epic 本文の `## SKIPパターン` 節/{f=0} f' \
-  "${REPO_ROOT}/core/instructions.md")"
+  "${REPO_ROOT}/core/references/epic-sections.md")"
 
 if [ -z "$INSTR_SHAREDIR_SECTION" ]; then
-  fail "core/instructions.md: 『### Epic 本文の \`## 共有ディレクトリ\` 節』が見つかる（#107）" "節が空でした"
+  fail "core/references/epic-sections.md: 『### Epic 本文の \`## 共有ディレクトリ\` 節』が見つかる（#107）" "節が空でした"
 else
-  pass "core/instructions.md: 『### Epic 本文の \`## 共有ディレクトリ\` 節』が見つかる（#107）"
+  pass "core/references/epic-sections.md: 『### Epic 本文の \`## 共有ディレクトリ\` 節』が見つかる（#107）"
 fi
 
 case "$INSTR_SHAREDIR_SECTION" in
   *'#104'*'Step 3'*'generator プロンプトへ渡す'*)
-    pass "core/instructions.md: runがEpic開始時に節を読みStep 3のgeneratorプロンプトへ渡す旨が明記されている（#107）" ;;
+    pass "core/references/epic-sections.md: runがEpic開始時に節を読みStep 3のgeneratorプロンプトへ渡す旨が明記されている（#107）" ;;
   *)
-    fail "core/instructions.md: runがEpic開始時に節を読みStep 3のgeneratorプロンプトへ渡す旨が明記されている（#107）" \
+    fail "core/references/epic-sections.md: runがEpic開始時に節を読みStep 3のgeneratorプロンプトへ渡す旨が明記されている（#107）" \
       "$INSTR_SHAREDIR_SECTION" ;;
 esac
 
 case "$INSTR_SHAREDIR_SECTION" in
   *'節を書くかどうかの判断は planner が行う'*)
-    pass "core/instructions.md: 節を書くかどうかの判断はplannerが行う旨が明記されている（#107）" ;;
+    pass "core/references/epic-sections.md: 節を書くかどうかの判断はplannerが行う旨が明記されている（#107）" ;;
   *)
-    fail "core/instructions.md: 節を書くかどうかの判断はplannerが行う旨が明記されている（#107）" \
+    fail "core/references/epic-sections.md: 節を書くかどうかの判断はplannerが行う旨が明記されている（#107）" \
       "$INSTR_SHAREDIR_SECTION" ;;
 esac
 
@@ -11212,6 +11234,118 @@ for f in agents/planner.md codex-agents/planner.toml; do
       "節が見つかりませんでした"
   fi
 done
+
+# ---------------------------------------------------------------------------
+# Task #146: core/references/ による参照機構（core/instructions.md の progressive disclosure）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #146: core/references/ による参照機構 =="
+
+# --- core/references/ に退避先ファイルが実在する ---
+for f in watchdog.md epic-sections.md harness-hygiene.md; do
+  if [ -f "${REPO_ROOT}/core/references/${f}" ]; then
+    pass "core/references/${f}: ファイルが実在する（#146）"
+  else
+    fail "core/references/${f}: ファイルが実在する（#146）" "見つかりません"
+  fi
+done
+
+# --- core/instructions.md のポインタ行から参照されているパスが実際に解決できる ---
+# `${CLAUDE_PLUGIN_ROOT}/core/references/<名前>.md` という記法でポインタ行に書かれている
+# パスを1つずつ取り出し、リポジトリルートからの相対パスとして実在するかを確認する。
+# for/whileのパイプはサブシェルになりPASS/FAILカウンタが親シェルに伝播しないため、
+# 配列 + for（サブシェルを作らない）で回す（review#99 と同じ作法）。
+CORE146_POINTER_PATHS=()
+while IFS= read -r p; do
+  [ -n "$p" ] && CORE146_POINTER_PATHS+=("$p")
+done < <(grep -oE 'core/references/[A-Za-z0-9_-]+\.md' "${REPO_ROOT}/core/instructions.md" | sort -u)
+
+if [ "${#CORE146_POINTER_PATHS[@]}" -eq 0 ]; then
+  fail "core/instructions.md: core/references/ へのポインタ行が1つ以上ある（#146）" "見つかりません"
+else
+  pass "core/instructions.md: core/references/ へのポインタ行が1つ以上ある（#146）"
+fi
+
+for p in "${CORE146_POINTER_PATHS[@]}"; do
+  if [ -f "${REPO_ROOT}/${p}" ]; then
+    pass "core/instructions.md のポインタ行: ${p} が解決できる（#146）"
+  else
+    fail "core/instructions.md のポインタ行: ${p} が解決できる（#146）" "見つかりません: ${p}"
+  fi
+done
+
+# --- core/instructions.md は core/references/*.md を <!-- include: --> でインライン展開して
+#     いない（インライン展開すると本文が再び膨らみ、薄くする目的に反するため） ---
+if grep -Fq -- '<!-- include: core/references/' "${REPO_ROOT}/core/instructions.md"; then
+  fail "core/instructions.md: core/references/*.md を <!-- include: --> で展開していない（#146）" \
+    "include指定が見つかりました"
+else
+  pass "core/instructions.md: core/references/*.md を <!-- include: --> で展開していない（#146）"
+fi
+
+# --- 生成物（agents/*.md・codex-agents/*.toml）にも core/references/*.md の本文が
+#     インライン展開されていない（本文だけを include する既存の仕組みを踏襲しているため、
+#     参照ファイルの本文そのものは生成物に現れないはず） ---
+CORE146_WATCHDOG_ONLY_PHRASE='しきい値（既定値。環境変数で変更可'
+CORE146_EPIC_ONLY_PHRASE='含むディレクトリ生成が支配的なコストになる'
+CORE146_HYGIENE_ONLY_PHRASE='clone したチームメンバー全員のセッションに'
+
+for f in agents/planner.md agents/generator.md agents/evaluator.md \
+         codex-agents/planner.toml codex-agents/generator.toml codex-agents/evaluator.toml; do
+  if grep -Fq -- "$CORE146_WATCHDOG_ONLY_PHRASE" "${REPO_ROOT}/${f}" \
+    || grep -Fq -- "$CORE146_EPIC_ONLY_PHRASE" "${REPO_ROOT}/${f}" \
+    || grep -Fq -- "$CORE146_HYGIENE_ONLY_PHRASE" "${REPO_ROOT}/${f}"; then
+    fail "${f}: core/references/*.md の本文がインライン展開されていない（#146）" \
+      "参照ファイル専用の記述が生成物中に見つかりました"
+  else
+    pass "${f}: core/references/*.md の本文がインライン展開されていない（#146）"
+  fi
+done
+
+# --- core/instructions.md から退避した内容が core/references/*.md 側に実在する
+#     （内容消失の回帰防止。移設した代表的なフレーズを1つずつ確認する） ---
+case "$(cat "${REPO_ROOT}/core/references/watchdog.md")" in
+  *'自動打ち切りは原理的に実装できない'*'アダプタ間に'*'機能差を作らないため採用していない'*)
+    pass "core/references/watchdog.md: 退避したアダプタ差異・しきい値の記述が残っている（#146）" ;;
+  *)
+    fail "core/references/watchdog.md: 退避したアダプタ差異・しきい値の記述が残っている（#146）" \
+      "$(cat "${REPO_ROOT}/core/references/watchdog.md")" ;;
+esac
+
+case "$(cat "${REPO_ROOT}/core/references/epic-sections.md")" in
+  *'isolation'*'worktree）で初回1回だけ実行'*'issue #104'*'DEV_WORKFLOW_SKIP_PATTERN'*)
+    pass "core/references/epic-sections.md: 退避した3節の詳細記述が残っている（#146）" ;;
+  *)
+    fail "core/references/epic-sections.md: 退避した3節の詳細記述が残っている（#146）" \
+      "$(cat "${REPO_ROOT}/core/references/epic-sections.md")" ;;
+esac
+
+case "$(cat "${REPO_ROOT}/core/references/harness-hygiene.md")" in
+  *'サンドボックス定義'*'YOLO 用の permission 設定'*'マーカー・状態ファイル・worktree'*)
+    pass "core/references/harness-hygiene.md: 退避した対応表が残っている（#146）" ;;
+  *)
+    fail "core/references/harness-hygiene.md: 退避した対応表が残っている（#146）" \
+      "$(cat "${REPO_ROOT}/core/references/harness-hygiene.md")" ;;
+esac
+
+# --- README.md: progressive disclosure 方針の節がある ---
+if grep -Fq '## プロンプトの progressive disclosure 方針' "${REPO_ROOT}/README.md"; then
+  pass "README.md: 「プロンプトの progressive disclosure 方針」の節がある（#146）"
+else
+  fail "README.md: 「プロンプトの progressive disclosure 方針」の節がある（#146）" "節が見つかりません"
+fi
+
+DOC146_README_PD_SECTION="$(awk '/^## プロンプトの progressive disclosure 方針/{f=1} /^## ワークフロー/{f=0} f' \
+  "${REPO_ROOT}/README.md")"
+
+case "$DOC146_README_PD_SECTION" in
+  *'skills/run/references/'*'core/references/'*)
+    pass "README.md: skills/*/references/ と core/references/ の使い分けが書かれている（#146）" ;;
+  *)
+    fail "README.md: skills/*/references/ と core/references/ の使い分けが書かれている（#146）" \
+      "$DOC146_README_PD_SECTION" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # share-prepared-dirs.sh のロック兼完了マーカーと --run-prep（Task #111）

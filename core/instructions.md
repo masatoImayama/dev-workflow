@@ -149,35 +149,12 @@ git merge --no-edit "${LANE_BRANCH}"        # 直線性の強制はやめる（f
 ## ハング・スリープの検知
 
 run は全タスク完了まで長時間動き続けるため、無応答・スリープによる中断に人間が気付ける手段が要る（Epic #42）。
+生存信号（heartbeat）の記録方式・フック対象の限定理由・アダプタごとの `--abort` の効き方の違い・
+しきい値表は `${CLAUDE_PLUGIN_ROOT}/core/references/watchdog.md` を参照する。
+**watchdogの挙動を判断する必要があるとき（ハング調査・しきい値の確認等）にだけ読む。**
 
-- **生存信号（heartbeat）は「実際に作業するツール」の呼び出しフックで記録され、プロセス外の
-  watchdog がそれを監視する。** run 自身はサブエージェントの完了までブロックされるため、
-  run が自分自身を監視する設計は成立しない。監視は必ずプロセス外に置く
-- **フックの対象は `Bash` / `Write` / `Edit` / `MultiEdit` / `Task`（Codex では `shell` /
-  `apply_patch` を含む）に限る。`Read` / `Grep` / `Glob` などの読み取り専用ツールでは発火しない。**
-  これらは1ターンに何十回も呼ばれるうえ、1回ごとに bash プロセスの起動コストを払う
-  （Windows では特に大きい）。読み取りだけが延々と続く状態は「進捗している」とは言えず、
-  むしろ heartbeat が更新され続けることで watchdog のストール検知を鈍らせる。
-  **打ち切り（`--abort`）の判定も同じ経路にあるため、`Read` の最中には効かない。**
-  効くのはエージェントが次に作業ツールを呼んだ瞬間である
 - **watchdog は検知して通知するだけであり、自動でエージェントを打ち切らない。打ち切りは人間が行う**
-  （`watchdog.sh --abort "理由"`、またはセッションの中断）。**`--abort` の効き方はアダプタで異なる**
-  （レビュー#59, #61。詳細は `README.md`「Claude Code との差分」表を参照）。
-  Claude Code は `PreToolUse` の `exit 2` でツール呼び出しをハードブロックできるが、
-  Codex の `PreToolUse` は `systemMessage` のみに対応し `continue` を読まないため、
-  ツール呼び出し自体は実行される**ソフトな打ち切り依頼**にとどまる。確実に止めたい場合は
-  いずれのアダプタでもセッションの中断が必要
-- **Claude Code ではサブエージェントを外部から中断できない**（同一プロセス内の API 呼び出しであり、
-  kill できるのは CLI プロセス全体だけ）ため、**自動打ち切りは原理的に実装できない**
-- **Codex では `codex exec` が子プロセスなのでハードタイムアウトは技術的に可能だが、アダプタ間に
-  機能差を作らないため採用していない。両アダプタとも「検知して通知するだけ」である**
-- しきい値（既定値。環境変数で変更可。一覧は `README.md`「watchdog の環境変数一覧」を参照）
-
-| しきい値 | 既定値 | 意味 |
-|---|---|---|
-| 無活動（ストール） | 15分 | heartbeat の最終更新から15分経過で最初の通知 |
-| エスカレーション | 30分間隔 × 最大3回 | ストールが続く限り30分ごとに再通知（最大3回） |
-| ウェーブ予算 | 90分（Task issue に `- 想定時間:` が無い場合の既定） | ウェーブ開始からの経過が予算を超えたら1回通知 |
+  （`watchdog.sh --abort "理由"`、またはセッションの中断）
 
 ## コミットメッセージ規約
 
@@ -332,65 +309,38 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" --print-
 `--print-plan` が `mode=none` を返す場合、上記3択のいずれからもサンドボックス定義が
 見つかっていないので、自律モードを開始せずに停止する。
 
+Epic 本文には、上記のサンドボックス定義とは別に**3つの任意節**（準備コマンド・共有ディレクトリ・
+SKIPパターン）を書ける。書くかどうかの判断はいずれも planner が行う。詳細（背景・書式・
+run/generator 側の扱い）は `${CLAUDE_PLUGIN_ROOT}/core/references/epic-sections.md` を参照する。
+**Epic issue 本文にこれらの節を書くか判断するとき、run/generator がこれらの節の扱いで迷ったとき
+にだけ読む。**
+
 ### プロジェクト固有の準備コマンド
 
-生成物の配置（wasm 等）・依存物のダウンロード・コード生成など、**タスクに依らず同じ結果になる
-準備作業**は、run が Epic 開始時に1回だけ実行する。コンテナは Epic 単位で常駐する
-（`sandbox-exec.sh` の既存挙動）ため、この1回はキャッシュを温め、統合ゲート用のコンテナに
-配置する目的で行う。**適用範囲は run が実行する Epic 専用 worktree に限られ、各レーンの
-isolation worktree には及ばない。**
-
-- Epic issue 本文に `## 準備コマンド` 節があれば、run がその内容を Epic 開始時の
-  `--warm`（`sandbox-exec.sh`）に1回だけ渡す
-- 節が無い場合は現行どおり、ビルドコマンドで `--warm` するだけになる（後方互換）
-- `--warm` は失敗してもループを止めない（`sandbox-exec.sh` の既存挙動）。準備が失敗した場合は
-  その旨を表示するだけで続行する
-- run から準備コマンドが渡された場合、generator は**自分の作業ディレクトリ（isolation
-  worktree）で初回1回だけ実行**し、**同一 worktree 内で2回目以降は実行しない**。
-  準備が効いていないと判断した場合も、自前で再実行はせずその事実を報告する
-  （`core/roles/generator.md`）
-- 節を書くかどうかの判断は planner が行う（`core/roles/planner.md`）
+タスクに依らず同じ結果になる準備作業（wasm配置・依存物ダウンロード・コード生成等）は、
+run が Epic 開始時に `## 準備コマンド` 節を読み1回だけ実行する（`--warm` 経由）。
+適用範囲は Epic 専用 worktree に限られ、各レーンの isolation worktree には及ばない。
 
 ### Epic 本文の `## 共有ディレクトリ` 節
 
-レーンごとに準備コマンドをフル実行すると、`node_modules` / `vendor` 等の大量のファイルを
-含むディレクトリ生成が支配的なコストになる（issue #104）。Epic 本文の `## 共有ディレクトリ`
-節は、Epic 専用 worktree の準備成果ディレクトリをレーンへ symlink で共有するための宣言である。
-
-- 節があれば run が Epic 開始時にその内容を読み、Step 3 の各 generator プロンプトへ渡す
-- 節が無ければ何もしない（共有せず、現行どおり各レーンで準備コマンドをフル実行する）
-- 節を書くかどうかの判断は planner が行う（`core/roles/planner.md`）
+準備成果ディレクトリ（`node_modules` / `vendor` 等）をレーンへ symlink 共有するための宣言
+（issue #104）。節があれば run が Epic 開始時に読み、Step 3 の各 generator プロンプトへ渡す。
 
 ### Epic 本文の `## SKIPパターン` 節
 
 `scripts/count-skips.sh` は go / jest / pytest の3形式しか built-in で判定できない。
-駆動先プロジェクトのテスト出力がこの3形式のいずれとも異なる場合、Epic issue 本文に
-`## SKIPパターン` 節（SKIP行に一致するERE1行）が無いと `count-skips.sh` は既定で
-`skips=unknown` になり、SKIP件数の検証が働かないまま run が進んでしまう。
-
-- 節があれば run がその内容を `DEV_WORKFLOW_SKIP_PATTERN` として読み取り、Step 3 の各
-  generator プロンプトと統合ゲートの両方に渡す（`## 準備コマンド` 節と同じ抽出方法）
-- 節が無ければ何も設定されず、built-in ランナー（go/jest/pytest）の判定だけが行われる
-- 節を書くかどうかの判断は `## 準備コマンド` 節と同様に planner が行う（`core/roles/planner.md`）
+それ以外の形式では `## SKIPパターン` 節（SKIP行に一致するERE1行）が無いと
+`count-skips.sh` は既定で `skips=unknown` になる。
 
 ## ハーネス非注入原則
 
 **dev-workflow ハーネス都合のファイル・設定を、駆動先の業務リポジトリに注入しない。**
-サンドボックス定義に限らず、permission 設定・マーカー・状態ファイル・worktree 等、
-ハーネスが動作のために必要とするものは、業務リポジトリのコミット履歴やPRに混入させない。
+何がハーネス由来にあたるか・あるべき置き場所の対応表と背景は
+`${CLAUDE_PLUGIN_ROOT}/core/references/harness-hygiene.md` を参照する。
+**新しくハーネス由来のファイルを増やすときにだけ読む。**
 
-| ハーネス由来のもの | あるべき置き場所 |
-|---|---|
-| サンドボックス定義 | 規約パス `~/.claude/dev-workflow/sandbox/<repo>/` または環境変数。リポジトリ内に置くのは**チームで run を共有する場合に限る** |
-| YOLO 用の permission 設定 | gitignore 済みの `.claude/settings.local.json`、またはユーザースコープ。**git 追跡された設定に広範な allow を積まない** |
-| マーカー・状態ファイル・worktree | リポジトリ内に置くが、`.git/info/exclude`（コミットされない）で除外する。**`.gitignore` は駆動先の共有ファイルなので触らない** |
-
-- 検証は `scripts/check-repo-hygiene.sh` が行う（SessionStart で exclude 整備、
-  run 起動時に `--run` でプリフライト）
-- **git 追跡された `.claude/settings.local.json` は run をブロックする**
-  （`DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS=1` で opt-out）。追跡された permission 設定は、
-  clone したチームメンバー全員のセッションに**同意なく適用される**ため、既定でブロックする
-- 新しくハーネス由来のファイルを増やす場合は、必ずこの表のどれかに当てはめてから追加すること
+検証は `scripts/check-repo-hygiene.sh` が行う（SessionStart で exclude 整備、
+run 起動時に `--run` でプリフライト）。
 
 ## 停止させるものと、記録して進めるもの
 
