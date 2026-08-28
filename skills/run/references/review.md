@@ -24,12 +24,56 @@ R1 は `correctness` / `readability` / `over-engineering` / `security` の4観�
    **その観点が未レビューである事実を Epic issue と PR 本文に記録**して先へ進む
    （「記録して進む」に分類する。run は止めない）。残り3本の結果でマージ・判定は続行する
 
-マージ後の `findings[]` は、以降の R2（issue化）で通常どおり1本のリストとして扱う。
+マージ後の `findings[]` は、次の「確度判定」を経てから R2（issue化）へ進む。
+
+### 確度判定（R1 と R2 の間。Task #157）
+
+R1（発見役・sonnet・観点別4本並列）はスピード優先のため、opus単独レビューより誤検知
+（false positive）が混じりやすい。**issue化する前に、より高精度なモデルで1本だけ確度判定を
+挟む。** 発見（並列・sonnet）と確度判定（単発・opus）で役割を分けることで、並列化による
+レイテンシ削減と最終判定の精度を両立させる（役割の定義は `core/roles/evaluator.md`
+「発見役と確度判定役」を参照）。
+
+対象は「R1の結果マージ」後の `findings[]` のうち **high / medium のみ**（low はもともと
+issue化しないため確度判定は不要。共通ルールの「レビュー基準」の3段階は変更しない）。
+high/medium が1件も無ければこのステップ自体を省略し、そのままR2（0件のissue化）へ進む。
+
+```
+@evaluator
+Epic #$ARGUMENTS のレビュー指摘の確度を判定してください。
+- モード: confidence-check
+- 起動時モデル指定: model: opus（この定義の既定は sonnet のため、ここで明示的に上書きする）
+- 対象: 以下はR1マージ後のfindings（high/mediumのみ）
+[マージ済みfindingsのJSON配列をそのまま貼る]
+- 差分範囲: main...[epic/epicXX/機能名]
+- 各findingについて実際にコードを確認し、confidence（high-confidence / low-confidence）を判定すること
+- 新しい指摘を追加しないこと（発見はR1が完了済み。ここでの役割は確度判定のみ）
+- 最後に必ずJSONブロック（各findingに`confidence`フィールドを追加したfindings配列）を出力すること
+```
+
+**`low-confidence` と判定された指摘は、破棄せず「レビューで挙がった軽微な指摘」（PR本文。
+issue化せず記録のみ）へ格下げして記録する。** 既存の low severity の指摘を記録するのと
+同じ枠を再利用する（共通ルールの「レビュー基準」参照）。**high の指摘であっても、確度判定を
+経ずに黙って捨てる経路は無い。** `high-confidence` と判定された指摘だけが、続く
+「R2: 指摘をissue化」の対象になる。
+
+確度判定呼び出しのトークン消費もR1と同じ作法で記録する（`--mode confidence-check`）:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
+  --epic "$EPIC_NUM" --role evaluator --mode confidence-check --tokens [読み取ったトークン数]
+```
+
+確度判定呼び出しが失敗・応答不能だった場合は、**high/mediumの指摘を無条件でissue化せず
+握り潰しもしない**。「記録して進む」に分類し、確度判定未実施の事実をEpic issueとPR本文に
+記録した上で、対象findingsを`high-confidence`とみなしてR2へ進める（安全側＝人間のレビューに
+委ねる側へ倒す。黙って破棄しない）。
 
 ### R2: 指摘をissue化
 
-マージ済みJSONを読み、**high と medium の指摘だけ**をissueにする。
-low は issue化せず、PR本文の「レビューで挙がった軽微な指摘」に列挙するだけに留める。
+確度判定を通過した（`high-confidence`と判定された）findingsのうち、**high と medium の
+指摘だけ**をissueにする。low、および確度判定で`low-confidence`となった指摘はissue化せず、
+PR本文の「レビューで挙がった軽微な指摘」に列挙するだけに留める。
 
 findingsを読み取り、1件ずつ以下を実行する:
 

@@ -1,7 +1,7 @@
 ---
 name: evaluator
 description: レビュアーエージェント。Epic完了時に全差分を一括レビューし、指摘をissue化できる構造で出力する。
-model: opus
+model: sonnet
 tools: Read, Grep, Glob, Bash, mcp__plugin_dev-workflow_code-review-graph
 disallowedTools: Write, Edit, AskUserQuestion
 maxTurns: 120
@@ -64,6 +64,24 @@ wave-review / delta-review では**指定された差分の範囲外を蒸し返
   この場合は上記表の**全ファイルを読む**
 - 判定規約は観点の有無に関わらず不変: high または medium が1件でもあれば `REQUEST_CHANGES`、
   low のみ／指摘なしは `APPROVE`。重要度の3段階の基準（共通ルール「レビュー基準」）も不変
+
+## 発見役と確度判定役（モデルの使い分け。Task #157）
+
+evaluator は同一の定義のまま、**起動時のモデル指定**で2つの役割を使い分ける
+（定義ファイル自体の `model:` は変更しない。詳細は
+`adapters/claude/overlays/evaluator.md`「既定モデルは sonnet」を参照）。
+
+- **発見役**（既定モデル・sonnet）: R1（Epic末レビューの観点別4本並列起動）で動く。
+  上記「観点（focus）」に従い、担当観点の指摘を洗い出す。速度優先。多少の誤検知は許容する
+- **確度判定役**（起動時に `model: opus` を明示して上書き）: R1 と R2（issue化）の間に
+  **1本だけ**挟まる。発見役が返した `findings` を再検証し、各指摘に確度
+  （`high-confidence` / `low-confidence`）を付与する。**新しい指摘は追加しない。**
+  精度優先。手順は `skills/run/references/review.md`「確度判定」を参照
+- **wave-review / delta-review はこの確度判定を経由しない**（既定モデルのまま単発で動く。
+  対象差分が小さく、誤検知1件あたりのコストが epic-review の一括レビューより低いため）
+- 確度判定で `low-confidence` と判定された指摘は、**破棄せず**「レビューで挙がった軽微な指摘」
+  （issue化せず記録のみ。共通ルール「レビュー基準」の low と同じ枠）へ格下げして記録する。
+  **high の指摘であっても、確度判定を経ずに黙って捨てる経路は無い**
 
 ## 責務
 
@@ -593,3 +611,11 @@ run 起動時に `--run` でプリフライト）。
 テスト・ビルド・可読性チェックは可読性ガード（`PostToolUse` / `Stop` フック、
 `scripts/check-readability.sh`）と run スキルの機械的ゲートが担保している。
 レビュアーはそれらの再実行ではなく、設計・品質・セキュリティ・仕様充足の観点に集中する。
+
+### 既定モデルは sonnet。確度判定だけ起動時に opus へ上書きする（Task #157）
+
+`model:` の既定値は `sonnet`（発見役）。**確度判定役として起動する場合は、呼び出し側が
+Task/Agent の起動時モデル指定で `model: opus` を明示的に上書きする。** この定義ファイル自体は
+変えない（frontmatter を書き換えずに済むよう、起動時上書きだけで発見役／確度判定役を切り替える）。
+詳細は `core/roles/evaluator.md`「発見役と確度判定役」と
+`skills/run/references/review.md`「確度判定」を参照。

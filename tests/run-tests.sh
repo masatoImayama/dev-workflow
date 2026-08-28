@@ -12544,14 +12544,16 @@ else
   fail "core/roles/evaluator.md: JSONの規約・判定基準が本体に残っている（#151）"
 fi
 
-# --- core/roles/evaluator.md が薄くなっている（目安 180行以下。行数競技にはしない） ---
+# --- core/roles/evaluator.md が薄くなっている（元254行に対し目安180行以下。行数競技にはしない。
+#     Task #157 が「発見役と確度判定役」の役割分担節を正当に追加するため、しきい値は
+#     220行に緩めて「有意に薄くなっていること」だけを検査する） ---
 
 H151_LINES="$(wc -l < "$H151_EVALUATOR_ROLE" | tr -d ' ')"
-if [ "$H151_LINES" -le 180 ]; then
-  pass "core/roles/evaluator.md: 180行以下に薄くなっている（実測 ${H151_LINES} 行）（#151）"
+if [ "$H151_LINES" -le 220 ]; then
+  pass "core/roles/evaluator.md: 元254行より有意に薄くなっている（実測 ${H151_LINES} 行）（#151）"
 else
-  fail "core/roles/evaluator.md: 180行以下に薄くなっている（実測 ${H151_LINES} 行）（#151）" \
-    "目安の180行を超えています"
+  fail "core/roles/evaluator.md: 元254行より有意に薄くなっている（実測 ${H151_LINES} 行）（#151）" \
+    "目安の220行を超えています"
 fi
 
 # --- 生成物（agents/evaluator.md・codex-agents/evaluator.toml）に対応表・可読性要点が反映されている ---
@@ -12575,6 +12577,181 @@ if [ -f "$H151_CODEX_AGENT_EVALUATOR" ] \
 else
   fail "codex-agents/evaluator.toml: 正本のチェックリスト分割内容が反映されている（#151）" \
     "見つかりません: ${H151_CODEX_AGENT_EVALUATOR}"
+fi
+
+# ---------------------------------------------------------------------------
+# Task #157: evaluator を「発見は sonnet、確度判定は opus」に変える
+#
+# ハーネスで確認できた「起動時のモデル指定」（別エージェント定義を増やさない方式）で
+# 発見役（既定sonnet）と確度判定役（起動時にopusを明示）を分ける。レビュー基準
+# （core/instructions.md）は変更しない。Codex側は未確認のため据え置き、その事実を記述に残す。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #157: evaluatorの発見役(sonnet)・確度判定役(opus)の分離 =="
+
+H157_CLAUDE_OVERLAY="${REPO_ROOT}/adapters/claude/overlays/evaluator.md"
+H157_EVALUATOR_ROLE="${REPO_ROOT}/core/roles/evaluator.md"
+H157_REVIEW_REF="${REPO_ROOT}/skills/run/references/review.md"
+H157_CODEX_OVERLAY="${REPO_ROOT}/adapters/codex/overlays/evaluator.toml"
+H157_AGENT_EVALUATOR="${REPO_ROOT}/agents/evaluator.md"
+H157_CODEX_AGENT_EVALUATOR="${REPO_ROOT}/codex-agents/evaluator.toml"
+H157_README="${REPO_ROOT}/README.md"
+H157_ADR="${REPO_ROOT}/docs/adr/0006-evaluator-model-split.md"
+H157_INSTRUCTIONS="${REPO_ROOT}/core/instructions.md"
+
+# --- adapters/claude/overlays/evaluator.md: frontmatterのmodelがsonnetに変わっている
+#     （別エージェント定義を増やす方式ではなく、起動時上書き方式を採ったことの確認） ---
+
+H157_FRONTMATTER="$(awk '/^---$/{c++; print; next} c==1' "$H157_CLAUDE_OVERLAY")"
+if printf '%s\n' "$H157_FRONTMATTER" | grep -Fq 'model: sonnet'; then
+  pass "adapters/claude/overlays/evaluator.md: frontmatterのmodelがsonnet（発見役の既定）になっている（#157）"
+else
+  fail "adapters/claude/overlays/evaluator.md: frontmatterのmodelがsonnet（発見役の既定）になっている（#157）" \
+    "$H157_FRONTMATTER"
+fi
+
+if grep -Fq 'model: opus' "$H157_CLAUDE_OVERLAY" && grep -Fq '起動時モデル指定' "$H157_CLAUDE_OVERLAY"; then
+  pass "adapters/claude/overlays/evaluator.md: 確度判定は起動時にmodel: opusへ上書きする旨が明記されている（#157）"
+else
+  fail "adapters/claude/overlays/evaluator.md: 確度判定は起動時にmodel: opusへ上書きする旨が明記されている（#157）"
+fi
+
+# --- core/roles/evaluator.md: 発見役と確度判定役の責務が分かれている ---
+
+if grep -Fq '## 発見役と確度判定役' "$H157_EVALUATOR_ROLE" \
+  && grep -Fq '**発見役**（既定モデル・sonnet）' "$H157_EVALUATOR_ROLE" \
+  && grep -Fq '**確度判定役**（起動時に `model: opus` を明示して上書き）' "$H157_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: 発見役(sonnet)と確度判定役(opus)の責務が分かれている（#157）"
+else
+  fail "core/roles/evaluator.md: 発見役(sonnet)と確度判定役(opus)の責務が分かれている（#157）"
+fi
+
+# --- core/roles/evaluator.md: 確度判定を通らなかった指摘を黙って落とさない旨 ---
+
+if grep -Fq '確度判定を経ずに黙って捨てる経路は無い' "$H157_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: highの指摘を黙って落とす経路が無い旨が明記されている（#157）"
+else
+  fail "core/roles/evaluator.md: highの指摘を黙って落とす経路が無い旨が明記されている（#157）"
+fi
+
+# --- core/roles/evaluator.md: wave-review/delta-reviewは確度判定を経由しない旨 ---
+
+if grep -Fq 'wave-review / delta-review はこの確度判定を経由しない' "$H157_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: wave-review/delta-reviewは確度判定を経由しない旨が明記されている（#157）"
+else
+  fail "core/roles/evaluator.md: wave-review/delta-reviewは確度判定を経由しない旨が明記されている（#157）"
+fi
+
+# --- レビュー基準（重要度3段階・判定）が変更されていない ---
+# core/instructions.md「レビュー基準」の判定式（APPROVE/REQUEST_CHANGES）が既存のまま残っている
+
+if grep -Fq '**APPROVE**: 指摘なし、または low のみ' "$H157_INSTRUCTIONS" \
+  && grep -Fq '**REQUEST_CHANGES**: high または medium の指摘がある' "$H157_INSTRUCTIONS"; then
+  pass "core/instructions.md: レビュー基準の判定（APPROVE/REQUEST_CHANGES）が変更されていない（#157）"
+else
+  fail "core/instructions.md: レビュー基準の判定（APPROVE/REQUEST_CHANGES）が変更されていない（#157）"
+fi
+
+# --- skills/run/references/review.md: 確度判定の1節がR1〜R2の間に追加され、R1→確度判定→R2の順序が明確 ---
+
+H157_REVIEW_R1_LINE="$(grep -n '^### R1の結果マージ' "$H157_REVIEW_REF" | head -1 | cut -d: -f1)"
+H157_REVIEW_CONF_LINE="$(grep -n '^### 確度判定' "$H157_REVIEW_REF" | head -1 | cut -d: -f1)"
+H157_REVIEW_R2_LINE="$(grep -n '^### R2: 指摘をissue化' "$H157_REVIEW_REF" | head -1 | cut -d: -f1)"
+
+if [ -n "$H157_REVIEW_R1_LINE" ] && [ -n "$H157_REVIEW_CONF_LINE" ] && [ -n "$H157_REVIEW_R2_LINE" ] \
+  && [ "$H157_REVIEW_R1_LINE" -lt "$H157_REVIEW_CONF_LINE" ] \
+  && [ "$H157_REVIEW_CONF_LINE" -lt "$H157_REVIEW_R2_LINE" ]; then
+  pass "review.md: R1の結果マージ → 確度判定 → R2の順序でセクションが並んでいる（#157）"
+else
+  fail "review.md: R1の結果マージ → 確度判定 → R2の順序でセクションが並んでいる（#157）" \
+    "R1=${H157_REVIEW_R1_LINE} 確度判定=${H157_REVIEW_CONF_LINE} R2=${H157_REVIEW_R2_LINE}"
+fi
+
+if grep -Fq 'model: opus（この定義の既定は sonnet のため、ここで明示的に上書きする）' "$H157_REVIEW_REF"; then
+  pass "review.md: 確度判定の呼び出しでmodel: opusを明示的に上書きする指示がある（#157）"
+else
+  fail "review.md: 確度判定の呼び出しでmodel: opusを明示的に上書きする指示がある（#157）"
+fi
+
+if grep -Fq 'low-confidence` と判定された指摘は、破棄せず' "$H157_REVIEW_REF"; then
+  pass "review.md: low-confidenceの指摘は破棄せず軽微な指摘として記録する旨が明記されている（#157）"
+else
+  fail "review.md: low-confidenceの指摘は破棄せず軽微な指摘として記録する旨が明記されている（#157）"
+fi
+
+# --- Codex側: 同等機構は未確認である事実が記述に残っている ---
+
+if grep -Fq '未確認' "$H157_CODEX_OVERLAY" && grep -Fq '推測で実装しない' "$H157_CODEX_OVERLAY"; then
+  pass "adapters/codex/overlays/evaluator.toml: モデル切り替え機構が未確認である事実が明記されている（#157）"
+else
+  fail "adapters/codex/overlays/evaluator.toml: モデル切り替え機構が未確認である事実が明記されている（#157）"
+fi
+
+# --- docs/adr/0006-evaluator-model-split.md: 必須節と確認結果・却下した代案が書かれている ---
+
+if [ -f "$H157_ADR" ]; then
+  pass "docs/adr/0006-evaluator-model-split.md: ファイルが存在する（#157）"
+else
+  fail "docs/adr/0006-evaluator-model-split.md: ファイルが存在する（#157）" "ファイルが見つかりません"
+fi
+
+for h157_adr_heading in '## 決定' '## 理由' '## トレードオフ' '## 却下した代案'; do
+  if grep -Fq -- "$h157_adr_heading" "$H157_ADR" 2>/dev/null; then
+    pass "docs/adr/0006: 『${h157_adr_heading}』節がある（#157）"
+  else
+    fail "docs/adr/0006: 『${h157_adr_heading}』節がある（#157）" "節が見つかりません"
+  fi
+done
+
+if grep -Fq '(b) が実際に可能であることを確認した' "$H157_ADR" 2>/dev/null \
+  && grep -Fq 'advisor toolの有無は確認していない' "$H157_ADR" 2>/dev/null \
+  && grep -Fq 'Codex側' "$H157_ADR" 2>/dev/null && grep -Fq '確認していない' "$H157_ADR" 2>/dev/null; then
+  pass "docs/adr/0006: ハーネスで確認した方法・未確認事項が事実ベースで書かれている（#157）"
+else
+  fail "docs/adr/0006: ハーネスで確認した方法・未確認事項が事実ベースで書かれている（#157）"
+fi
+
+# --- 生成物（agents/evaluator.md・codex-agents/evaluator.toml）に反映されている ---
+
+if [ -f "$H157_AGENT_EVALUATOR" ] \
+  && grep -Fq 'model: sonnet' "$H157_AGENT_EVALUATOR" \
+  && grep -Fq '## 発見役と確度判定役' "$H157_AGENT_EVALUATOR"; then
+  pass "agents/evaluator.md: 正本のモデル分離内容が反映されている（#157）"
+else
+  fail "agents/evaluator.md: 正本のモデル分離内容が反映されている（#157）" \
+    "見つかりません: ${H157_AGENT_EVALUATOR}"
+fi
+
+if [ -f "$H157_CODEX_AGENT_EVALUATOR" ] \
+  && grep -Fq '## 発見役と確度判定役' "$H157_CODEX_AGENT_EVALUATOR" \
+  && grep -Fq '未確認' "$H157_CODEX_AGENT_EVALUATOR"; then
+  pass "codex-agents/evaluator.toml: 正本のモデル分離内容・Codex未対応の明記が反映されている（#157）"
+else
+  fail "codex-agents/evaluator.toml: 正本のモデル分離内容・Codex未対応の明記が反映されている（#157）" \
+    "見つかりません: ${H157_CODEX_AGENT_EVALUATOR}"
+fi
+
+# --- README.md: 3エージェント節のモデル構成説明が更新されている ---
+
+if grep -Fq 'Sonnet（発見役・既定） / Opus（確度判定役・起動時上書き）' "$H157_README"; then
+  pass "README.md: 3エージェント節のevaluatorモデル構成が発見役/確度判定役に更新されている（#157）"
+else
+  fail "README.md: 3エージェント節のevaluatorモデル構成が発見役/確度判定役に更新されている（#157）"
+fi
+
+# --- adapters/claude/build.sh --check / adapters/codex/build.sh --check が通る ---
+
+if bash "${REPO_ROOT}/adapters/claude/build.sh" --check >/dev/null 2>&1; then
+  pass "adapters/claude/build.sh --check: agents/ が core/ と一致している（#157）"
+else
+  fail "adapters/claude/build.sh --check: agents/ が core/ と一致している（#157）"
+fi
+
+if bash "${REPO_ROOT}/adapters/codex/build.sh" --check >/dev/null 2>&1; then
+  pass "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#157）"
+else
+  fail "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#157）"
 fi
 
 # ---------------------------------------------------------------------------

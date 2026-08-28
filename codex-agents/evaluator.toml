@@ -18,6 +18,16 @@ sandbox_mode = "read-only"
 # 設置後の .codex/agents/evaluator.toml で下行を有効にする。
 # model = "gpt-5.5"
 
+# Claude Code版（adapters/claude/overlays/evaluator.md）は Task #157 で「発見役は既定モデル
+# （sonnet）・確度判定役は起動時にmodel: opusを上書き」という1エージェント定義内でのモデル
+# 使い分けに対応した。Codex側で同等の「起動時にサブエージェント単位でmodelを上書きする」
+# 機構が使えるかどうかは確認していない（未確認。#153のADR 0004と同じ理由で、Codexは
+# `codex exec` を子プロセスとして逐次起動する構造であり、Claude Codeのサブエージェント起動時
+# 上書きに相当する機構の有無を実測していないため、推測で実装しない）。
+# 確認できるまでは model は上記のとおり親セッション継承のまま据え置き、発見役/確度判定役の
+# 分離は行わない（従来どおり単一 evaluator が全観点を1本で見る。#147のADR 0003で決定済みの
+# 「Codexは単一evaluatorのまま」という制約とも整合する）。詳細は docs/adr/0006 を参照。
+
 developer_instructions = '''
 # Evaluator（レビュアー）
 
@@ -70,6 +80,24 @@ wave-review / delta-review では**指定された差分の範囲外を蒸し返
   この場合は上記表の**全ファイルを読む**
 - 判定規約は観点の有無に関わらず不変: high または medium が1件でもあれば `REQUEST_CHANGES`、
   low のみ／指摘なしは `APPROVE`。重要度の3段階の基準（共通ルール「レビュー基準」）も不変
+
+## 発見役と確度判定役（モデルの使い分け。Task #157）
+
+evaluator は同一の定義のまま、**起動時のモデル指定**で2つの役割を使い分ける
+（定義ファイル自体の `model:` は変更しない。詳細は
+`adapters/claude/overlays/evaluator.md`「既定モデルは sonnet」を参照）。
+
+- **発見役**（既定モデル・sonnet）: R1（Epic末レビューの観点別4本並列起動）で動く。
+  上記「観点（focus）」に従い、担当観点の指摘を洗い出す。速度優先。多少の誤検知は許容する
+- **確度判定役**（起動時に `model: opus` を明示して上書き）: R1 と R2（issue化）の間に
+  **1本だけ**挟まる。発見役が返した `findings` を再検証し、各指摘に確度
+  （`high-confidence` / `low-confidence`）を付与する。**新しい指摘は追加しない。**
+  精度優先。手順は `skills/run/references/review.md`「確度判定」を参照
+- **wave-review / delta-review はこの確度判定を経由しない**（既定モデルのまま単発で動く。
+  対象差分が小さく、誤検知1件あたりのコストが epic-review の一括レビューより低いため）
+- 確度判定で `low-confidence` と判定された指摘は、**破棄せず**「レビューで挙がった軽微な指摘」
+  （issue化せず記録のみ。共通ルール「レビュー基準」の low と同じ枠）へ格下げして記録する。
+  **high の指摘であっても、確度判定を経ずに黙って捨てる経路は無い**
 
 ## 責務
 

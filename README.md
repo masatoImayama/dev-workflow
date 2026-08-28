@@ -195,7 +195,7 @@ services:
 |---|---|---|---|
 | **planner** (紫) | 仕様ヒアリング・計画・issue管理 | Opus | 書き込み可 |
 | **generator** (青) | Docker sandbox内でコード実装・テスト | Sonnet | worktree隔離 + Docker |
-| **evaluator** (緑) | Epic完了時に全差分を一括レビュー | Opus | 読み取り専用 + Docker |
+| **evaluator** (緑) | Epic完了時に全差分を一括レビュー | Sonnet（発見役・既定） / Opus（確度判定役・起動時上書き） | 読み取り専用 + Docker |
 
 generator は実装コードに手を付ける前に、`DietrichGebert/ponytail`（MIT）に由来する7段の判断ラダー
 （存在する必要があるか → コードベースに既にあるか → 標準ライブラリ → プラットフォーム標準機能 →
@@ -266,7 +266,7 @@ generator は実装コードに手を付ける前に、`DietrichGebert/ponytail`
 
 | | 旧（タスクごと） | 現（Epic一括） |
 |---|---|---|
-| evaluator起動回数 | タスク数 × 差し戻し回数 | **最大2巡（初回R1の観点別4本並列 + delta-review 1本。タスク数に非依存）** |
+| evaluator起動回数 | タスク数 × 差し戻し回数 | **最大2巡（初回R1の観点別4本並列 + 確度判定1本 + delta-review 1本。タスク数に非依存）** |
 | タスクごとの品質担保 | Opusレビュー | テスト・ビルド・可読性ガード（機械的・LLM不要） |
 | 指摘の扱い | その場で差し戻し | **issue化し、通常のウェーブループで並列に対応** |
 | 打ち切り | 3回REQUEST_CHANGESでスキップ | 2巡で打ち切り、残りは人間のPRレビューへ |
@@ -284,6 +284,14 @@ evaluator は観点（`correctness` / `readability` / `over-engineering` / `secu
 マージ・重複排除する（同一 `location` の統合、最も高い severity の採用、verdict の合成、
 `reviewed_commit` 食い違い時は最も古いものを採用。手順の詳細は
 `skills/run/references/review.md`「R1の結果マージ」参照）。
+
+R1（発見役）の既定モデルは **sonnet**。マージ後、issue化（R2）の前に**確度判定役
+（`model: opus` を起動時に上書きした evaluator を1本）**が `findings` を再検証し、
+確度（`high-confidence` / `low-confidence`）を付与する。`low-confidence` の指摘は破棄せず
+「レビューで挙がった軽微な指摘」へ格下げして記録する（詳細は
+`skills/run/references/review.md`「確度判定」・`docs/adr/0006-evaluator-model-split.md`参照）。
+wave-review / delta-reviewはこの確度判定を経由しない。Codex側は同等のモデル切り替え機構の
+有無を確認できていないため、従来どおり単一evaluatorのまま据え置いている。
 
 またモードに `wave-review`（`[前回レビュー済みcommit]..[epic-branch]`）を追加し、あるウェーブが
 Epic ブランチへ取り込まれた直後にそのウェーブ差分だけを先行レビューできるようにした。
@@ -660,8 +668,10 @@ run 本体（`/dev-workflow:run` を解釈しているセッション）は Epic
 | `effortLevel: xhigh` | モデルを下げた分の推論深度を戻す。sonnet + xhigh は opus + high より安く、判断品質の劣化を抑えられる |
 | `ENABLE_TOOL_SEARCH` | ツール定義を遅延読み込みし、システムプロンプトの固定コストを下げる |
 
-- **generator（sonnet）・evaluator（opus）のモデルはエージェント定義側で固定されており、
-  この設定の影響を受けない。** 変わるのはオーケストレータ本体だけである
+- **generator（sonnet）のモデルはエージェント定義側で固定されており、この設定の影響を
+  受けない。** evaluatorは既定でsonnet（発見役）だが、確度判定役として起動する呼び出しだけ
+  `model: opus`を起動時に上書きする（Task #157。詳細は`docs/adr/0006-evaluator-model-split.md`）。
+  いずれもここで変わるのはオーケストレータ本体だけである
 - **これは推奨であって前提条件ではない。** 未設定でも run は動作する。run は起動時に現在の
   構成を表示するだけで、停止はしない（「停止させるものと、記録して進めるもの」の原則）
 
@@ -1333,6 +1343,7 @@ generator に委ねると一部しか実行されず回帰を見逃すため（#
 | 「入力待ち」Slack通知 | `Notification` フック | **なし**（Codexに該当イベントがない） |
 | `watchdog.sh --abort` のブロック | `PreToolUse`が`exit 2`でハードブロック（ツール呼び出しは確実に拒否される） | **ソフトな打ち切り依頼のみ。**`PreToolUse`は`systemMessage`のみ対応で`continue`は読まれないため、ツール呼び出し自体は実行される。確実に止めるにはセッション（`codex exec`／`run-loop.sh`）を人間が中断する |
 | 準備成果ディレクトリの共有（`## 共有ディレクトリ` 節） | 対応（`scripts/share-prepared-dirs.sh`） | **なし。** generator を Epic 専用 worktree 上で直接動かすためレーン worktree が存在せず、そもそも問題が発生しない |
+| サブエージェント単位の起動時モデル上書き（evaluatorの発見役/確度判定役） | 対応（Task/Agent起動時に`model: sonnet/opus/haiku/fable`を指定可能。evaluator定義自体は変えず、確度判定呼び出しだけ`model: opus`を上書き） | **未確認。** 同等機構の有無を実測していないため、Codex側は単一evaluator・モデルは親セッション継承のまま据え置き（`docs/adr/0006-evaluator-model-split.md`参照） |
 
 ## このプラグイン自体を開発する場合
 
