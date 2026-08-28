@@ -3546,10 +3546,14 @@ esac
 # Review #37: mechanical_gate() が check-readability.sh --git だけを実行しており、
 # sandbox-exec.sh 経由でプロジェクトの全テストを走らせていなかった（statically
 # 検証できる範囲に限定し、実際の gh/docker 呼び出しは行わない）。
+#
+# #144でフルスイートはウェーブ（＝タスク）ごとから Epic につき1回に移動した。
+# mechanical_gate() は readability_gate()（wave取り込み検証・可読性ガードのみ）と
+# epic_gate()（Epic統合ゲート・全テスト+可読性ガード）に分割された。
 # ---------------------------------------------------------------------------
 
 echo ""
-echo "== adapters/codex/run-loop.sh（統合ゲートの全テスト実行・回帰防止 #37） =="
+echo "== adapters/codex/run-loop.sh（統合ゲートの全テスト実行・回帰防止 #37, #144） =="
 
 RUN_LOOP_SCRIPT="${REPO_ROOT}/adapters/codex/run-loop.sh"
 
@@ -3568,31 +3572,64 @@ else
   skip "shellcheck: run-loop.sh" "コマンドが見つからないためスキップ"
 fi
 
-# mechanical_gate() の関数本体だけを取り出して静的に検証する
-RL_MECH_GATE_BODY="$(sed -n '/^mechanical_gate() {/,/^}/p' "$RUN_LOOP_SCRIPT")"
-RL_MECH_GATE_ONELINE="$(printf '%s' "$RL_MECH_GATE_BODY" | tr '\n' ' ')"
+# epic_gate()（Epicにつき1回のフルスイート）の関数本体だけを取り出して静的に検証する
+RL_EPIC_GATE_BODY="$(sed -n '/^epic_gate() {/,/^}/p' "$RUN_LOOP_SCRIPT")"
+RL_EPIC_GATE_ONELINE="$(printf '%s' "$RL_EPIC_GATE_BODY" | tr '\n' ' ')"
 
-case "$RL_MECH_GATE_ONELINE" in
+case "$RL_EPIC_GATE_ONELINE" in
   *"sandbox-exec.sh"*'"$TEST_CMD"'*)
-    pass "run-loop.sh: mechanical_gate() が sandbox-exec.sh に \$TEST_CMD を渡している" ;;
+    pass "run-loop.sh: epic_gate() が sandbox-exec.sh に \$TEST_CMD を渡している（#144）" ;;
   *)
-    fail "run-loop.sh: mechanical_gate() が sandbox-exec.sh に \$TEST_CMD を渡している" "$RL_MECH_GATE_BODY" ;;
+    fail "run-loop.sh: epic_gate() が sandbox-exec.sh に \$TEST_CMD を渡している（#144）" "$RL_EPIC_GATE_BODY" ;;
 esac
 
-case "$RL_MECH_GATE_ONELINE" in
+case "$RL_EPIC_GATE_ONELINE" in
+  *"count-skips.sh"*)
+    pass "run-loop.sh: epic_gate() が count-skips.sh を呼んでいる（#144）" ;;
+  *)
+    fail "run-loop.sh: epic_gate() が count-skips.sh を呼んでいる（#144）" "$RL_EPIC_GATE_BODY" ;;
+esac
+
+case "$RL_EPIC_GATE_ONELINE" in
   *"check-readability.sh"*)
-    pass "run-loop.sh: mechanical_gate() が check-readability.sh を呼んでいる" ;;
+    pass "run-loop.sh: epic_gate() が check-readability.sh を呼んでいる（#144）" ;;
   *)
-    fail "run-loop.sh: mechanical_gate() が check-readability.sh を呼んでいる" "$RL_MECH_GATE_BODY" ;;
+    fail "run-loop.sh: epic_gate() が check-readability.sh を呼んでいる（#144）" "$RL_EPIC_GATE_BODY" ;;
 esac
 
-# テストと可読性ガードが && で連結され、テスト失敗時に可読性ガードへ進まない（AND判定）こと
-case "$RL_MECH_GATE_ONELINE" in
-  *"sandbox-exec.sh"*'&&'*"check-readability.sh"*)
-    pass "run-loop.sh: mechanical_gate() はテストと可読性ガードを && で連結している" ;;
+# readability_gate()（wave取り込み検証。可読性ガードのみ、フルスイートは走らせない）の
+# 関数本体だけを取り出して静的に検証する
+RL_READABILITY_GATE_BODY="$(sed -n '/^readability_gate() {/,/^}/p' "$RUN_LOOP_SCRIPT")"
+RL_READABILITY_GATE_ONELINE="$(printf '%s' "$RL_READABILITY_GATE_BODY" | tr '\n' ' ')"
+
+case "$RL_READABILITY_GATE_ONELINE" in
+  *"check-readability.sh"*)
+    pass "run-loop.sh: readability_gate() が check-readability.sh を呼んでいる（#144）" ;;
   *)
-    fail "run-loop.sh: mechanical_gate() はテストと可読性ガードを && で連結している" "$RL_MECH_GATE_BODY" ;;
+    fail "run-loop.sh: readability_gate() が check-readability.sh を呼んでいる（#144）" "$RL_READABILITY_GATE_BODY" ;;
 esac
+
+case "$RL_READABILITY_GATE_ONELINE" in
+  *"sandbox-exec.sh"*)
+    fail "run-loop.sh: readability_gate() はプロジェクトの全テストを走らせない（Epic統合ゲートへ集約。#144）" "$RL_READABILITY_GATE_BODY" ;;
+  *)
+    pass "run-loop.sh: readability_gate() はプロジェクトの全テストを走らせない（Epic統合ゲートへ集約。#144）" ;;
+esac
+
+# 取り込み成功時に呼ばれるのが readability_gate() であり、旧 mechanical_gate() が
+# 残っていない（呼び出し漏れの回帰防止）こと
+if grep -q 'mechanical_gate' "$RUN_LOOP_SCRIPT"; then
+  fail "run-loop.sh: 旧関数名 mechanical_gate が残っていない（#144）" "$(grep -n 'mechanical_gate' "$RUN_LOOP_SCRIPT")"
+else
+  pass "run-loop.sh: 旧関数名 mechanical_gate が残っていない（#144）"
+fi
+
+if grep -q 'readability_gate' "$RUN_LOOP_SCRIPT" && grep -q '&& readability_gate; then' "$RUN_LOOP_SCRIPT"; then
+  pass "run-loop.sh: レーン取り込み成功後に readability_gate() を呼んでいる（#144）"
+else
+  fail "run-loop.sh: レーン取り込み成功後に readability_gate() を呼んでいる（#144）" \
+    "$(grep -n 'readability_gate' "$RUN_LOOP_SCRIPT")"
+fi
 
 # DEV_WORKFLOW_TEST_CMD 未設定時は、gh/git を呼ぶ前に停止すること
 RL_FAKE_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-fakebin-rl.XXXXXX")"
@@ -4095,22 +4132,17 @@ esac
 
 # ---------------------------------------------------------------------------
 # skills-codex/dev-workflow-run/SKILL.md: 統合ゲートの記述が Claude 版と揃っていること
-# （回帰防止 #37）
+# （回帰防止 #37。#144でフルスイートはEpicにつき1回の「Epic 統合ゲート」に移動したため、
+# Step 5 は取り込み検証＝可読性ガードだけを見る）
 # ---------------------------------------------------------------------------
 
 echo ""
-echo "== skills-codex/dev-workflow-run/SKILL.md（統合ゲートの記述・回帰防止 #37） =="
+echo "== skills-codex/dev-workflow-run/SKILL.md（統合ゲートの記述・回帰防止 #37, #144） =="
 
 CODEX_RUN_SKILL="${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md"
 
 CRS_STEP5="$(awk '/^### Step 5:/{f=1} /^### Step 6:/{f=0} f' "$CODEX_RUN_SKILL")"
-
-case "$CRS_STEP5" in
-  *"sandbox-exec.sh"*)
-    pass "SKILL.md(codex): Step 5 が sandbox-exec.sh で全テストを実行する記述を含む" ;;
-  *)
-    fail "SKILL.md(codex): Step 5 が sandbox-exec.sh で全テストを実行する記述を含む" "$CRS_STEP5" ;;
-esac
+CRS_EPICGATE="$(awk '/^## Epic 統合ゲート/{f=1} /^## Epic一括レビュー/{f=0} f' "$CODEX_RUN_SKILL")"
 
 case "$CRS_STEP5" in
   *"check-readability.sh"*)
@@ -4120,17 +4152,31 @@ case "$CRS_STEP5" in
 esac
 
 case "$CRS_STEP5" in
-  *"対象の選択を"*"generator に委ねない"*)
-    pass "SKILL.md(codex): Step 5 が「対象の選択をgeneratorに委ねない」を含む" ;;
+  *"sandbox-exec.sh"*)
+    fail "SKILL.md(codex): Step 5 はプロジェクトの全テストを走らせない（Epic統合ゲートへ集約。#144）" "$CRS_STEP5" ;;
   *)
-    fail "SKILL.md(codex): Step 5 が「対象の選択をgeneratorに委ねない」を含む" "$CRS_STEP5" ;;
+    pass "SKILL.md(codex): Step 5 はプロジェクトの全テストを走らせない（Epic統合ゲートへ集約。#144）" ;;
 esac
 
-case "$CRS_STEP5" in
-  *"SKIP を通過扱いにしない"*)
-    pass "SKILL.md(codex): Step 5 が「SKIPを通過扱いにしない」を含む" ;;
+case "$CRS_EPICGATE" in
+  *"sandbox-exec.sh"*)
+    pass "SKILL.md(codex): Epic統合ゲートが sandbox-exec.sh で全テストを実行する記述を含む（#144）" ;;
   *)
-    fail "SKILL.md(codex): Step 5 が「SKIPを通過扱いにしない」を含む" "$CRS_STEP5" ;;
+    fail "SKILL.md(codex): Epic統合ゲートが sandbox-exec.sh で全テストを実行する記述を含む（#144）" "$CRS_EPICGATE" ;;
+esac
+
+case "$CRS_EPICGATE" in
+  *"対象の選択を"*"generator に委ねない"*)
+    pass "SKILL.md(codex): Epic統合ゲートが「対象の選択をgeneratorに委ねない」を含む（#144）" ;;
+  *)
+    fail "SKILL.md(codex): Epic統合ゲートが「対象の選択をgeneratorに委ねない」を含む（#144）" "$CRS_EPICGATE" ;;
+esac
+
+case "$CRS_EPICGATE" in
+  *"SKIP を通過扱いにしない"*)
+    pass "SKILL.md(codex): Epic統合ゲートが「SKIPを通過扱いにしない」を含む（#144）" ;;
+  *)
+    fail "SKILL.md(codex): Epic統合ゲートが「SKIPを通過扱いにしない」を含む（#144）" "$CRS_EPICGATE" ;;
 esac
 
 if grep -q '^EPIC_NUMBER' "$CODEX_RUN_SKILL"; then
@@ -9080,36 +9126,36 @@ case "$H97_RS_SKIPPATTERN" in
       "$H97_RS_SKIPPATTERN" ;;
 esac
 
-# --- skills/run/SKILL.md: Step 6（統合ゲート）がrun自身でcount-skips.shを実行し、
-#     0件でも必ず表示し、レーンの自己申告と食い違った場合は統合ゲートの値を採用する ---
-H97_RS_STEP6="$(awk '/^### Step 6:/{f=1} /^### Step 7:/{f=0} f' "$RUN_SKILL_FLAT")"
+# --- skills/run/SKILL.md: 「Epic 統合ゲート」節（フルスイートはEpicにつき1回に集約。#144）が
+#     run自身でcount-skips.shを実行し、0件でも必ず表示する ---
+H97_RS_EPICGATE="$(awk '/^## Epic 統合ゲート/{f=1} /^## Epic一括レビュー/{f=0} f' "$RUN_SKILL_FLAT")"
 
-case "$H97_RS_STEP6" in
+case "$H97_RS_EPICGATE" in
   *'tee'*'count-skips.sh'*)
-    pass "SKILL.md: Step 6 統合ゲートがテスト出力をteeで保存しcount-skips.shで数えている（#97）" ;;
+    pass "SKILL.md: Epic統合ゲートがテスト出力をteeで保存しcount-skips.shで数えている（#97, #144）" ;;
   *)
-    fail "SKILL.md: Step 6 統合ゲートがテスト出力をteeで保存しcount-skips.shで数えている（#97）" \
-      "$H97_RS_STEP6" ;;
+    fail "SKILL.md: Epic統合ゲートがテスト出力をteeで保存しcount-skips.shで数えている（#97, #144）" \
+      "$H97_RS_EPICGATE" ;;
 esac
 
-case "$H97_RS_STEP6" in
+case "$H97_RS_EPICGATE" in
   *'0件でも必ず表示'*)
-    pass "SKILL.md: Step 6 統合ゲートがSKIP件数を0件でも必ず表示する旨を明記している（#97）" ;;
+    pass "SKILL.md: Epic統合ゲートがSKIP件数を0件でも必ず表示する旨を明記している（#97, #144）" ;;
   *)
-    fail "SKILL.md: Step 6 統合ゲートがSKIP件数を0件でも必ず表示する旨を明記している（#97）" \
-      "$H97_RS_STEP6" ;;
+    fail "SKILL.md: Epic統合ゲートがSKIP件数を0件でも必ず表示する旨を明記している（#97, #144）" \
+      "$H97_RS_EPICGATE" ;;
 esac
 
-case "$H97_RS_STEP6" in
-  *'食い違った場合は統合ゲートの値を採用'*'Epic issue にコメント'*)
-    pass "SKILL.md: Step 6 統合ゲートがレーンの自己申告と食い違った場合に統合ゲートの値を採用しEpic issueにコメントする旨を明記している（#97）" ;;
+case "$H97_RS_EPICGATE" in
+  *'食い違った場合はEpic統合ゲートの値を採用'*'Epic issue にコメント'*)
+    pass "SKILL.md: Epic統合ゲートがレーンの自己申告と食い違った場合にEpic統合ゲートの値を採用しEpic issueにコメントする旨を明記している（#97, #144）" ;;
   *)
-    fail "SKILL.md: Step 6 統合ゲートがレーンの自己申告と食い違った場合に統合ゲートの値を採用しEpic issueにコメントする旨を明記している（#97）" \
-      "$H97_RS_STEP6" ;;
+    fail "SKILL.md: Epic統合ゲートがレーンの自己申告と食い違った場合にEpic統合ゲートの値を採用しEpic issueにコメントする旨を明記している（#97, #144）" \
+      "$H97_RS_EPICGATE" ;;
 esac
 
 # --- skills/run/SKILL.md: 「SKIP を通過扱いにしない」節がskips=unknownの扱いを明記している ---
-H97_RS_SKIPSECTION="$(awk '/^#### SKIP を通過扱いにしない/{f=1} /^### Step 7:/{f=0} f' \
+H97_RS_SKIPSECTION="$(awk '/^#### SKIP を通過扱いにしない/{f=1} /^## Epic一括レビュー/{f=0} f' \
   "$RUN_SKILL_FLAT")"
 
 case "$H97_RS_SKIPSECTION" in
@@ -9150,23 +9196,23 @@ case "$H97_CRS_STEP3" in
       "$H97_CRS_STEP3" ;;
 esac
 
-H97_CRS_STEP5="$(awk '/^### Step 5:/{f=1} /^### Step 6:/{f=0} f' \
+H97_CRS_EPICGATE="$(awk '/^## Epic 統合ゲート/{f=1} /^## Epic一括レビュー/{f=0} f' \
   "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md")"
 
-case "$H97_CRS_STEP5" in
+case "$H97_CRS_EPICGATE" in
   *'tee'*'count-skips.sh'*'0件でも必ず表示'*)
-    pass "SKILL.md(codex): Step 5 統合ゲートがteeで保存しcount-skips.shで数え0件でも表示する（#97）" ;;
+    pass "SKILL.md(codex): Epic統合ゲートがteeで保存しcount-skips.shで数え0件でも表示する（#97, #144）" ;;
   *)
-    fail "SKILL.md(codex): Step 5 統合ゲートがteeで保存しcount-skips.shで数え0件でも表示する（#97）" \
-      "$H97_CRS_STEP5" ;;
+    fail "SKILL.md(codex): Epic統合ゲートがteeで保存しcount-skips.shで数え0件でも表示する（#97, #144）" \
+      "$H97_CRS_EPICGATE" ;;
 esac
 
-case "$H97_CRS_STEP5" in
+case "$H97_CRS_EPICGATE" in
   *'skips=unknown'*'「0件」として扱ってはならない'*)
-    pass "SKILL.md(codex): 『SKIP を通過扱いにしない』節がskips=unknownを0件扱いしない旨を明記している（#97）" ;;
+    pass "SKILL.md(codex): 『SKIP を通過扱いにしない』節がskips=unknownを0件扱いしない旨を明記している（#97, #144）" ;;
   *)
-    fail "SKILL.md(codex): 『SKIP を通過扱いにしない』節がskips=unknownを0件扱いしない旨を明記している（#97）" \
-      "$H97_CRS_STEP5" ;;
+    fail "SKILL.md(codex): 『SKIP を通過扱いにしない』節がskips=unknownを0件扱いしない旨を明記している（#97, #144）" \
+      "$H97_CRS_EPICGATE" ;;
 esac
 
 # --- README.md: count-skips.sh の使い方・出力・判定順序・DEV_WORKFLOW_SKIP_PATTERN が書かれている ---

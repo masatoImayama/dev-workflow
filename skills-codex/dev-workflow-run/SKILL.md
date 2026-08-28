@@ -75,8 +75,8 @@ cd "$EPIC_WT"
 
 ```
 main（保護: 人間のみマージ可）
- └─ epic/epicXX/[機能名]  ← 統合ゲートを通ったコミットだけが載る
-     └─ wave/epicXX/<通し番号>  ← レーンを取り込み統合ゲートに掛ける一時ブランチ（origin へ push しない）
+ └─ epic/epicXX/[機能名]  ← ウェーブ取り込み後、Epic統合ゲート（Epicにつき1回）を通過してPR化される
+     └─ wave/epicXX/<通し番号>  ← レーンを取り込み取り込み検証に掛ける一時ブランチ（origin へ push しない）
          └─ task/epicXX/<Task issue番号>  ← generator が実装するレーンの作業ブランチ
 ```
 
@@ -84,7 +84,9 @@ main（保護: 人間のみマージ可）
 コードパスを通り、履歴は自然に fast-forward の直線になる）。
 
 - 各タスクの作業ブランチ（レーン）は、そのタスク開始時点の Epic ブランチ tip（`WAVE_BASE`）から分岐する
-- レーンは wave ブランチを経由し、**統合ゲート通過後にのみ** `--ff-only` で Epic ブランチへ合流する
+- レーンは wave ブランチを経由し、**ウェーブ末の取り込み検証（merge-base 完全一致検証＋可読性
+  ガード）通過後にのみ** `--ff-only` で Epic ブランチへ合流する。**プロジェクトの全テストは
+  ここでは走らせない**（Epicにつき1回、全タスク完了後の「Epic 統合ゲート」節に集約する）
 - **Epic ブランチへの force push は行わない。wave ブランチは origin へ push しない**（ローカルの一時ブランチ）
 
 ## サンドボックスの準備
@@ -312,7 +314,7 @@ Task #<番号> を実装してください。
   いない。効いていないと判断した場合も自前で追加実行せず、その事実を報告すること
 - **回帰確認は generator の責務ではない。** 各タスクで走らせるのは**そのタスクの変更範囲の
   テスト**（変更したファイルが属するパッケージ／モジュール単位）であり、プロジェクトの全テスト
-  ではない。全テストは Step 5 の統合ゲートがウェーブごとに1回だけ走らせる。報告には
+  ではない。全テストは Epic につき1回、全タスク完了後の「Epic 統合ゲート」節が走らせる。報告には
   「変更範囲のテストが通った」とだけ書き、**「回帰なし」と書かないこと**。変更が共通基盤に
   及ぶなど広範だと判断した場合に限り全テストを走らせてよく、そのときは判断根拠を報告に書くこと
 - **SKIP件数は `tail` の目視ではなく `scripts/count-skips.sh` で機械的に数えること。**
@@ -385,52 +387,21 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/merge-lane.sh" \
 
 10 / 11 のときは Step 6 のリカバリへ進む。
 
-### Step 5: wave ブランチで統合ゲートを実行し、Epic ブランチへ取り込む
+### Step 5: wave ブランチの取り込み検証（可読性ガード）とEpicブランチへの取り込み
+
+merge-base 完全一致検証は Step 4 の `merge-lane.sh` が既に行っている。ここでは可読性ガード
+**だけ**を実行する。**プロジェクトの全テストはここでは走らせない**（Epicにつき1回、全タスク
+完了後の「Epic 統合ゲート」節に集約する。Claude 版 `skills/run/SKILL.md`「機械的ゲートの
+三段構成」と同じ方針）。
 
 ```bash
 git checkout "$WAVE_BRANCH"
 
-# 1) テスト（Docker sandbox内）— 1回にまとめる。落ちたら不合格
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" '[全テストを走らせるコマンド]' \
-  2>&1 | tee /tmp/gate-test-output.log
-
-# 1b) SKIP件数はgeneratorの自己申告に依存せず、run自身がcount-skips.shで機械的に数える。
-#     0件でも必ず表示する（黙って省略しない）
-[ -n "$SKIP_PATTERN" ] && export DEV_WORKFLOW_SKIP_PATTERN="$SKIP_PATTERN"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file /tmp/gate-test-output.log
-
-# 2) 可読性ガード — waveブランチの差分に対して実行（PostToolUseフックと同じ判定）
+# 可読性ガード — waveブランチの差分に対して実行（PostToolUseフックと同じ判定）
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-readability.sh" --git
 ```
 
 品質・設計・セキュリティの観点はここでは見ない。**それらは Epic完了後の一括レビューで見る。**
-
-内容の要件は Claude 版（`skills/run/SKILL.md` Step 6）と同じ2コマンド構成（全テスト + 可読性
-ガード）とする。**対象の選択を generator に委ねない。** ゲートで走らせるのは**プロジェクトの
-全テスト**とする。`make test` 等のプロジェクト標準ターゲットがあればそれを優先する。
-
-- ビルドタグ付きのテスト（`//go:build integration` 等）があるプロジェクトでは、それも含める
-- ビルド・vet・テストを**別々の呼び出しに分けない**。サンドボックスはソースツリーを
-  バインドマウントしており、フルツリーを走査するコマンドは1回ごとにその走査コストを払う
-- テストがビルドを兼ねるなら（`go test ./...` 等）、それ1本で足りる
-
-#### SKIP を通過扱いにしない
-
-依存物が未配置だとテストが無言で `SKIP` され、`ok` と表示されて成功に見える。
-**`ok` の有無だけで判定してはならない。** SKIP件数の数え方は自然言語の依頼にせず、
-`scripts/count-skips.sh` に固定する（`tail` の目視で「0件」と判定することを禁止する。
-上記1b参照）。
-
-- `skips=<件数>`（exit 0）→ その件数を確認し、検証したかったテストが実際に走ったことを
-  確かめる。**想定外のSKIPは不合格として扱う**
-- `skips=unknown`（exit 1）→ **「0件」として扱ってはならない。** built-inランナー
-  （go/jest/pytest）以外の形式であるため数えられなかったことを Epic issue に明記し、
-  `DEV_WORKFLOW_SKIP_PATTERN`（Epic本文の `## SKIPパターン` 節）の設定を促す。
-  この1件のために run 全体を必ず停止させるわけではないが、「0件」への読み替えは常に禁止する。
-  **恒久対処として、次の run までに Epic issue 本文へ `## SKIPパターン` 節（ERE1行）を
-  追加することを明記する。** 都度コメントで済ませるだけでは同じ run が来るたびに
-  `skips=unknown` を繰り返すだけで、SKIP件数が検証されないまま進む状態が固定化する
-  （書き方は `core/roles/planner.md`「SKIPパターン（該当する場合のみ）」節を参照）
 
 - **通過** →
 
@@ -455,8 +426,9 @@ Epic issue の進捗チェックリストを更新し、Step 1 に戻る。
 |---|---|
 | `merge-lane.sh` exit 10（ベース逸脱） | 取り込まず差し戻す。実出力を issue にコメントし、レーンを作り直して再試行する |
 | `merge-lane.sh` exit 11（マージ競合） | 取り込まず、競合ファイル一覧を issue にコメントし、レーンを作り直して再試行する |
-| 統合ゲート失敗（Step 5） | Epic は無傷のまま。`lanes=1` のため原因はこのタスクのレーンに一意に特定できる。レーンを作り直して再試行する |
+| 統合ゲート失敗（Step 5、可読性ガード） | Epic は無傷のまま。`lanes=1` のため原因はこのタスクのレーンに一意に特定できる。レーンを作り直して再試行する |
 | 同一タスクで3回失敗 | スキップする。issue にコメントし、`SKIPPED_CSV` に加える（以降の `plan-waves.sh` 呼び出しの `--skipped` に反映される） |
+| Epic統合ゲート失敗（全タスク完了後） | Epicは既にウェーブを取り込み済みで無傷ではない。修正タスクとして issue 化し、通常のタスクループで対応させる（詳細は「Epic 統合ゲート」節） |
 
 **スキップの伝播**: スキップされたタスクに依存する後続タスクは、`plan-waves.sh` の出力
 （`skip	<番号>	reason	depends-on-skipped	<依存先番号>`）に従って実行せずスキップし、
@@ -465,6 +437,69 @@ issue にその旨をコメントする（推移的に伝播する）。**`plan-
 外れる）まで繰り返し出力される。** 一度コメントしたタスク番号は憶えておき、二重にコメント
 しないこと。スキップ一覧は Epic 一括レビュー前に Epic issue へコメントし、PR 本文にも明記して
 人間に判断を渡す。
+
+## Epic 統合ゲート（全タスク完了後・Epic一括レビューの前）
+
+タスクループが終わった時点（`plan-waves.sh` の出力に `wave	1	tasks` 行が無くなった時点）で、
+**Epicにつき1回だけ**フルスイートを実行する。これが「機械的ゲートの三段構成」における
+唯一の全テスト実行点である（Claude 版 `skills/run/SKILL.md`「Epic 統合ゲート」節と同じ方針）。
+
+```bash
+git checkout "${EPIC_BRANCH}"
+
+# 1) テスト（Docker sandbox内）— 1回にまとめる。落ちたら不合格
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" '[全テストを走らせるコマンド]' \
+  2>&1 | tee /tmp/epic-gate-test-output.log
+
+# 1b) SKIP件数はgeneratorの自己申告に依存せず、run自身がcount-skips.shで機械的に数える。
+#     0件でも必ず表示する（黙って省略しない）
+[ -n "$SKIP_PATTERN" ] && export DEV_WORKFLOW_SKIP_PATTERN="$SKIP_PATTERN"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file /tmp/epic-gate-test-output.log
+
+# 2) 可読性ガード — Epicブランチの差分に対して実行（PostToolUseフックと同じ判定）
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-readability.sh" --git
+```
+
+**対象の選択を generator に委ねない。** ゲートで走らせるのは**プロジェクトの全テスト**とする。
+`make test` 等のプロジェクト標準ターゲットがあればそれを優先する。
+
+- ビルドタグ付きのテスト（`//go:build integration` 等）があるプロジェクトでは、それも含める
+- ビルド・vet・テストを**別々の呼び出しに分けない**。サンドボックスはソースツリーを
+  バインドマウントしており、フルツリーを走査するコマンドは1回ごとにその走査コストを払う
+- テストがビルドを兼ねるなら（`go test ./...` 等）、それ1本で足りる
+
+#### SKIP を通過扱いにしない
+
+依存物が未配置だとテストが無言で `SKIP` され、`ok` と表示されて成功に見える。
+**`ok` の有無だけで判定してはならない。** SKIP件数の数え方は自然言語の依頼にせず、
+`scripts/count-skips.sh` に固定する（`tail` の目視で「0件」と判定することを禁止する。
+上記1b参照）。
+
+- `skips=<件数>`（exit 0）→ その件数を確認し、検証したかったテストが実際に走ったことを
+  確かめる。**想定外のSKIPは不合格として扱う**
+- `skips=unknown`（exit 1）→ **「0件」として扱ってはならない。** built-inランナー
+  （go/jest/pytest）以外の形式であるため数えられなかったことを Epic issue に明記し、
+  `DEV_WORKFLOW_SKIP_PATTERN`（Epic本文の `## SKIPパターン` 節）の設定を促す。
+  この1件のために run 全体を必ず停止させるわけではないが、「0件」への読み替えは常に禁止する。
+  **恒久対処として、次の run までに Epic issue 本文へ `## SKIPパターン` 節（ERE1行）を
+  追加することを明記する。** 都度コメントで済ませるだけでは同じ run が来るたびに
+  `skips=unknown` を繰り返すだけで、SKIP件数が検証されないまま進む状態が固定化する
+  （書き方は `core/roles/planner.md`「SKIPパターン（該当する場合のみ）」節を参照）
+
+- **通過** → 下記「Epic一括レビュー」へ
+
+#### 失敗時の扱い（Epicブランチは既にウェーブを取り込み済みで無傷ではない）
+
+1. 失敗内容（失敗したテスト名と出力）を Epic issue にコメントする
+2. **修正タスクとして扱う**: `task` ラベルの issue を作成し（本文に `- Epic: #<epic番号>` と
+   `- 前提: なし` を必ず書く）、通常のタスクループ（Step 1 以降）で generator に修正させ、
+   取り込み後に Epic 統合ゲートを再実行する
+3. **再試行は最大2回。** それでも通らなければ run を止めずに PR を作成し、
+   **PR 本文の冒頭に「Epic 統合ゲート不合格」と失敗内容を明記**して人間へ渡す
+4. 原因ウェーブの特定手順（ウェーブ単位の二分探索）は Claude 版
+   `skills/run/references/recovery.md`「Epic統合ゲート失敗時の原因特定手順」と同じ手順を使う
+   （Epicブランチ上で各 `wave/${EPIC_NUM}/N` の tip を古い方から順に checkout してフルスイートを
+   実行し、最初に落ちたウェーブが原因ウェーブである）
 
 ## サンドボックスの後片付け（正常終了・異常終了を問わず必ず実行）
 
@@ -554,7 +589,7 @@ Slack に `:rotating_light: 応答なし` が届いたら、人間が次の手�
 
 ## Epic一括レビュー（全タスク完了後・PR作成前）
 
-ここで初めて evaluator を起動する。**最大2巡**（初回 + delta-review 1回）。
+Epic統合ゲートを通過した時点で、ここで初めて evaluator を起動する。**最大2巡**（初回 + delta-review 1回）。
 
 ### R1: 一括レビュー
 
@@ -708,6 +743,10 @@ gh pr create --base main --head "${EPIC_BRANCH}" --title "Epic: <機能名>" --b
 PR本文には Summary（`Closes #<epic番号>`）、完了タスク、レビュー結果、未対応の指摘、
 軽微な指摘、Test plan を含める。**PRを作成せずに終了してはならない。**
 
+**Epic 統合ゲートが2回再試行後も不合格のまま終わった場合、PR本文の `## Summary` の直前に
+「⚠️ Epic 統合ゲート不合格: <失敗したテスト名の要約>」の1行を必ず追加すること。** 通過している
+場合はこの行を出さない（Claude 版と同じ方針。`skills/run/SKILL.md`「PR作成（runの最終責務）」参照）。
+
 ### PR本文への「トークン消費」集計（効果測定。Task #76・決定3）
 
 Claude版（`skills/run/SKILL.md`）と同じく、「実行時間」相当の集計の隣に
@@ -768,7 +807,9 @@ generatorはサブエージェント専用worktreeを持たず、Epic worktree�
 - タスクループ中に evaluator を起動しない
 - 一括レビューは最大2巡で打ち切る
 - **main には絶対にマージしない**
-- **Epic ブランチには統合ゲートを通過したコミットだけを載せる。force push は行わない**
+- **Epic ブランチにはウェーブ末の取り込み検証（merge-base完全一致検証＋可読性ガード）を通過した
+  コミットが載る。プロジェクトの全テストはEpicにつき1回のEpic統合ゲートで検証する。
+  force push は行わない**
 - **generator を並行実行しない**（サブエージェント専用 worktree がないため）。`lanes=1` 固定
   だが、ウェーブ・merge-base 検証・wave ブランチ経由の統合は Claude 版と同じ仕様を適用する
 - テスト時に実ユーザーへメールを送らない。本番データに触らない

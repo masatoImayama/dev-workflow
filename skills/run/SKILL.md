@@ -221,31 +221,40 @@ compose を使う場合の要求仕様（常駐サービス名・マウント・
 
 これにより、evaluatorの起動回数はタスク数に比例せず、Epicあたり1〜3回に固定される。
 
-### 機械的ゲートの二段構成
+### 機械的ゲートの三段構成
 
-フルスイートを「タスクごと」と「ウェーブごと」の両方で走らせてはならない。1レーンが複数
-タスクを連続処理する以上、レーン内のフルスイートはレーン内で**直列に積み上がる**。
-検証点は次の2段に分離する。
+フルスイートを「タスクごと」「ウェーブごと」の両方で走らせてはならない。1レーンが複数
+タスクを連続処理する以上、レーン内のフルスイートはレーン内で**直列に積み上がる**。同様に
+ウェーブごとのフルスイートも「ウェーブ数 × フルスイート時間」の直列区間になる。
+**フルスイートは Epic につき1回、全ウェーブ完了後（Epic一括レビューの前）に集約する。**
+検証点は次の3段に分離する。
 
 | 検証点 | 対象ツリー | 実行するもの | 頻度 |
 |---|---|---|---|
 | **レーン内ゲート** | generator の isolation worktree | **変更範囲のテスト**（そのタスクが触った領域を実際に走らせる） | タスクごと |
-| **統合ゲート** | wave ブランチ（全レーン取り込み後） | **プロジェクトの全テスト** | ウェーブごとに1回 |
+| **ウェーブ末の取り込み検証** | wave ブランチ（全レーン取り込み後） | merge-base 完全一致検証（`merge-lane.sh`）＋可読性ガード | ウェーブごとに1回 |
+| **Epic 統合ゲート** | Epic ブランチ | **プロジェクトの全テスト＋可読性ガード** | **Epic につき1回**（全ウェーブ完了後） |
 
-- 「回帰なし」を宣言できるのは**統合ゲートだけ**である。generator は自分の報告で「回帰なし」と
+- 「回帰なし」を宣言できるのは**Epic 統合ゲートだけ**である。generator は自分の報告で「回帰なし」と
   書いてはならない（`core/roles/generator.md`「回帰確認の分担」参照）
 - レーン内ゲートは高速フィードバックのための関門であり、無関係な領域の回帰は拾わない。
-  拾う責務は統合ゲートにあり、失敗した場合の原因レーンの特定手順は
-  [references/recovery.md](references/recovery.md) にある
+  拾う責務は Epic 統合ゲートにあり、失敗した場合の原因ウェーブの特定手順は
+  [references/recovery.md](references/recovery.md) にある（**失敗したときにだけ読む**）
 - **タスクごと**は機械的ゲートだけで通す — LLM 呼び出しは行わない
+- **トレードオフ**: 回帰の検知が Epic 末まで遅れる。ウェーブ内の自動の安全網はレーン内ゲート・
+  マージ健全性チェック・可読性ガードだけになり、Epic ブランチに「フルスイート未通過のコミット」
+  が一時的に載りうる（従来の不変条件「Epic ブランチには統合ゲートを通ったコミットだけが載る」は
+  変わる）。これは実行時間短縮のための意識的な選択であり、main への取り込みは人間の PR レビューを
+  通ること、Epic 統合ゲートが Epic につき1回必ず実行されることが前提である
+  （詳細は `docs/adr/0001-integration-gate-at-epic-end.md`）
 
 ## ブランチ戦略
 
 ```
 main (保護: 人間のみマージ可)
- └─ epic/epicXX/[機能名] (Epic単位のブランチ。統合ゲートを通ったコミットだけが載る)
+ └─ epic/epicXX/[機能名] (Epic単位のブランチ。ウェーブ取り込み後、Epic統合ゲートを経てPR化される)
      └─ 作業 worktree: .claude/worktrees/epicXX/  ← このツリー内で全作業（許可済み領域・兄弟ディレクトリは作らない）
-         └─ wave/epicXX/<ウェーブ番号>  ← レーンを取り込み統合ゲートに掛ける一時ブランチ（originへpushしない）
+         └─ wave/epicXX/<ウェーブ番号>  ← レーンを取り込み取り込み検証に掛ける一時ブランチ（originへpushしない）
              └─ 各レーンの作業ブランチ（generator の isolation worktree 由来）
 ```
 
@@ -255,9 +264,12 @@ main (保護: 人間のみマージ可)
   worktree を作るのは**ハーネス**であり、その分岐元はハーネスが決めるため WAVE_BASE とは
   限らない。そのため generator は `git reset --hard "$WAVE_BASE"` で自分の HEAD を明示的に
   合わせてから実装に着手する（Step 3 のプロンプト雛形参照）
-- レーンは wave ブランチを経由し、**統合ゲート通過後にのみ** `--ff-only` でEpicブランチへ合流する
+- レーンは wave ブランチを経由し、**ウェーブ末の取り込み検証（merge-base 完全一致検証＋
+  可読性ガード）通過後にのみ** `--ff-only` でEpicブランチへ合流する。**プロジェクトの
+  全テストはここでは走らせない**（Epic統合ゲートへ集約する。「機械的ゲートの三段構成」参照）
 - 実装・テスト・ビルドは全てDockerコンテナ内で実行する
-- 全タスク完了後、Epicブランチ→mainのPRを作成する
+- 全タスク完了後、Epic統合ゲート（全ウェーブ完了後にEpicにつき1回、プロジェクトの全テスト＋
+  可読性ガード）を実行し、Epicブランチ→mainのPRを作成する
 - mainへのマージは人間が行う
 - wave ブランチはローカルの一時ブランチであり、originへはpushしない。**Epicブランチへのforce pushは行わない**
 
@@ -314,14 +326,15 @@ WAVE_NO="${WAVE_NO:-0}"
 
 # --- 計測（並列化とオーバーヘッド削減の寄与を分けて読むための実測。表示形式は references/progress-display.md） ---
 # 前ウェーブの内訳（次ウェーブ開始時のバナー表示に使う）。ウェーブ1の開始時点では空文字のまま。
+# GATE_SEC はウェーブ単位では計測しない（フルスイートをEpic末に集約したため。MERGE_SECに
+# 可読性ガードの所要時間を含める）。Epic統合ゲートの所要時間は EPIC_GATE_SEC として
+# 「Epic 統合ゲート」節でEpicにつき1回だけ計測する。
 PREV_WAVE_IMPL_SEC=""
 PREV_WAVE_MERGE_SEC=""
-PREV_WAVE_GATE_SEC=""
 # Epic全体の累計（PR本文の集計に使う）
 TOTAL_IMPL_SEC=0
 TOTAL_MERGE_SEC=0
-TOTAL_GATE_SEC=0
-DONE_TASK_COUNT=0   # 統合ゲートを通過して取り込めたタスク数の累計
+DONE_TASK_COUNT=0   # ウェーブ末の取り込み検証を通過して取り込めたタスク数の累計
 
 # 秒数を "Nm Ss" 形式にする（例: 65 -> 1m05s）。追加の依存物（jq等）は使わず `date +%s` の差分のみで計測する
 fmt_duration() {
@@ -585,9 +598,12 @@ MERGE_SEC=$((MERGE_END_SEC - MERGE_START_SEC))
 一度も成功しておらず `wave/${EPIC_NUM}/${WAVE_NO}` は存在しない。この場合は **Step 6・Step 7 を
 実行せず**、このウェーブの各タスクの試行回数を加算したうえで Step 1 に戻る（次ウェーブへ）。
 
-### Step 6: wave ブランチで統合ゲートを1回実行する
+### Step 6: wave ブランチの取り込み検証（可読性ガード）
 
-全レーンの取り込み（成功分のみ）が終わったら、waveブランチ上で**1回だけ**機械的ゲートを実行する。
+全レーンの取り込み（成功分のみ）が終わったら、waveブランチ上で**可読性ガードだけ**を実行する。
+merge-base 完全一致検証は Step 5 の `merge-lane.sh` が既に行っている。**プロジェクトの全テストは
+ここでは走らせない**（Epic につき1回、全ウェーブ完了後の「Epic 統合ゲート」節に集約する。
+「機械的ゲートの三段構成」参照）。
 **このStepはStep 5で取り込めたレーンが1本以上ある場合のみ実行する**（0本の場合はStep 5末尾の
 分岐を参照）。念のため冒頭で wave ブランチの存在を確認してから進む:
 
@@ -598,62 +614,16 @@ git rev-parse --verify -q "refs/heads/wave/${EPIC_NUM}/${WAVE_NO}" >/dev/null ||
   exit 1
 }
 git checkout "wave/${EPIC_NUM}/${WAVE_NO}"
-GATE_START_SEC=$(date +%s)   # 「統合ゲート」フェーズの計測開始
 
-# 1) テスト（Docker sandbox内）— 1回にまとめる。落ちたら不合格
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" '[全テストを走らせるコマンド]' \
-  2>&1 | tee /tmp/gate-test-output.log
-
-# 1b) SKIP件数はレーンの自己申告に依存せず、run自身がcount-skips.shで機械的に数える。
-#     0件でも必ず表示する（黙って省略しない）
-[ -n "$SKIP_PATTERN" ] && export DEV_WORKFLOW_SKIP_PATTERN="$SKIP_PATTERN"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file /tmp/gate-test-output.log
-
-# 2) 可読性ガード — waveブランチの差分に対して実行（PostToolUseフックと同じ判定）
+# 可読性ガード — waveブランチの差分に対して実行（PostToolUseフックと同じ判定）
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-readability.sh" --git
 
-GATE_END_SEC=$(date +%s)
-GATE_SEC=$((GATE_END_SEC - GATE_START_SEC))
+MERGE_END_SEC=$(date +%s)   # 「統合」フェーズ（merge-lane.sh群＋可読性ガード）の計測終了
+MERGE_SEC=$((MERGE_END_SEC - MERGE_START_SEC))
 ```
 
-**フルスイートを走らせるのはここだけである**（「機械的ゲートの二段構成」節）。レーン内ゲートは
-変更範囲のテストしか走らせないため、**回帰の判定はこの統合ゲートが単独で担う。**
-統合ゲートの `count-skips.sh` の結果は、レーンが完了報告に書いた値と**食い違うことがある**
-（レーン内ゲートは各レーンの isolation worktree に対する変更範囲の結果、統合ゲートは全レーン
-取り込み後の wave ブランチに対する全テストの結果であり、対象ツリーも対象範囲も異なるため）。
-**食い違った場合は統合ゲートの値を採用し**、その旨を Epic issue にコメントする。
-統合ゲート側も `skips=unknown` になりうるが、その場合も「0件」として扱わない
-（下記「SKIP を通過扱いにしない」参照）。
-
-**Epic worktree に対する単独のゲートは行わない。** レーンの変更が Epic に入るのは統合ゲート
-通過後のマージであり、Epic worktree を先に検証しても検証対象として意味を持たない。
-
-#### 何を実行すれば「回帰なし」と言えるか
-
-ゲートで走らせるのは**プロジェクトの全テスト**とする。`make test` 等のプロジェクト標準
-ターゲットがあればそれを優先し、**対象の選択をgeneratorに委ねない。**
-
-- ビルドタグ付きのテスト（`//go:build integration` 等）があるプロジェクトでは、それも含める
-- ビルド・vet・テストを**別々の呼び出しに分けない**。サンドボックスはソースツリーを
-  バインドマウントしており、フルツリーを走査するコマンドは1回ごとにその走査コストを払う
-- テストがビルドを兼ねるなら（`go test ./...` 等）、それ1本で足りる
-
-#### SKIP を通過扱いにしない
-
-依存物が未配置だとテストが無言で `SKIP` され、`ok` と表示されて成功に見える。
-**`ok` の有無だけで判定してはならない。** SKIP件数の数え方は自然言語の依頼にせず、
-`scripts/count-skips.sh` に固定する（`tail` の目視で「0件」と判定することを禁止する。
-上記1b参照）。
-
-- `skips=<件数>`（exit 0）→ その件数を確認し、検証したかったテストが実際に走ったことを
-  確かめる。**想定外のSKIPは不合格として扱う**
-- `skips=unknown`（exit 1）→ **「0件」として扱ってはならない。** 同時に、これは
-  **「記録して進む」に分類される**（「停止させるものと、記録して進めるもの」節）。built-in
-  ランナー（go/jest/pytest）以外の形式であるため数えられなかった事実を Epic issue と PR 本文に
-  明記し、**そのまま Step 7 へ進む。ここで run を止めない。**
-  記録して進むことと、黙って通すことは違う。「0件」への読み替えは常に禁止する。
-  恒久対処として、次の run までに Epic issue 本文へ `## SKIPパターン` 節（ERE1行）を
-  追加することを明記する（書き方は `core/roles/planner.md`「SKIPパターン（該当する場合のみ）」節）
+**Epic worktree に対する単独のゲートは行わない。** レーンの変更が Epic に入るのはこの取り込み
+検証通過後のマージであり、Epic worktree を先に検証しても検証対象として意味を持たない。
 
 - **通過** → Step 7 へ
 - **失敗** → Step 8 のリカバリへ。原因レーンの特定手順は [references/recovery.md](references/recovery.md)
@@ -668,7 +638,7 @@ GATE_SEC=$((GATE_END_SEC - GATE_START_SEC))
 原理的にfast-forwardできない）。**この2つの役割は分離できる**: ベース逸脱の検出はStep 5の
 `merge-lane.sh`によるmerge-base完全一致検証が引き継ぎ、直線性の強制はやめる。
 
-epicへの取り込みは、waveがWAVE_BASEの子孫であるため統合ゲート通過後は必ずfast-forwardになる。
+epicへの取り込みは、waveがWAVE_BASEの子孫であるため取り込み検証通過後は必ずfast-forwardになる。
 
 ```bash
 cd "$EPIC_WT"
@@ -684,25 +654,24 @@ git push origin "${EPIC_BRANCH}"
 3. このウェーブの計測を確定し、次ウェーブのバナー表示・PR本文の集計に使う値を更新する:
 
 ```bash
-WAVE_TOTAL_SEC=$((IMPL_SEC + MERGE_SEC + GATE_SEC))
-echo "前ウェーブ: 実装 $(fmt_duration "$IMPL_SEC") + 統合 $(fmt_duration "$MERGE_SEC") + 統合ゲート $(fmt_duration "$GATE_SEC") = $(fmt_duration "$WAVE_TOTAL_SEC")"
+WAVE_TOTAL_SEC=$((IMPL_SEC + MERGE_SEC))
+echo "前ウェーブ: 実装 $(fmt_duration "$IMPL_SEC") + 統合 $(fmt_duration "$MERGE_SEC") = $(fmt_duration "$WAVE_TOTAL_SEC")"
 
 PREV_WAVE_IMPL_SEC="$IMPL_SEC"
 PREV_WAVE_MERGE_SEC="$MERGE_SEC"
-PREV_WAVE_GATE_SEC="$GATE_SEC"
 
 TOTAL_IMPL_SEC=$((TOTAL_IMPL_SEC + IMPL_SEC))
 TOTAL_MERGE_SEC=$((TOTAL_MERGE_SEC + MERGE_SEC))
-TOTAL_GATE_SEC=$((TOTAL_GATE_SEC + GATE_SEC))
 DONE_TASK_COUNT=$((DONE_TASK_COUNT + N))   # N = 直前の「取り込めたレーンに対応するTask issueをクローズする」で閉じた件数
 ```
 
 4. → Step 1 に戻る（次のウェーブへ）
 
-全ウェーブが完了したら **「Epic一括レビュー」** へ進む。
+全ウェーブが完了したら **「Epic 統合ゲート」** へ進む（フルスイートはここで初めて、Epicにつき
+1回だけ実行する）。
 
-**統合ゲートに失敗した場合（Step 8 のリカバリを経由した場合）は、この計測更新を行わない。**
-`PREV_WAVE_*` と累計は「統合ゲートを通過して実際に取り込めたウェーブ」だけを反映する
+**取り込み検証に失敗した場合（Step 8 のリカバリを経由した場合）は、この計測更新を行わない。**
+`PREV_WAVE_*` と累計は「取り込み検証を通過して実際に取り込めたウェーブ」だけを反映する
 （失敗した試行の時間まで合算すると、並列化とオーバーヘッド削減の寄与という本来の目的が
 読み取れない数字になるため）。
 
@@ -715,13 +684,15 @@ DONE_TASK_COUNT=$((DONE_TASK_COUNT + N))   # N = 直前の「取り込めたレ�
 | レーン内ゲート失敗（タスク単位） | そのタスクだけ見送り、レーンの残りは続行。次ウェーブへ持ち越す |
 | `merge-lane.sh` exit 10 / 11（ベース逸脱・競合） | 取り込まず差し戻し、実出力をissueにコメント。次ウェーブで再実行 |
 | 同一タスクで3回失敗 | スキップし、`SKIPPED_CSV` に加える |
-| 統合ゲート失敗 | Epicは無傷。レーンを1本ずつ積み直して原因を特定する |
+| 統合ゲート失敗（Step 6、可読性ガード） | Epicは無傷。レーンを1本ずつ積み直して原因を特定する |
+| Epic 統合ゲート失敗（全ウェーブ完了後） | Epicは既にウェーブを取り込み済みで無傷ではない。修正タスク化して再試行する（詳細は「Epic 統合ゲート」節） |
 
 **ウェーブ内では再試行しない。** バリア同期のため、ウェーブ内の再試行は他レーンを待たせるだけに
 なる。次ウェーブに回せばベースが進み、この種の失敗は自然に解消することが多い。
 
-手順の詳細（統合ゲート失敗時の原因特定、スキップの伝播）は
-[references/recovery.md](references/recovery.md) を参照する。**失敗が起きたときにだけ読む。**
+手順の詳細（統合ゲート失敗時の原因特定、Epic統合ゲート失敗時のウェーブ単位の二分探索、
+スキップの伝播）は [references/recovery.md](references/recovery.md) を参照する。
+**失敗が起きたときにだけ読む。**
 
 ## サンドボックスの後片付け（正常終了・異常終了を問わず必ず実行）
 
@@ -746,10 +717,86 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/watchdog.sh" --stop
   [references/troubleshooting.md](references/troubleshooting.md) を参照する
 - ウェーブバナー・レーン結果・PR本文への計測集計の**表示フォーマット**は
   [references/progress-display.md](references/progress-display.md) を参照する。
-  計測変数（`IMPL_SEC` / `MERGE_SEC` / `GATE_SEC` と各累計）は本ファイルの Step 2〜7 で更新する
+  計測変数（`IMPL_SEC` / `MERGE_SEC` と各累計）は本ファイルの Step 2〜7 で、`EPIC_GATE_SEC` は
+  「Epic 統合ゲート」節で更新する
+
+## Epic 統合ゲート（全ウェーブ完了後・Epic一括レビューの前）
+
+全ウェーブが完了し、Epicブランチが最新の状態になった時点で、**Epicにつき1回だけ**フルスイートを
+実行する。これが「機械的ゲートの三段構成」における唯一の全テスト実行点である。
+
+```bash
+cd "$EPIC_WT"
+git checkout "${EPIC_BRANCH}"
+EPIC_GATE_START_SEC=$(date +%s)   # 「Epic統合ゲート」フェーズの計測開始
+
+# 1) テスト（Docker sandbox内）— 1回にまとめる。落ちたら不合格
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" '[全テストを走らせるコマンド]' \
+  2>&1 | tee /tmp/epic-gate-test-output.log
+
+# 1b) SKIP件数はレーンの自己申告に依存せず、run自身がcount-skips.shで機械的に数える。
+#     0件でも必ず表示する（黙って省略しない）
+[ -n "$SKIP_PATTERN" ] && export DEV_WORKFLOW_SKIP_PATTERN="$SKIP_PATTERN"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file /tmp/epic-gate-test-output.log
+
+# 2) 可読性ガード — Epicブランチの差分に対して実行（PostToolUseフックと同じ判定）
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-readability.sh" --git
+
+EPIC_GATE_END_SEC=$(date +%s)
+EPIC_GATE_SEC=$((EPIC_GATE_END_SEC - EPIC_GATE_START_SEC))
+```
+
+**フルスイートを走らせるのはここだけである**（「機械的ゲートの三段構成」節）。ウェーブ末の
+取り込み検証は可読性ガードとmerge-base検証しか行わないため、**回帰の判定はこのEpic統合ゲートが
+単独で担う。**
+Epic統合ゲートの `count-skips.sh` の結果は、レーンが完了報告に書いた値（変更範囲テストの
+SKIP件数）と**食い違うことがある**（対象ツリーも対象範囲も異なるため）。
+**食い違った場合はEpic統合ゲートの値を採用し**、その旨を Epic issue にコメントする。
+
+#### 何を実行すれば「回帰なし」と言えるか
+
+ゲートで走らせるのは**プロジェクトの全テスト**とする。`make test` 等のプロジェクト標準
+ターゲットがあればそれを優先し、**対象の選択をgeneratorに委ねない。**
+
+- ビルドタグ付きのテスト（`//go:build integration` 等）があるプロジェクトでは、それも含める
+- ビルド・vet・テストを**別々の呼び出しに分けない**。サンドボックスはソースツリーを
+  バインドマウントしており、フルツリーを走査するコマンドは1回ごとにその走査コストを払う
+- テストがビルドを兼ねるなら（`go test ./...` 等）、それ1本で足りる
+
+#### SKIP を通過扱いにしない
+
+依存物が未配置だとテストが無言で `SKIP` され、`ok` と表示されて成功に見える。
+**`ok` の有無だけで判定してはならない。** SKIP件数の数え方は自然言語の依頼にせず、
+`scripts/count-skips.sh` に固定する（`tail` の目視で「0件」と判定することを禁止する。
+上記1b参照）。
+
+- `skips=<件数>`（exit 0）→ その件数を確認し、検証したかったテストが実際に走ったことを
+  確かめる。**想定外のSKIPは不合格として扱う**
+- `skips=unknown`（exit 1）→ **「0件」として扱ってはならない。** 同時に、これは
+  **「記録して進む」に分類される**（「停止させるものと、記録して進めるもの」節）。built-in
+  ランナー（go/jest/pytest）以外の形式であるため数えられなかった事実を Epic issue と PR 本文に
+  明記し、**そのまま Epic一括レビューへ進む。ここで run を止めない。**
+  記録して進むことと、黙って通すことは違う。「0件」への読み替えは常に禁止する。
+  恒久対処として、次の run までに Epic issue 本文へ `## SKIPパターン` 節（ERE1行）を
+  追加することを明記する（書き方は `core/roles/planner.md`「SKIPパターン（該当する場合のみ）」節）
+
+- **通過** → 下記「Epic一括レビュー」へ
+
+#### 失敗時の扱い（Epicブランチは既にウェーブを取り込み済みで無傷ではない）
+
+1. 失敗内容（失敗したテスト名と出力）を Epic issue にコメントする
+2. **修正タスクとして扱う**: `task` ラベルの issue を作成し（本文に `- Epic: #[番号]` と
+   `- 前提: なし` を必ず書く）、通常のウェーブループ（Step 1 以降）で generator に修正させ、
+   取り込み後に Epic 統合ゲートを再実行する
+3. **再試行は最大2回。** それでも通らなければ run を止めずに PR を作成し、
+   **PR 本文の冒頭に「Epic 統合ゲート不合格」と失敗内容を明記**して人間へ渡す
+4. 原因ウェーブの特定手順（ウェーブ単位の二分探索）は
+   [references/recovery.md](references/recovery.md) の「Epic統合ゲート失敗時の原因特定手順」を
+   参照する。**失敗したときにだけ読む。**
+
 ## Epic一括レビュー（全タスク完了後・PR作成前）
 
-全Task issueがクローズされた時点で、**ここで初めてevaluatorを起動する。**
+全Task issueがクローズされ、Epic統合ゲートを通過した時点で、**ここで初めてevaluatorを起動する。**
 
 ### R0: スキップ一覧をEpic issueにコメントする
 
@@ -808,7 +855,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
 以下がすべて満たされたらゴール達成:
 
 1. Epic配下の全Task issueがクローズされている（スキップ分はissueにコメント済み）
-2. Docker sandbox内で全テストが通っている
+2. **Epic統合ゲートが実施されている**（通過、または2回再試行後も不合格のままPR本文に明記済み）
 3. コンパイル/ビルドが成功する
 4. **Epic一括レビューが実施されている**（APPROVE、または2巡で打ち切り済み）
 5. **main向けPRが作成されている**
@@ -817,6 +864,10 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
 
 一括レビューまで終えたら、**必ずPRを作成する。** これがrunコマンドの最終出力であり、PRのURLを表示して完了とする。
 PRを作成せずにrunを終了してはならない。
+
+**Epic 統合ゲートが2回再試行後も不合格のまま終わった場合、下記PR本文の `## Summary` の直前に
+「⚠️ Epic 統合ゲート不合格: [失敗したテスト名の要約]」の1行を必ず追加すること。** 通過している
+場合はこの行を出さない。
 
 ```bash
 # Epicブランチの最新をpush
@@ -853,8 +904,8 @@ Closes $ARGUMENTS
 
 ## 実行時間
 - ウェーブ数: [WAVE_NO] / タスク数: [DONE_TASK_COUNT] / 並列度: [LANES]
-- 実装（レーン）合計: [fmt_duration TOTAL_IMPL_SEC] / 統合合計: [fmt_duration TOTAL_MERGE_SEC] / 統合ゲート合計: [fmt_duration TOTAL_GATE_SEC]
-- 総所要時間: [fmt_duration (TOTAL_IMPL_SEC + TOTAL_MERGE_SEC + TOTAL_GATE_SEC)]
+- 実装合計: [fmt_duration TOTAL_IMPL_SEC] / 統合合計: [fmt_duration TOTAL_MERGE_SEC] / Epic統合ゲート: [fmt_duration EPIC_GATE_SEC]
+- 総所要時間: [fmt_duration (TOTAL_IMPL_SEC + TOTAL_MERGE_SEC + EPIC_GATE_SEC)]
 
 ## トークン消費
 [record-agent-tokens.sh --summary --epic "$EPIC_NUM" の出力（1件も記録できていない場合は本セクションを省略）]
@@ -902,7 +953,9 @@ Epic 専用 worktree（`.claude/worktrees/<epicN>`）と、generator のレー�
 - **タスクループ中にevaluatorを起動しない**（レビューはEpic完了後の一括レビューのみ）
 - Epic一括レビューは最大2巡で打ち切り、未対応の指摘はissueを残したままPR本文に明記する
 - 予期しないエラーが発生した場合 → issueにエラー詳細をコメントし、次のウェーブへ進む
-- **Epicブランチには統合ゲートを通過したコミットだけを載せる。force pushは行わない**
+- **Epicブランチにはウェーブ末の取り込み検証（merge-base完全一致検証＋可読性ガード）を通過した
+  コミットが載る。プロジェクトの全テストはEpicにつき1回のEpic統合ゲートで検証する
+  （「機械的ゲートの三段構成」参照）。force pushは行わない**
 - **mainブランチには絶対にマージしない**
 - **テスト時に実ユーザーにメールを送信しないこと。** テスト用受信アドレス（mailhog, mailtrap等）が
   未設定の場合はタスクを中断し、issueにコメントを残して開発者に設定を促す

@@ -20,9 +20,11 @@
 #   DEV_WORKFLOW_MAX_ATTEMPTS           同一タスクの再試行上限（既定: 3）
 #   DEV_WORKFLOW_MAX_TASKS              1回の実行で処理するタスク数の上限（既定: 50）
 #   DEV_WORKFLOW_DRY_RUN=1              codex を起動せず、実行予定の内容だけ表示する
-#   DEV_WORKFLOW_TEST_CMD                統合ゲート（mechanical_gate）で実行するプロジェクトの
+#   DEV_WORKFLOW_TEST_CMD                Epic統合ゲート（epic_gate）で実行するプロジェクトの
 #                                        全テストコマンド（必須。既定値はない）。対象の選択を
 #                                        generator に委ねないため、run 側のこの変数で固定する。
+#                                        全タスク処理後にEpicにつき1回だけ実行する（ウェーブ
+#                                        ＝タスクごとには実行しない。機械的ゲートの三段構成）。
 #                                        例: DEV_WORKFLOW_TEST_CMD='bash tests/run-tests.sh'
 #
 # 注意: このスクリプトは `--dangerously-bypass-approvals-and-sandbox` を使う。
@@ -128,6 +130,15 @@ if [ -n "$PREP_CMD" ]; then
   bash "${PLUGIN_ROOT_DIR}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" --warm "$PREP_CMD" || true
 fi
 
+# ── SKIPパターン（Epic本文の「## SKIPパターン」節。built-inランナー以外の形式向け・任意）──
+# 節が無ければ何もしない。epic_gate() の count-skips.sh 呼び出しに DEV_WORKFLOW_SKIP_PATTERN
+# として渡す。
+# shellcheck disable=SC2016  # フェンス記号はリテラル一致が目的で、展開させない
+SKIP_PATTERN="$(gh issue view "$EPIC_NUMBER" --json body -q '.body' \
+  | awk '/^## SKIPパターン/{f=1; next} /^## /{f=0} f' \
+  | sed -n '/^```/,/^```/p' \
+  | sed '1d;$d')"
+
 # ── codex exec のラッパー ─────────────────────────────────────────────
 # $1: 役割名（.codex/agents/<役割>.toml の name）  $2: プロンプト  $3: 追加引数...
 run_agent() {
@@ -150,20 +161,42 @@ run_agent() {
   codex "${args[@]}" "$prompt"
 }
 
-# ── 機械的ゲート（waveブランチ上で実行する） ───────────────────────────
-# 1) プロジェクトの全テスト（sandbox-exec.sh 経由・1コマンドにまとめる）
-# 2) 可読性ガード（waveブランチの差分に対して実行。PostToolUseフックと同じ判定）
-# の AND で合否を返す。対象の選択を generator に委ねないため、テストコマンドは
-# DEV_WORKFLOW_TEST_CMD（TEST_CMD）で固定する。SKIP は「通過」ではなく、テスト
-# コマンド自身の終了コードのみで合否を判定する（無言SKIPをここで自動検出はしない。
-# generator の報告と合わせて確認すること）。
-mechanical_gate() {
+# ── ウェーブ末の取り込み検証（waveブランチ上で実行する。可読性ガードのみ） ─────
+# merge-base 完全一致検証は merge-lane.sh が既に行っている。プロジェクトの全テストは
+# ここでは走らせない（機械的ゲートの三段構成。Epicにつき1回、全タスク完了後の epic_gate に
+# 集約する）。
+readability_gate() {
   if [ "$DRY_RUN" = "1" ]; then
-    echo "[dry-run] mechanical_gate: sandbox-exec.sh --epic ${EPIC_NUM} '${TEST_CMD}' && check-readability.sh --git"
+    echo "[dry-run] readability_gate: check-readability.sh --git"
     return 0
   fi
   ( cd "$EPIC_WT" \
-      && bash "${PLUGIN_ROOT_DIR}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" "$TEST_CMD" \
+      && DEV_WORKFLOW_HOOK_VENDOR=exit-code \
+         bash "${PLUGIN_ROOT_DIR}/scripts/check-readability.sh" --git </dev/null )
+}
+
+# ── Epic 統合ゲート（Epicブランチ上で、全タスク完了後にEpicにつき1回だけ実行する） ──
+# 1) プロジェクトの全テスト（sandbox-exec.sh 経由・1コマンドにまとめる）
+# 2) SKIP件数の機械的カウント（count-skips.sh。0件でも必ず表示する）
+# 3) 可読性ガード（Epicブランチの差分に対して実行。PostToolUseフックと同じ判定）
+# の AND で合否を返す。対象の選択を generator に委ねないため、テストコマンドは
+# DEV_WORKFLOW_TEST_CMD（TEST_CMD）で固定する。失敗時の最新ログは EPIC_GATE_LAST_LOG に残す。
+EPIC_GATE_LAST_LOG=""
+epic_gate() {
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "[dry-run] epic_gate: sandbox-exec.sh --epic ${EPIC_NUM} '${TEST_CMD}' && count-skips.sh && check-readability.sh --git"
+    return 0
+  fi
+  local log
+  log="$(mktemp "${TMPDIR:-/tmp}/dw-epic-gate.XXXXXX")"
+  EPIC_GATE_LAST_LOG="$log"
+  git -C "$EPIC_WT" checkout -q "${EPIC_BRANCH}"
+  if ! ( cd "$EPIC_WT" && bash "${PLUGIN_ROOT_DIR}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" "$TEST_CMD" ) 2>&1 | tee "$log"; then
+    return 1
+  fi
+  [ -n "$SKIP_PATTERN" ] && export DEV_WORKFLOW_SKIP_PATTERN="$SKIP_PATTERN"
+  bash "${PLUGIN_ROOT_DIR}/scripts/count-skips.sh" --file "$log"
+  ( cd "$EPIC_WT" \
       && DEV_WORKFLOW_HOOK_VENDOR=exit-code \
          bash "${PLUGIN_ROOT_DIR}/scripts/check-readability.sh" --git </dev/null )
 }
@@ -178,6 +211,8 @@ bash "${PLUGIN_ROOT_DIR}/scripts/watchdog.sh" --start --epic "$EPIC_NUM" --label
 # ── タスクループ（依存グラフに基づくウェーブ実行。lanes=1 固定）───────
 # 1タスク = 1レーン = 1ウェーブとして扱う。plan-waves.sh を毎回再計算し、
 # 常に「次に処理すべきタスク」を先頭から1件だけ取り出す（Codexは並列起動しないため）。
+# run_task_loop() として関数化してあるのは、Epic統合ゲート失敗時に修正タスクを追加した後、
+# 同じループをもう一度回して残タスク（＝新設した修正タスク）を処理するため。
 processed=0
 skipped=0
 SKIPPED_CSV=""
@@ -193,6 +228,7 @@ WAVE_NO=$(git -C "$EPIC_WT" for-each-ref --format='%(refname:short)' "refs/heads
   | sed "s#^wave/${EPIC_NUM}/##" | sort -n | tail -1)
 WAVE_NO="${WAVE_NO:-0}"
 
+run_task_loop() {
 while [ "$processed" -lt "$MAX_TASKS" ]; do
   PLAN_ARGS=(--epic "$EPIC_NUMBER" --lanes 1)
   [ -n "$SKIPPED_CSV" ] && PLAN_ARGS+=(--skipped "$SKIPPED_CSV")
@@ -284,7 +320,7 @@ issueの要件を確認すること。Task issueの記載だけで着手でき�
     echo "$MERGE_OUT"
 
     if [ "$MERGE_EXIT" -eq 0 ]; then
-      if ( cd "$EPIC_WT" && git checkout -q "$WAVE_BRANCH" ) && mechanical_gate; then
+      if ( cd "$EPIC_WT" && git checkout -q "$WAVE_BRANCH" ) && readability_gate; then
         ( cd "$EPIC_WT" \
           && git checkout -q "${EPIC_BRANCH}" \
           && git merge --ff-only "$WAVE_BRANCH" \
@@ -292,7 +328,7 @@ issueの要件を確認すること。Task issueの記載だけで着手でき�
         passed=1
         break
       fi
-      echo "-- 統合ゲート不合格。差し戻します。"
+      echo "-- 取り込み検証（可読性ガード）不合格。差し戻します。"
     elif [ "$MERGE_EXIT" -eq 10 ]; then
       echo "-- ベース逸脱を検出しました（merge-lane.sh exit 10）。取り込まず差し戻します。"
       gh issue comment "$task" --body "自律実行: ベース逸脱を検出しました（merge-lane.sh exit 10）。$(printf '%s' "$MERGE_OUT")" || true
@@ -319,6 +355,62 @@ done
 
 if [ "$processed" -ge "$MAX_TASKS" ]; then
   echo "警告: タスク処理上限 ${MAX_TASKS} 件に達したため打ち切りました（未処理タスクが残っています）。" >&2
+fi
+}
+
+run_task_loop
+
+# ── Epic 統合ゲート（全タスク完了後・Epicにつき1回。機械的ゲートの三段構成） ────
+# ウェーブ末（Step 5相当）ではプロジェクトの全テストを走らせていないため、回帰の判定は
+# ここが単独で担う。失敗時はEpic issueにコメントし、修正タスクを起票して run_task_loop を
+# もう一度回す（修正タスクが plan-waves.sh の対象として拾われる）。再試行は最大2回。
+EPIC_GATE_MAX_ATTEMPTS=3   # 初回 + 再試行2回
+EPIC_GATE_ATTEMPT=0
+EPIC_GATE_PASSED=0
+EPIC_GATE_NOTE=""
+
+echo ""
+echo "═══ Epic 統合ゲート ═══"
+
+while [ "$EPIC_GATE_ATTEMPT" -lt "$EPIC_GATE_MAX_ATTEMPTS" ]; do
+  EPIC_GATE_ATTEMPT=$((EPIC_GATE_ATTEMPT + 1))
+  echo "-- Epic統合ゲート 試行 ${EPIC_GATE_ATTEMPT}/${EPIC_GATE_MAX_ATTEMPTS}"
+
+  if epic_gate; then
+    EPIC_GATE_PASSED=1
+    break
+  fi
+
+  echo "-- Epic統合ゲート不合格（ログ: ${EPIC_GATE_LAST_LOG}）"
+
+  if [ "$EPIC_GATE_ATTEMPT" -ge "$EPIC_GATE_MAX_ATTEMPTS" ]; then
+    EPIC_GATE_NOTE="Epic統合ゲート不合格: ${EPIC_GATE_MAX_ATTEMPTS}回の試行後も通過しませんでした（ログ: ${EPIC_GATE_LAST_LOG}）"
+    gh issue comment "$EPIC_NUMBER" --body "自律実行: ${EPIC_GATE_NOTE}" || true
+    break
+  fi
+
+  GATE_FAIL_BODY="自律実行: Epic統合ゲートが失敗しました（試行 ${EPIC_GATE_ATTEMPT}/${EPIC_GATE_MAX_ATTEMPTS}）。修正タスクを起票して再試行します。ログ: ${EPIC_GATE_LAST_LOG}"
+  gh issue comment "$EPIC_NUMBER" --body "$GATE_FAIL_BODY" || true
+
+  FIX_TASK_BODY="$(cat <<EOF
+Epic統合ゲート（全ウェーブ完了後のプロジェクトの全テスト）が失敗しました（試行 ${EPIC_GATE_ATTEMPT}）。
+失敗ログ: ${EPIC_GATE_LAST_LOG}
+このタスクで、失敗しているテストが通るように修正すること。
+
+- Epic: #${EPIC_NUMBER}
+- 前提: なし
+EOF
+)"
+  FIX_TASK_URL="$(gh issue create --title "Epic統合ゲート不合格の修正（試行 ${EPIC_GATE_ATTEMPT}）" \
+    --label "task" --body "$FIX_TASK_BODY")"
+  echo "修正タスクを作成しました: ${FIX_TASK_URL}"
+
+  # 修正タスクが plan-waves.sh の対象に入るよう、残タスクを再計算してもう一度ループを回す
+  run_task_loop
+done
+
+if [ "$EPIC_GATE_PASSED" -ne 1 ]; then
+  echo "警告: Epic統合ゲートが不合格のままです。PR本文の冒頭に明記してから作成してください。" >&2
 fi
 
 # ── Epic一括レビュー ─────────────────────────────────────────────────
