@@ -12753,7 +12753,10 @@ else
     "R1=${H157_REVIEW_R1_LINE} 確度判定=${H157_REVIEW_CONF_LINE} R2=${H157_REVIEW_R2_LINE}"
 fi
 
-if grep -Fq 'model: opus（この定義の既定は sonnet のため、ここで明示的に上書きする）' "$H157_REVIEW_REF"; then
+# --- #162で、プロンプト本文の1行ではなくTask/Agentツールの起動時パラメータで
+#     model: opusを渡す手順に変わった（詳細な検証は下記『Review #162』ブロック）。
+#     ここではその移行後も「確度判定はopusで上書きする」という趣旨自体は残っていることだけを見る ---
+if grep -Fq 'Task/Agent起動パラメータ: model: opus' "$H157_REVIEW_REF"; then
   pass "review.md: 確度判定の呼び出しでmodel: opusを明示的に上書きする指示がある（#157）"
 else
   fail "review.md: 確度判定の呼び出しでmodel: opusを明示的に上書きする指示がある（#157）"
@@ -13178,6 +13181,181 @@ for h149_f in agents/planner.md agents/generator.md agents/evaluator.md \
       "反映されていません"
   fi
 done
+
+# ---------------------------------------------------------------------------
+# Review #163: SKILL.md のモデル記述・evaluator起動回数の上限が、#157（モデル分離）と
+#              #149（観点別並列 + 確度判定 + delta-review）に追随していること
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Review #163: SKILL.mdのモデル記述・evaluator起動回数の上限の整合 =="
+
+H163_SKILL_RAW="${REPO_ROOT}/skills/run/SKILL.md"
+H163_REVIEW_REF="${REPO_ROOT}/skills/run/references/review.md"
+H163_README="${REPO_ROOT}/README.md"
+
+# --- (1) SKILL.mdの「モデル構成の確認」節が、#157（既定sonnet + 確度判定だけ起動時opus上書き）
+#     と食い違う古い記述（generator・evaluatorとも固定）を含んでいない ---
+if grep -Fq 'generator（sonnet）・evaluator（opus）のモデルはエージェント定義側で固定されており' \
+  "$H163_SKILL_RAW"; then
+  fail "skills/run/SKILL.md: #157以前の古いモデル固定記述（generator・evaluator一括固定）が残っていない（#163）" \
+    "古い記述が見つかりました"
+else
+  pass "skills/run/SKILL.md: #157以前の古いモデル固定記述（generator・evaluator一括固定）が残っていない（#163）"
+fi
+
+H163_SKILL_MODEL_SECTION="$(awk '/^### モデル構成の確認/{f=1} /^### Epicブランチ \+ 作業 worktree の準備/{f=0} f' \
+  "$H163_SKILL_RAW")"
+
+case "$H163_SKILL_MODEL_SECTION" in
+  *'generator（sonnet）のモデルはエージェント定義側で固定されており'*'確度判定役として起動する呼び出しだけ'*'model: opus'*'起動時に上書きする'*)
+    pass "skills/run/SKILL.md: モデル構成の確認節がgenerator固定+evaluator確度判定役opus上書きの記述に揃っている（#163）" ;;
+  *)
+    fail "skills/run/SKILL.md: モデル構成の確認節がgenerator固定+evaluator確度判定役opus上書きの記述に揃っている（#163）" \
+      "$H163_SKILL_MODEL_SECTION" ;;
+esac
+
+# --- README.mdの対応箇所（推奨settings.jsonの直後）にも同じ趣旨の記述がある ---
+if grep -Fq 'generator（sonnet）のモデルはエージェント定義側で固定されており' "$H163_README" \
+  && grep -Fq '確度判定役として起動する呼び出しだけ' "$H163_README"; then
+  pass "README.md: モデル構成の記述がSKILL.mdと同じ趣旨（generator固定+evaluator確度判定役opus上書き）になっている（#163）"
+else
+  fail "README.md: モデル構成の記述がSKILL.mdと同じ趣旨（generator固定+evaluator確度判定役opus上書き）になっている（#163）" \
+    "記述が見つかりません"
+fi
+
+# --- (2) evaluator起動回数の上限が「観点別4本＋確度判定1本＋delta-review1本＝最大6回」で
+#     SKILL.md・review.md・core/instructions.md・READMEの4か所すべて一致している ---
+if grep -Fq 'evaluator 起動は最大6回' "$H163_SKILL_RAW"; then
+  pass "skills/run/SKILL.md: evaluator起動の上限が最大6回と明記されている（#163）"
+else
+  fail "skills/run/SKILL.md: evaluator起動の上限が最大6回と明記されている（#163）" \
+    "$(grep -n 'evaluator.*起動は最大' "$H163_SKILL_RAW" || echo '該当行が見つかりません')"
+fi
+
+if grep -Fq 'evaluator起動は最大6回' "$H163_REVIEW_REF"; then
+  pass "skills/run/references/review.md: evaluator起動の上限が最大6回と明記されている（#163）"
+else
+  fail "skills/run/references/review.md: evaluator起動の上限が最大6回と明記されている（#163）" \
+    "$(grep -n 'evaluator起動は最大' "$H163_REVIEW_REF" || echo '該当行が見つかりません')"
+fi
+
+# --- SKILL.md・review.md に、#149以前の古い上限（最大3回・最大5回）が残っていない ---
+for h163_pair in "$H163_SKILL_RAW:skills/run/SKILL.md" "$H163_REVIEW_REF:skills/run/references/review.md"; do
+  h163_file="${h163_pair%%:*}"
+  h163_label="${h163_pair#*:}"
+  if grep -E -q 'evaluator ?起動は最大(3|5)回' "$h163_file"; then
+    fail "${h163_label}: #149以前の古いevaluator起動上限（最大3回・最大5回）が残っていない（#163）" \
+      "$(grep -nE 'evaluator ?起動は最大(3|5)回' "$h163_file")"
+  else
+    pass "${h163_label}: #149以前の古いevaluator起動上限（最大3回・最大5回）が残っていない（#163）"
+  fi
+done
+
+# --- core/instructions.md・READMEも同じ内訳（観点別4本＋確度判定1本＋delta-review1本）を
+#     述べており、SKILL.md・review.mdの「最大6回」と矛盾しない ---
+for h163_doc in "$CORE_INSTRUCTIONS_FLAT:core/instructions.md" "$H163_README:README.md"; do
+  h163_docfile="${h163_doc%%:*}"
+  h163_doclabel="${h163_doc#*:}"
+  h163_docbody="$(cat "$h163_docfile" 2>/dev/null)"
+  case "$h163_docbody" in
+    *'観点別4本'*'確度判定1本'*'delta-review'*'1本'*)
+      pass "${h163_doclabel}: evaluator起動回数の内訳（観点別4本＋確度判定1本＋delta-review1本）が明記されている（#163）" ;;
+    *)
+      fail "${h163_doclabel}: evaluator起動回数の内訳（観点別4本＋確度判定1本＋delta-review1本）が明記されている（#163）" \
+        "内訳の記述が見つかりません" ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Review #162: 確度判定役のopus指定が、Task/Agentツールの起動時パラメータとして渡す手順
+#              になっており、プロンプト本文の1行に留まっていないこと
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Review #162: 確度判定役のopus起動がTask/Agentの起動時パラメータになっている =="
+
+H162_REVIEW_REF="${REPO_ROOT}/skills/run/references/review.md"
+H162_CONFIDENCE_SECTION="$(awk '/^### 確度判定（R1 と R2 の間/{f=1} /^### R2: 指摘をissue化/{f=0} f' \
+  "$H162_REVIEW_REF")"
+
+if [ -z "$H162_CONFIDENCE_SECTION" ]; then
+  fail "review.md: 『### 確度判定』節が見つかる（#162）" "節が空でした"
+else
+  pass "review.md: 『### 確度判定』節が見つかる（#162）"
+fi
+
+# --- プロンプト本文の中の1行（- 起動時モデル指定: model: opus）に留まっていない ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'- 起動時モデル指定: model: opus'*)
+    fail "review.md: 確度判定のopus指定がプロンプト本文の1行に留まっていない（#162）" \
+      "旧来の『- 起動時モデル指定: model: opus』行が残っています" ;;
+  *)
+    pass "review.md: 確度判定のopus指定がプロンプト本文の1行に留まっていない（#162）" ;;
+esac
+
+# --- Task/Agentツールの起動時パラメータとしてmodelを渡す手順が明記されている ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'Task/Agent ツールの起動時パラメータ'*'model: opus'*)
+    pass "review.md: Task/Agentツールの起動時パラメータでmodel: opusを渡す手順が明記されている（#162）" ;;
+  *)
+    fail "review.md: Task/Agentツールの起動時パラメータでmodel: opusを渡す手順が明記されている（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+# --- プロンプト雛形自体にも起動時パラメータの行がある ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'Task/Agent起動パラメータ: model: opus'*)
+    pass "review.md: 確度判定のプロンプト雛形にTask/Agent起動パラメータの行がある（#162）" ;;
+  *)
+    fail "review.md: 確度判定のプロンプト雛形にTask/Agent起動パラメータの行がある（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+# --- 上書きが効いたかを確認できるよう、出力JSONにモデル名を含めさせる、または
+#     record-agent-tokens.shのnoteにモデル名を記録する手順がある ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'model'*'フィールド'*)
+    pass "review.md: 確度判定の出力JSONに実際に動いたモデル名を含めさせる規定がある（#162）" ;;
+  *)
+    fail "review.md: 確度判定の出力JSONに実際に動いたモデル名を含めさせる規定がある（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+case "$H162_CONFIDENCE_SECTION" in
+  *'--note'*'model='*)
+    pass "review.md: record-agent-tokens.shの--noteにモデル名を記録する手順がある（#162）" ;;
+  *)
+    fail "review.md: record-agent-tokens.shの--noteにモデル名を記録する手順がある（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+# --- 起動時モデル上書きが実現できなかった場合の扱い（据え置き＝発見役と同一モデルで
+#     確度判定する旨）がADR-0006の決定Cと同じ「記録して進む」枠で明記されている ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'技術的に実現できなかった場合'*'同一モデル'*'記録して進む'*)
+    pass "review.md: 起動時モデル上書きが実現できなかった場合の据え置き扱いが明記されている（#162）" ;;
+  *)
+    fail "review.md: 起動時モデル上書きが実現できなかった場合の据え置き扱いが明記されている（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+# --- ADR-0006の(b)起動時モデル上書きが確認済みの事実として引用されている ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'ADR-0006'*'確認したとおり'*)
+    pass "review.md: ADR-0006が確認した事実として起動時モデル上書きを引用している（#162）" ;;
+  *)
+    fail "review.md: ADR-0006が確認した事実として起動時モデル上書きを引用している（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+# --- 生成物側（core/roles/evaluator.md由来）は変更していないので、既存の記述と矛盾しない ---
+if grep -Fq '起動時に `model: opus` を明示して上書き' "${REPO_ROOT}/core/roles/evaluator.md"; then
+  pass "core/roles/evaluator.md: 確度判定役は起動時にmodel: opusを明示して上書きする旨が維持されている（#162）"
+else
+  fail "core/roles/evaluator.md: 確度判定役は起動時にmodel: opusを明示して上書きする旨が維持されている（#162）" \
+    "記述が見つかりません"
+fi
 
 # ---------------------------------------------------------------------------
 # Task #153: レーンをウェーブ横断で維持し generator の cold start を除去する
