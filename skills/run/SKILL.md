@@ -164,8 +164,8 @@ Gitオペレーション（commit, push等）はホスト側で実行する。
 
 #### Epic 本文の任意節を取り込む
 
-Epic 本文には `## 準備コマンド` / `## 共有ディレクトリ` / `## SKIPパターン` の3つの任意節を
-置ける。いずれも**節が無ければ空文字のまま**で、既存 Epic の挙動は変わらない。
+Epic 本文には `## 準備コマンド` / `## 共有ディレクトリ` / `## SKIPパターン` / `## 編集時チェック`
+の4つの任意節を置ける。いずれも**節が無ければ空文字のまま**で、既存 Epic の挙動は変わらない。
 各節の意味・書き方・レーンへの伝わり方は
 [references/sandbox.md](references/sandbox.md) を参照する（**書き方に迷ったときだけ読む**）。
 
@@ -177,15 +177,27 @@ sect() { printf '%s\n' "$EPIC_BODY" | awk -v h="^## $1\$" '$0 ~ h {f=1; next} /^
 PREP_CMD="$(sect '準備コマンド')"
 SHARED_DIRS="$(sect '共有ディレクトリ')"
 SKIP_PATTERN="$(sect 'SKIPパターン')"
+EDIT_CHECK="$(sect '編集時チェック')"
 EPIC_WT_ABS="$(cd "$EPIC_WT" && pwd)"
 
 # 準備コマンドがあれば Epic 専用 worktree で1回だけ流す（キャッシュを温め、統合ゲート用の生成物を置く）
 [ -n "$PREP_CMD" ] && bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" --warm "$PREP_CMD"
+
+# 編集時チェックの仕様をマーカーファイルへ書く（PostToolUseフックはBashツール越しのexportを
+# 受け取れないため、ファイル経由で渡す。edit-check.sh --write/--clear が原子的に書き換える）。
+# 節が無ければ --clear し、前回Epicの内容が残留しないようにする
+if [ -n "$EDIT_CHECK" ]; then
+  printf '%s\n' "$EDIT_CHECK" | bash "${CLAUDE_PLUGIN_ROOT}/scripts/edit-check.sh" --write
+else
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/edit-check.sh" --clear
+fi
 ```
 
 `$PREP_CMD` / `$SHARED_DIRS` / `$SKIP_PATTERN` / `$EPIC_WT_ABS` は Step 3 のレーンプロンプトと
 Step 6 の統合ゲートで使うので、変数として保持しておく。`$SKIP_PATTERN` は両方へ
 `DEV_WORKFLOW_SKIP_PATTERN` として渡す（Epic 本文の `## SKIPパターン` 節に由来する）。
+`$EDIT_CHECK` はマーカーファイルへの書き込みだけで完結し、Step 3 のレーンプロンプトへの
+埋め込みは不要（PostToolUseフックが編集のたびに自動発火するため、generator 側の対応は無い）。
 
 ### サンドボックスへのコマンド投入は sandbox-exec.sh 経由に統一する
 

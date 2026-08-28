@@ -46,3 +46,24 @@ isolation worktree には及ばない。**
   generator プロンプトと統合ゲートの両方に渡す（`## 準備コマンド` 節と同じ抽出方法）
 - 節が無ければ何も設定されず、built-in ランナー（go/jest/pytest）の判定だけが行われる
 - 節を書くかどうかの判断は `## 準備コマンド` 節と同様に planner が行う（`core/roles/planner.md`）
+
+### Epic 本文の `## 編集時チェック` 節
+
+PostToolUse フックで型/lint エラーを編集直後に差し戻し、「編集 → コンテナでビルド/テスト →
+エラーを読む → 修正」のループ（毎回 Docker 往復を伴う）を縮めるための仕組み（`scripts/edit-check.sh`。
+Task #155、ADR: `docs/adr/0005-edit-time-check-hook.md`）。
+
+- 書式は `<glob> <コマンド。{file}が編集ファイルパスに置換される>` を1行1マッピングで書く
+  （`README.md`「Epic の `## 編集時チェック` 節」を参照）
+- **節が無ければ何もしない**。既存 Epic の挙動は変わらない
+- 節があれば run が Epic 開始時に `scripts/edit-check.sh --write` でマーカーファイル
+  （`scripts/lib/marker-root.sh` が解決するメインリポ配下の `.claude/.dev-workflow-edit-check`）
+  へ書き出す。節が無ければ `--clear` で前回 Epic の内容を消す
+- **PostToolUse フックは CLI 本体の子プロセスであり、generator の Bash ツール越しの `export` は
+  伝播しない。** そのためマーカーファイル経由にしており、Step 3 の generator プロンプトへの
+  追加の埋め込みは不要（フックが自動的に発火する）
+- ホスト側で実行する（コンテナ経由にしない）。理由は ADR 参照（要約: Docker 往復削減という
+  目的自体と矛盾するため）
+- 想定するのは型チェック単体・lint単体の秒オーダーの処理であり、**テストスイートではない**
+  （テストはレーン内ゲート・統合ゲートが別途担う）
+- 節を書くかどうかの判断は他の任意節と同様に planner が行う（`core/roles/planner.md`）
