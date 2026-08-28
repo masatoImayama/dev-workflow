@@ -127,6 +127,17 @@ fi
 SKIP_PATTERN="$(gh issue view <epic番号> --json body -q '.body' \
   | awk '/^## SKIPパターン/{f=1; next} /^## /{f=0} f' \
   | sed -n '/^```/,/^```/p' | sed '1d;$d')"
+
+# Epic本文に「## 編集時チェック」節があれば取り出し、マーカーファイルへ書く（PostToolUseフックの
+# edit-check.shが読む。フックはBashツール越しのexportを受け取れないためファイル経由にする）
+EDIT_CHECK="$(gh issue view <epic番号> --json body -q '.body' \
+  | awk '/^## 編集時チェック/{f=1; next} /^## /{f=0} f' \
+  | sed -n '/^```/,/^```/p' | sed '1d;$d')"
+if [ -n "$EDIT_CHECK" ]; then
+  printf '%s\n' "$EDIT_CHECK" | bash "${CLAUDE_PLUGIN_ROOT}/scripts/edit-check.sh" --write
+else
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/edit-check.sh" --clear
+fi
 ```
 
 **節が無ければ何もしない。** 既存の Epic（`## 準備コマンド` 節が無いもの）は上記の
@@ -146,6 +157,10 @@ generator は**サブエージェント専用 worktree を持たず、Epic workt
 Step 5「SKIP を通過扱いにしない」参照）。空でなければ変数として保持し、Step 3の
 generatorプロンプトとStep 5の統合ゲートの両方に `DEV_WORKFLOW_SKIP_PATTERN` として渡す
 （節の書き方はREADME「Epic の `## SKIPパターン` 節」参照）。
+
+`$EDIT_CHECK` はマーカーファイルへの書き込みで完結し、Step 3のgeneratorプロンプトへの
+埋め込みは不要（PostToolUseフックが編集のたびに自動発火するため）。節の書き方は
+README「Epic の `## 編集時チェック` 節」参照。
 
 **サンドボックスへのコマンド投入は `sandbox-exec.sh` 経由に統一する。** `docker run` を直接
 組み立ててはならない。イメージの解決とビルド（`Dockerfile.dev` の内容 hash でタグ付けし自動

@@ -605,6 +605,47 @@ node_modules  yarn.lock package.json
   コマンドの前に `share-prepared-dirs.sh --detach` で共有リンクを解除してから install する
   必要がある（generator へは run が指示するが、人間が挙動を追えるようここにも明記する）
 
+### Epic の `## 編集時チェック` 節
+
+「編集 → `sandbox-exec.sh` でビルド/テスト実行 → エラーを読む → 修正」で最低3ターン、かつ
+毎回 Docker 往復（1呼び出しあたり約3.4秒。「検証結果のスタンプ（呼び出しごとの固定オーバーヘッド
+削減。issue #145）」参照）が発生する。編集直後にホスト側で型チェック単体・lint単体のような
+軽量チェックを走らせ、その場で違反をエージェントへ差し戻すことでこのループを縮めるのが
+`scripts/edit-check.sh`（`PostToolUse(Write|Edit|MultiEdit)` フック）である。詳細な設計判断は
+`docs/adr/0005-edit-time-check-hook.md` を参照。
+
+`## 準備コマンド` / `## SKIPパターン` と同じ機構で、チェック内容をハードコードせず Epic issue
+本文から受け取る。書式は空白区切りで1行に「編集ファイルに一致させる glob」と「実行する
+コマンド（`{file}` が編集ファイルパスに置換される）」を並べる。上から順に最初に一致した行の
+コマンドを使う。
+
+````markdown
+## 編集時チェック
+
+```
+*.go  gofmt -l {file}
+*.ts  npx tsc --noEmit {file}
+```
+````
+
+- **節が無ければ何もしない**（既存 Epic の挙動を変えない）
+- 節があれば run が Epic 開始時に `scripts/edit-check.sh --write` でマーカーファイル
+  （`.claude/.dev-workflow-edit-check`。`scripts/lib/marker-root.sh` が解決するメインリポの
+  ルート配下、Epic 専用 worktree・各レーンの isolation worktree のいずれから見ても同じ場所）
+  へ書き出す。節が無ければ `--clear` で前回 Epic の内容を消す
+- **PostToolUse フックは CLI 本体の子プロセスとして起動されるため、generator が Bash ツール
+  越しに `export` した環境変数は届かない。** マーカーファイル経由にしているのはこのためで、
+  generator 側のプロンプトへ追加の埋め込みは不要（フックが編集のたびに自動発火する）
+- **タイムアウトは既定5秒**（`DEV_WORKFLOW_EDIT_CHECK_TIMEOUT` で調整可）。想定するのは
+  型チェック単体・lint単体のような**秒オーダーの処理であり、テストスイートではない**。
+  テストの実行はレーン内ゲート・統合ゲートが別途担う
+- **フック自体のエラー（コマンド不在・タイムアウト）はブロックしない**（`exit 0` で素通り）。
+  ブロックするのは「チェックが実行でき、かつ非0終了＝違反が見つかった場合」だけ
+- **ホスト側で実行する**（`sandbox-exec.sh` 経由にしない）。Docker 往復削減という目的自体と
+  矛盾するため（ADR参照）。ホストにツールチェインが無い場合、その glob 行を書かなければ
+  何もしない（フェイルセーフ）
+- 差し戻し契約は `check-readability.sh` と同一（`DEV_WORKFLOW_HOOK_VENDOR` で出し分け）
+
 ## ハーネス非注入原則
 
 **dev-workflow ハーネス都合のファイル・設定を、駆動先の業務リポジトリに注入しない。**

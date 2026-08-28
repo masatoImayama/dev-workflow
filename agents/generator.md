@@ -843,9 +843,9 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" --print-
 `--print-plan` が `mode=none` を返す場合、上記3択のいずれからもサンドボックス定義が
 見つかっていないので、自律モードを開始せずに停止する。
 
-Epic 本文には、上記のサンドボックス定義とは別に**3つの任意節**（準備コマンド・共有ディレクトリ・
-SKIPパターン）を書ける。書くかどうかの判断はいずれも planner が行う。詳細（背景・書式・
-run/generator 側の扱い）は `${CLAUDE_PLUGIN_ROOT}/core/references/epic-sections.md` を参照する。
+Epic 本文には、上記のサンドボックス定義とは別に**4つの任意節**（準備コマンド・共有ディレクトリ・
+SKIPパターン・編集時チェック）を書ける。書くかどうかの判断はいずれも planner が行う。詳細（背景・
+書式・run/generator 側の扱い）は `${CLAUDE_PLUGIN_ROOT}/core/references/epic-sections.md` を参照する。
 **Epic issue 本文にこれらの節を書くか判断するとき、run/generator がこれらの節の扱いで迷ったとき
 にだけ読む。**
 
@@ -865,6 +865,14 @@ run が Epic 開始時に `## 準備コマンド` 節を読み1回だけ実行�
 `scripts/count-skips.sh` は go / jest / pytest の3形式しか built-in で判定できない。
 それ以外の形式では `## SKIPパターン` 節（SKIP行に一致するERE1行）が無いと
 `count-skips.sh` は既定で `skips=unknown` になる。
+
+### Epic 本文の `## 編集時チェック` 節
+
+`scripts/edit-check.sh` は PostToolUse(Write|Edit|MultiEdit) で発火し、編集直後に
+型チェック単体・lint単体（**テストスイートではない**。秒オーダーで終わるものに限る）を
+ホスト側で実行して即座に差し戻す。チェック内容はハードコードせず、この節（`<glob> <コマンド>`
+を1行1マッピング）で受け取る。**節が無ければ何もしない**（既存 Epic の挙動を変えない）。
+差し戻し契約は `check-readability.sh` と同じ（`DEV_WORKFLOW_HOOK_VENDOR` で出し分け）。
 
 ## ハーネス非注入原則
 

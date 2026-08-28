@@ -13091,6 +13091,228 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Task #155: PostToolUse フックで型/lint エラーを即時差し戻す（scripts/edit-check.sh）
+#
+# marker-root.sh の解決は DEV_WORKFLOW_MARKER_ROOT で明示指定し、実リポジトリの
+# .claude/.dev-workflow-edit-check を汚さない一時ディレクトリへ隔離する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== 編集時チェック（PostToolUse フック・#155） =="
+
+EDIT_CHECK_SCRIPT="${REPO_ROOT}/scripts/edit-check.sh"
+H155_MARKER_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/dw-edit-check-marker.XXXXXX")"
+H155_WORK="$(mktemp -d "${TMPDIR:-/tmp}/dw-edit-check-work.XXXXXX")"
+printf 'package main\n' > "${H155_WORK}/sample.go"
+printf 'const x = 1;\n' > "${H155_WORK}/sample.ts"
+
+edit_check_write() {
+  # edit_check_write <spec>
+  printf '%s\n' "$1" | DEV_WORKFLOW_MARKER_ROOT="$H155_MARKER_ROOT" bash "$EDIT_CHECK_SCRIPT" --write >/dev/null 2>&1
+}
+edit_check_clear() {
+  DEV_WORKFLOW_MARKER_ROOT="$H155_MARKER_ROOT" bash "$EDIT_CHECK_SCRIPT" --clear >/dev/null 2>&1
+}
+edit_check_run_hook() {
+  # edit_check_run_hook <file> [追加の環境変数 VAR=val ...]
+  local file="$1"; shift
+  printf '{"tool_input":{"file_path":"%s"}}' "$file" \
+    | env DEV_WORKFLOW_MARKER_ROOT="$H155_MARKER_ROOT" "$@" bash "$EDIT_CHECK_SCRIPT"
+}
+
+# --- ケース1: 節が無い（マーカーファイル未設定）場合は何もしない（exit 0・即座に返る） ---
+edit_check_clear
+H155_OUT_NOSPEC="$(edit_check_run_hook "${H155_WORK}/sample.go" 2>&1)"
+H155_EXIT_NOSPEC=$?
+assert_exit_code "edit-check.sh: 節が無ければ exit 0（既存Epicの挙動を変えない）" 0 "$H155_EXIT_NOSPEC"
+assert_eq "edit-check.sh: 節が無ければ標準出力・標準エラーとも空" "" "$H155_OUT_NOSPEC"
+
+# --- ケース2: --write でマーカーファイルへ原子的に書き込み、--clear で消える ---
+edit_check_write '*.go gofmt -l {file}'
+if [ -f "${H155_MARKER_ROOT}/.claude/.dev-workflow-edit-check" ]; then
+  pass "edit-check.sh --write: マーカーファイルが作られる"
+else
+  fail "edit-check.sh --write: マーカーファイルが作られる" "見つからない: ${H155_MARKER_ROOT}/.claude/.dev-workflow-edit-check"
+fi
+
+H155_MARKER_CONTENT="$(cat "${H155_MARKER_ROOT}/.claude/.dev-workflow-edit-check" 2>/dev/null)"
+assert_eq "edit-check.sh --write: 書き込んだ仕様がそのまま読める" "*.go gofmt -l {file}" "$H155_MARKER_CONTENT"
+
+edit_check_clear
+if [ -f "${H155_MARKER_ROOT}/.claude/.dev-workflow-edit-check" ]; then
+  fail "edit-check.sh --clear: マーカーファイルが消える（前回Epicの残留防止）" "まだ存在する"
+else
+  pass "edit-check.sh --clear: マーカーファイルが消える（前回Epicの残留防止）"
+fi
+
+# --- ケース3: globに一致し、コマンドが成功（0終了）すれば exit 0（違反なし） ---
+edit_check_write '*.go true'
+H155_EXIT_OK=$(edit_check_run_hook "${H155_WORK}/sample.go" >/dev/null 2>&1; echo $?)
+assert_exit_code "edit-check.sh: チェックが0終了ならexit 0（違反なし）" 0 "$H155_EXIT_OK"
+
+# --- ケース4: globに一致し、コマンドが非0終了（違反）なら Claude 契約で exit 2 + stderr ---
+edit_check_write '*.go echo VIOLATION-MARKER >&2; false'
+H155_STDERR_VIOLATION="$(edit_check_run_hook "${H155_WORK}/sample.go" 2>&1 1>/dev/null)"
+H155_EXIT_VIOLATION=$(edit_check_run_hook "${H155_WORK}/sample.go" >/dev/null 2>&1; echo $?)
+assert_exit_code "edit-check.sh: 違反検出時はClaude契約でexit 2" 2 "$H155_EXIT_VIOLATION"
+case "$H155_STDERR_VIOLATION" in
+  *"sample.go"*"VIOLATION-MARKER"*)
+    pass "edit-check.sh: 違反メッセージにコマンド出力と対象ファイルが含まれる" ;;
+  *)
+    fail "edit-check.sh: 違反メッセージにコマンド出力と対象ファイルが含まれる" "$H155_STDERR_VIOLATION" ;;
+esac
+
+# --- ケース5: DEV_WORKFLOW_HOOK_VENDOR=codex では exit 0 + stdout の continue:false JSON ---
+H155_STDOUT_CODEX="$(edit_check_run_hook "${H155_WORK}/sample.go" DEV_WORKFLOW_HOOK_VENDOR=codex 2>/dev/null)"
+H155_EXIT_CODEX=$(edit_check_run_hook "${H155_WORK}/sample.go" DEV_WORKFLOW_HOOK_VENDOR=codex >/dev/null 2>&1; echo $?)
+assert_exit_code "edit-check.sh: Codex契約はexit 0（JSONで通知）" 0 "$H155_EXIT_CODEX"
+case "$H155_STDOUT_CODEX" in
+  *'"continue":false'*'VIOLATION-MARKER'*)
+    pass "edit-check.sh: Codex契約のJSONにcontinue:falseと違反内容が含まれる" ;;
+  *)
+    fail "edit-check.sh: Codex契約のJSONにcontinue:falseと違反内容が含まれる" "$H155_STDOUT_CODEX" ;;
+esac
+
+# --- ケース6: DEV_WORKFLOW_HOOK_VENDOR=exit-code では exit 1 + stderr（pre-commit想定） ---
+H155_EXIT_PRECOMMIT=$(edit_check_run_hook "${H155_WORK}/sample.go" DEV_WORKFLOW_HOOK_VENDOR=exit-code >/dev/null 2>&1; echo $?)
+assert_exit_code "edit-check.sh: exit-code契約（pre-commit）はexit 1" 1 "$H155_EXIT_PRECOMMIT"
+
+# --- ケース7: コマンド不在はフック自体のエラーとしてブロックしない（exit 0） ---
+edit_check_write '*.go dw-edit-check-nonexistent-command-xyz {file}'
+H155_EXIT_NOTFOUND=$(edit_check_run_hook "${H155_WORK}/sample.go" >/dev/null 2>&1; echo $?)
+assert_exit_code "edit-check.sh: コマンド不在はブロックしない（exit 0）" 0 "$H155_EXIT_NOTFOUND"
+
+# --- ケース8: タイムアウトはフック自体のエラーとしてブロックしない（exit 0） ---
+edit_check_write '*.go sleep 5'
+H155_EXIT_TIMEOUT=$(edit_check_run_hook "${H155_WORK}/sample.go" DEV_WORKFLOW_EDIT_CHECK_TIMEOUT=1 >/dev/null 2>&1; echo $?)
+assert_exit_code "edit-check.sh: タイムアウトはブロックしない（exit 0）" 0 "$H155_EXIT_TIMEOUT"
+
+# --- ケース9: 一致するglob行が無ければ何もしない（他ファイル種別のチェックコマンドは走らない） ---
+edit_check_write '*.go echo SHOULD-NOT-RUN >&2; false'
+H155_EXIT_NOMATCH=$(edit_check_run_hook "${H155_WORK}/sample.ts" >/dev/null 2>&1; echo $?)
+assert_exit_code "edit-check.sh: 一致するglobが無ければexit 0（他ファイル種別には影響しない）" 0 "$H155_EXIT_NOMATCH"
+
+# --- ケース10: DEV_WORKFLOW_EDIT_CHECK 環境変数はマーカーファイルより優先する ---
+edit_check_write '*.go true'
+H155_EXIT_ENV_OVERRIDE=$(printf '{"tool_input":{"file_path":"%s"}}' "${H155_WORK}/sample.go" \
+  | DEV_WORKFLOW_MARKER_ROOT="$H155_MARKER_ROOT" DEV_WORKFLOW_EDIT_CHECK='*.go false' bash "$EDIT_CHECK_SCRIPT" \
+  >/dev/null 2>&1; echo $?)
+assert_exit_code "edit-check.sh: DEV_WORKFLOW_EDIT_CHECK環境変数がマーカーファイルより優先する" 2 "$H155_EXIT_ENV_OVERRIDE"
+
+edit_check_clear
+
+# --- hooks.json: PostToolUse(Write|Edit|MultiEdit) に edit-check.sh が結線され、
+#     既存のcheck-readability.shと共存し、タイムアウトが設定されている ---
+HJ_POSTTOOLUSE_WEM="$(_hj_extract_section "$HJ_HOOKS_JSON" "PostToolUse")"
+if printf '%s' "$HJ_POSTTOOLUSE_WEM" | grep -Fq '"matcher": "Write|Edit|MultiEdit"' \
+  && printf '%s' "$HJ_POSTTOOLUSE_WEM" | grep -Fq 'bash \"${CLAUDE_PLUGIN_ROOT}/scripts/edit-check.sh\"' \
+  && printf '%s' "$HJ_POSTTOOLUSE_WEM" | grep -Fq 'bash \"${CLAUDE_PLUGIN_ROOT}/scripts/check-readability.sh\"'; then
+  pass "hooks.json: PostToolUse(Write|Edit|MultiEdit)にedit-check.shが結線され、check-readability.shと共存している（#155）"
+else
+  fail "hooks.json: PostToolUse(Write|Edit|MultiEdit)にedit-check.shが結線され、check-readability.shと共存している（#155）" \
+    "$HJ_POSTTOOLUSE_WEM"
+fi
+
+if printf '%s' "$HJ_POSTTOOLUSE_WEM" | grep -A2 'edit-check.sh' | grep -Eq '"timeout": [0-9]+'; then
+  pass "hooks.json: edit-check.shにtimeoutが設定されている（#155）"
+else
+  fail "hooks.json: edit-check.shにtimeoutが設定されている（#155）" "$HJ_POSTTOOLUSE_WEM"
+fi
+
+# --- hooks.codex.json: 同様にedit-check.shが結線され、タイムアウトが設定されている ---
+HJ_CODEX_POSTTOOLUSE_WEM="$(_hj_extract_section "$HJ_HOOKS_CODEX_JSON" "PostToolUse")"
+if printf '%s' "$HJ_CODEX_POSTTOOLUSE_WEM" | grep -Fq '"matcher": "Write|Edit|MultiEdit|apply_patch"' \
+  && printf '%s' "$HJ_CODEX_POSTTOOLUSE_WEM" | grep -Fq 'bash \"${CLAUDE_PLUGIN_ROOT}/scripts/edit-check.sh\"'; then
+  pass "hooks.codex.json: PostToolUse(Write|Edit|MultiEdit|apply_patch)にedit-check.shが結線されている（#155）"
+else
+  fail "hooks.codex.json: PostToolUse(Write|Edit|MultiEdit|apply_patch)にedit-check.shが結線されている（#155）" \
+    "$HJ_CODEX_POSTTOOLUSE_WEM"
+fi
+
+if printf '%s' "$HJ_CODEX_POSTTOOLUSE_WEM" | grep -A2 'edit-check.sh' | grep -Eq '"timeout": [0-9]+'; then
+  pass "hooks.codex.json: edit-check.shにtimeoutが設定されている（#155）"
+else
+  fail "hooks.codex.json: edit-check.shにtimeoutが設定されている（#155）" "$HJ_CODEX_POSTTOOLUSE_WEM"
+fi
+
+# --- core/instructions.md（+ core/references/）: 4つの任意節と編集時チェック節の説明がある ---
+if grep -Fq '4つの任意節' "${REPO_ROOT}/core/instructions.md"; then
+  pass "core/instructions.md: 任意節が4つ（編集時チェックを含む）に更新されている（#155）"
+else
+  fail "core/instructions.md: 任意節が4つ（編集時チェックを含む）に更新されている（#155）" "見つからない"
+fi
+
+if grep -Fq '## 編集時チェック' "$CORE_INSTRUCTIONS_FLAT"; then
+  pass "core/instructions.md（+references）: 編集時チェック節の説明がある（#155）"
+else
+  fail "core/instructions.md（+references）: 編集時チェック節の説明がある（#155）" "見つからない"
+fi
+
+# --- README.md: 編集時チェック節の説明がある ---
+if grep -Fq '## 編集時チェック' "${REPO_ROOT}/README.md" && grep -Fq 'edit-check.sh' "${REPO_ROOT}/README.md"; then
+  pass "README.md: Epicの『## 編集時チェック』節の説明がある（#155）"
+else
+  fail "README.md: Epicの『## 編集時チェック』節の説明がある（#155）" "見つからない"
+fi
+
+# --- core/roles/planner.md: 編集時チェック節を書くかどうかの判断が明記されている ---
+if grep -Fq '編集時チェック（該当する場合のみ）' "${REPO_ROOT}/core/roles/planner.md"; then
+  pass "core/roles/planner.md: 編集時チェック節を書くかどうかの判断が明記されている（#155）"
+else
+  fail "core/roles/planner.md: 編集時チェック節を書くかどうかの判断が明記されている（#155）" "見つからない"
+fi
+
+# --- ADR 0005 が存在し、ホスト側実行の判断根拠が書かれている ---
+H155_ADR="${REPO_ROOT}/docs/adr/0005-edit-time-check-hook.md"
+if [ -f "$H155_ADR" ]; then
+  pass "docs/adr/0005-edit-time-check-hook.md: 存在する（#155）"
+else
+  fail "docs/adr/0005-edit-time-check-hook.md: 存在する（#155）" "見つからない"
+fi
+
+if grep -Fq 'ホスト側' "$H155_ADR" 2>/dev/null && grep -Fq 'コンテナ経由' "$H155_ADR" 2>/dev/null; then
+  pass "ADR 0005: ホスト側実行かコンテナ経由かの判断が明記されている（#155）"
+else
+  fail "ADR 0005: ホスト側実行かコンテナ経由かの判断が明記されている（#155）" "見つからない"
+fi
+
+# --- skills/run/SKILL.md: 「Epic 本文の任意節を取り込む」ブロックに編集時チェックが追加されている ---
+if grep -Fq "EDIT_CHECK=" "${REPO_ROOT}/skills/run/SKILL.md" \
+  && grep -Fq 'edit-check.sh" --write' "${REPO_ROOT}/skills/run/SKILL.md" \
+  && grep -Fq 'edit-check.sh" --clear' "${REPO_ROOT}/skills/run/SKILL.md"; then
+  pass "skills/run/SKILL.md: Epic本文の任意節取り込みブロックにedit-check.shの--write/--clearがある（#155）"
+else
+  fail "skills/run/SKILL.md: Epic本文の任意節取り込みブロックにedit-check.shの--write/--clearがある（#155）" \
+    "見つからない"
+fi
+
+# --- skills-codex/dev-workflow-run/SKILL.md: 同様にedit-check.shの結線がある ---
+if grep -Fq 'edit-check.sh" --write' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md" \
+  && grep -Fq 'edit-check.sh" --clear' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md"; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: edit-check.shの--write/--clearが結線されている（#155）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: edit-check.shの--write/--clearが結線されている（#155）" \
+    "見つからない"
+fi
+
+# --- 生成物（agents/*.md・codex-agents/*.toml）が core/ と一致している（build.sh実行済み） ---
+H155_BUILD_CLAUDE_CHECK="$(bash "${REPO_ROOT}/adapters/claude/build.sh" --check 2>&1)"
+H155_BUILD_CLAUDE_EXIT=$?
+if [ "$H155_BUILD_CLAUDE_EXIT" -eq 0 ]; then
+  pass "adapters/claude/build.sh --check: agents/ が core/ と一致している（#155）"
+else
+  fail "adapters/claude/build.sh --check: agents/ が core/ と一致している（#155）" "$H155_BUILD_CLAUDE_CHECK"
+fi
+
+H155_BUILD_CODEX_CHECK="$(bash "${REPO_ROOT}/adapters/codex/build.sh" --check 2>&1)"
+H155_BUILD_CODEX_EXIT=$?
+if [ "$H155_BUILD_CODEX_EXIT" -eq 0 ]; then
+  pass "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#155）"
+else
+  fail "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#155）" "$H155_BUILD_CODEX_CHECK"
+fi
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
