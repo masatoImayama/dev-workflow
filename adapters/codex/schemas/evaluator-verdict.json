@@ -4,7 +4,7 @@
   "description": "Epic一括レビュー／delta-review の判定結果。codex exec --output-schema で最終応答の形状を強制するために使う。",
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "reviewed_commit", "findings"],
+  "required": ["verdict", "reviewed_commit", "focus", "findings"],
   "properties": {
     "verdict": {
       "type": "string",
@@ -13,7 +13,12 @@
     },
     "reviewed_commit": {
       "type": "string",
-      "description": "レビュー時点のEpicブランチのHEAD SHA。次回 delta-review の起点になるため必須。"
+      "description": "レビュー時点のEpicブランチのHEAD SHA。次回 wave-review / delta-review の起点になるため、どのモード・観点でも必須。"
+    },
+    "focus": {
+      "type": "string",
+      "enum": ["all", "correctness", "readability", "over-engineering", "security"],
+      "description": "起動時に指定された観点。観点未指定で起動された場合は \"all\"。"
     },
     "summary": {
       "type": "string",
@@ -25,7 +30,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["severity", "title", "location", "detail", "fix"],
+        "required": ["severity", "title", "location", "detail", "fix", "focus"],
         "properties": {
           "severity": {
             "type": "string",
@@ -51,6 +56,11 @@
           "task_ref": {
             "type": "string",
             "description": "起因となったTask issue番号（例: #57）。不明なら空文字。"
+          },
+          "focus": {
+            "type": "string",
+            "enum": ["all", "correctness", "readability", "over-engineering", "security"],
+            "description": "この指摘がどの観点から来たかを示す。トップレベルの focus と同じ値（観点未指定なら \"all\"）。"
           }
         }
       }

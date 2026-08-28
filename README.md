@@ -223,6 +223,17 @@ generator は実装コードに手を付ける前に、`DietrichGebert/ponytail`
 タスク間で食い違う命名やデータ構造、仕様の実装漏れ）を見られるようになる。
 タスク単位のレビューでは原理的に見えなかった観点。
 
+### 観点別レビュー（focus）とウェーブ差分の先行レビュー（wave-review）
+
+evaluator は観点（`correctness` / `readability` / `over-engineering` / `security`）を指定して
+起動できる。観点を指定すると、evaluator は**自分の観点の指摘だけ**を返す（観点未指定なら
+従来どおり全観点を見る。Codex は観点未指定のまま使う）。またモードに `wave-review`
+（`[前回レビュー済みcommit]..[epic-branch]`）を追加し、あるウェーブが Epic ブランチへ
+取り込まれた直後にそのウェーブ差分だけを先行レビューできるようにした。**現時点（Task #147）
+では evaluator 側の契約（モードと出力フォーマット）を用意したところまでで、観点別の4本同時
+起動・wave-review の実際の呼び出し・run 側での指摘マージ手順は別タスクの担当である**
+（設計判断は `docs/adr/0003-parallel-review-by-focus.md` 参照）。
+
 ## ブランチ戦略
 
 ```

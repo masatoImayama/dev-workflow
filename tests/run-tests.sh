@@ -11776,6 +11776,177 @@ assert_eq "空白入りHOME/リポジトリルート: eval後もDEV_WORKFLOW_SAN
   "$(normalize_test_path "$RS9_REPO")" "$(plan_value RS9_CONTEXT "$RS9_EVAL_RESULT")"
 
 # ---------------------------------------------------------------------------
+# Task #147: evaluator に観点別レビュー（focus）と wave-review モードを追加する
+#
+# run側の並列起動・マージ手順は別タスクの担当。ここではevaluator側の契約
+# （core/roles/evaluator.md・adapters/codex/schemas/evaluator-verdict.json・
+# docs/adr/0003）が仕様どおりであることだけを検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #147: evaluator の観点別レビュー（focus）と wave-review モードの契約 =="
+
+H147_EVALUATOR_ROLE="${REPO_ROOT}/core/roles/evaluator.md"
+
+# --- 4観点の定義と、自分の観点の指摘だけを出す規定がある ---
+if grep -Fq '`correctness`' "$H147_EVALUATOR_ROLE" \
+  && grep -Fq '`readability`' "$H147_EVALUATOR_ROLE" \
+  && grep -Fq '`over-engineering`' "$H147_EVALUATOR_ROLE" \
+  && grep -Fq '`security`' "$H147_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: 4観点（correctness/readability/over-engineering/security）が定義されている（#147）"
+else
+  fail "core/roles/evaluator.md: 4観点（correctness/readability/over-engineering/security）が定義されている（#147）" \
+    "$(grep -n 'focus' "$H147_EVALUATOR_ROLE" | head -20)"
+fi
+
+if grep -Fq '観点を指定して起動された evaluator は、自分の観点の指摘だけを出す' "$H147_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: 「自分の観点の指摘だけを出す」規定がある（#147）"
+else
+  fail "core/roles/evaluator.md: 「自分の観点の指摘だけを出す」規定がある（#147）" "節が見つかりません"
+fi
+
+# --- 観点未指定時は従来どおり全観点を見る（後方互換）ことが明記されている ---
+if grep -Fq '観点未指定で起動された場合は従来どおり全観点を見る' "$H147_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: 観点未指定時は従来どおり全観点を見る旨（後方互換）が明記されている（#147）"
+else
+  fail "core/roles/evaluator.md: 観点未指定時は従来どおり全観点を見る旨（後方互換）が明記されている（#147）" \
+    "節が見つかりません"
+fi
+
+if grep -Fq 'Codexは観点未指定のまま使う' "$H147_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: Codexは観点未指定のまま使う旨が明記されている（#147）"
+else
+  fail "core/roles/evaluator.md: Codexは観点未指定のまま使う旨が明記されている（#147）" "節が見つかりません"
+fi
+
+# --- wave-review モードが定義され、差分範囲と「範囲外を蒸し返さない」規律が書かれている ---
+H147_WAVEREVIEW_ROW="$(grep -n 'wave-review' "$H147_EVALUATOR_ROLE" | head -1)"
+case "$H147_WAVEREVIEW_ROW" in
+  *'前回レビュー済みcommit'*'epic-branch'*)
+    pass "core/roles/evaluator.md: wave-review モードの差分範囲が定義されている（#147）" ;;
+  *)
+    fail "core/roles/evaluator.md: wave-review モードの差分範囲が定義されている（#147）" "$H147_WAVEREVIEW_ROW" ;;
+esac
+
+H147_WAVEREVIEW_SECTION="$(awk '/^### wave-review 特有の規律/{f=1} /^## 観点/{f=0} f' "$H147_EVALUATOR_ROLE")"
+case "$H147_WAVEREVIEW_SECTION" in
+  *'そのウェーブ差分だけを見る'*)
+    pass "core/roles/evaluator.md: wave-reviewが範囲外を蒸し返さない規律を明記している（#147）" ;;
+  *)
+    fail "core/roles/evaluator.md: wave-reviewが範囲外を蒸し返さない規律を明記している（#147）" \
+      "$H147_WAVEREVIEW_SECTION" ;;
+esac
+
+case "$H147_WAVEREVIEW_SECTION" in
+  *'指摘はその場で直させない'*)
+    pass "core/roles/evaluator.md: wave-reviewの指摘はその場で直させない旨が明記されている（#147）" ;;
+  *)
+    fail "core/roles/evaluator.md: wave-reviewの指摘はその場で直させない旨が明記されている（#147）" \
+      "$H147_WAVEREVIEW_SECTION" ;;
+esac
+
+# --- 出力JSONに focus（トップレベルとfindings[]の各要素）が追加され、既存フィールドが変更されていない ---
+H147_JSON_EXAMPLE="$(awk '/^```json$/{f=1} f{print} f && /^```$/ && NR>1 && !/^```json$/{exit}' "$H147_EVALUATOR_ROLE")"
+
+for h147_field in '"verdict"' '"reviewed_commit"' '"focus"' '"findings"' '"severity"' '"title"' '"location"' '"detail"' '"fix"' '"task_ref"'; do
+  if printf '%s\n' "$H147_JSON_EXAMPLE" | grep -Fq -- "$h147_field"; then
+    pass "core/roles/evaluator.md: 出力JSON例に ${h147_field} が含まれる（#147）"
+  else
+    fail "core/roles/evaluator.md: 出力JSON例に ${h147_field} が含まれる（#147）" "$H147_JSON_EXAMPLE"
+  fi
+done
+
+# focus がトップレベルとfindings要素の両方に出現する（2回以上）こと
+H147_FOCUS_COUNT="$(printf '%s\n' "$H147_JSON_EXAMPLE" | grep -c '"focus"')"
+if [ "$H147_FOCUS_COUNT" -ge 2 ]; then
+  pass "core/roles/evaluator.md: 出力JSON例でfocusがトップレベルとfindings要素の両方に出現する（#147）"
+else
+  fail "core/roles/evaluator.md: 出力JSON例でfocusがトップレベルとfindings要素の両方に出現する（#147）" \
+    "出現回数=${H147_FOCUS_COUNT}"
+fi
+
+# reviewed_commit がどのモード・観点でも必須である旨の明記
+if grep -Fq 'どのモード・観点でも必ず出す' "$H147_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: reviewed_commitはどのモード・観点でも必須である旨が明記されている（#147）"
+else
+  fail "core/roles/evaluator.md: reviewed_commitはどのモード・観点でも必須である旨が明記されている（#147）" \
+    "節が見つかりません"
+fi
+
+# --- adapters/codex/schemas/evaluator-verdict.json が新しいJSONと整合している ---
+H147_SCHEMA="${REPO_ROOT}/adapters/codex/schemas/evaluator-verdict.json"
+
+if [ -f "$H147_SCHEMA" ]; then
+  pass "adapters/codex/schemas/evaluator-verdict.json: ファイルが存在する（#147）"
+else
+  fail "adapters/codex/schemas/evaluator-verdict.json: ファイルが存在する（#147）" "ファイルが見つかりません"
+fi
+
+if _hj_json_syntax_ok "$H147_SCHEMA"; then
+  pass "adapters/codex/schemas/evaluator-verdict.json: JSONとして構文的に妥当である（括弧の対応が取れている）（#147）"
+else
+  fail "adapters/codex/schemas/evaluator-verdict.json: JSONとして構文的に妥当である（括弧の対応が取れている）（#147）" \
+    "$(cat "$H147_SCHEMA" 2>&1)"
+fi
+
+for h147_schema_field in '"focus"' '"verdict"' '"reviewed_commit"' '"findings"'; do
+  if grep -Fq -- "$h147_schema_field" "$H147_SCHEMA"; then
+    pass "evaluator-verdict.json: ${h147_schema_field} が定義されている（#147）"
+  else
+    fail "evaluator-verdict.json: ${h147_schema_field} が定義されている（#147）" \
+      "$(grep -n -- "$h147_schema_field" "$H147_SCHEMA")"
+  fi
+done
+
+if grep -Fq '"all", "correctness", "readability", "over-engineering", "security"' "$H147_SCHEMA"; then
+  pass "evaluator-verdict.json: focusのenumに4観点+allが定義されている（#147）"
+else
+  fail "evaluator-verdict.json: focusのenumに4観点+allが定義されている（#147）" \
+    "$(grep -n 'enum' "$H147_SCHEMA")"
+fi
+
+# --- docs/adr/0003-parallel-review-by-focus.md が書かれている ---
+H147_ADR="${REPO_ROOT}/docs/adr/0003-parallel-review-by-focus.md"
+
+if [ -f "$H147_ADR" ]; then
+  pass "docs/adr/0003-parallel-review-by-focus.md: ファイルが存在する（#147）"
+else
+  fail "docs/adr/0003-parallel-review-by-focus.md: ファイルが存在する（#147）" "ファイルが見つかりません"
+fi
+
+for h147_adr_heading in '## 決定' '## 理由' '## トレードオフ' '## 却下した代案'; do
+  if grep -Fq -- "$h147_adr_heading" "$H147_ADR" 2>/dev/null; then
+    pass "docs/adr/0003: 『${h147_adr_heading}』節がある（#147）"
+  else
+    fail "docs/adr/0003: 『${h147_adr_heading}』節がある（#147）" "節が見つかりません"
+  fi
+done
+
+if grep -Fq 'Codex' "$H147_ADR" 2>/dev/null && grep -Fq '単一' "$H147_ADR" 2>/dev/null; then
+  pass "docs/adr/0003: Codexは単一evaluatorのままにする理由が書かれている（#147）"
+else
+  fail "docs/adr/0003: Codexは単一evaluatorのままにする理由が書かれている（#147）" "節が見つかりません"
+fi
+
+# --- 生成物（agents/evaluator.md・codex-agents/evaluator.toml）にfocus契約が反映されている ---
+H147_AGENT_EVALUATOR="${REPO_ROOT}/agents/evaluator.md"
+H147_CODEX_AGENT_EVALUATOR="${REPO_ROOT}/codex-agents/evaluator.toml"
+
+if grep -Fq 'wave-review' "$H147_AGENT_EVALUATOR" 2>/dev/null; then
+  pass "agents/evaluator.md: core/roles/evaluator.mdのwave-review契約が生成物に反映されている（#147）"
+else
+  fail "agents/evaluator.md: core/roles/evaluator.mdのwave-review契約が生成物に反映されている（#147）" \
+    "反映されていません"
+fi
+
+if grep -Fq 'wave-review' "$H147_CODEX_AGENT_EVALUATOR" 2>/dev/null; then
+  pass "codex-agents/evaluator.toml: core/roles/evaluator.mdのwave-review契約が生成物に反映されている（#147）"
+else
+  fail "codex-agents/evaluator.toml: core/roles/evaluator.mdのwave-review契約が生成物に反映されている（#147）" \
+    "反映されていません"
+fi
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 

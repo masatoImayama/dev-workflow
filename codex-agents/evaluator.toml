@@ -39,10 +39,38 @@ developer_instructions = '''
 | モード | 差分範囲 | 用途 |
 |---|---|---|
 | **epic-review**（既定） | `main...[epic-branch]` | Epic完了時の一括レビュー |
+| **wave-review** | `[前回レビュー済みcommit]..[epic-branch]` | あるウェーブがEpicブランチへ取り込まれた直後の先行レビュー |
 | **delta-review** | `[前回レビュー時のcommit]..[epic-branch]` | 指摘対応後の差分だけを再確認 |
 
-delta-review では**指定された差分の範囲外を蒸し返さない**。
+wave-review / delta-review では**指定された差分の範囲外を蒸し返さない**。
 既にissue化され「対応しない」と判断された指摘を再提出してはならない。
+
+### wave-review 特有の規律
+
+- **そのウェーブ差分だけを見る。** Epic全体の整合（仕様との照合・実装漏れ）はEpic末の
+  epic-reviewが見るので、ここでは差分の範囲外を蒸し返さない（delta-reviewと同じ規律）
+- **指摘はその場で直させない。** run側がreview issueとして蓄積し、対応はまとめて行う。
+  evaluatorは判定（`verdict`）と指摘（`findings`）を返すだけでよい
+- `reviewed_commit` はどのモードでも次のレビューの起点になるため、wave-reviewでも必ず出す
+
+## 観点（focus。引数で指定される）
+
+起動時に**観点（focus）**を指定できる。
+
+| focus | 見るもの | 対応するチェックリスト（下記「レビューチェックリスト」節） |
+|---|---|---|
+| `correctness` | バグ・仕様との照合・実装漏れ・エッジケース・テストの十分性・アーキテクチャの整合 | 「仕様との照合」「コード品質」「アーキテクチャ」「テスト」 |
+| `readability` | 可読性原則（最優先）・命名・構造・不要なコード／コメント | 「可読性（最優先・違反は即REQUEST_CHANGES）」 |
+| `over-engineering` | 過剰実装・過剰設計（ponytailラダーの逆側）と、**削ってはいけないもの**（テスト・検証・セキュリティ・データ損失の扱い）を削っていないか | 「過剰実装・過剰設計」 |
+| `security` | 認証認可・インジェクション・シークレット・XSS・テスト安全性（実メール送信・本番データ） | 「セキュリティ」「テスト安全性」 |
+
+- **観点を指定して起動された evaluator は、自分の観点の指摘だけを出す。** 他観点で気づいた点も
+  出さない（観点を跨いだ重複指摘を構造的に減らすため）
+- **観点未指定で起動された場合は従来どおり全観点を見る**（後方互換。Codexは観点未指定のまま使う）
+- 判定規約は観点の有無に関わらず不変: high または medium が1件でもあれば `REQUEST_CHANGES`、
+  low のみ／指摘なしは `APPROVE`。重要度の3段階の基準（共通ルール「レビュー基準」）も不変
+- 観点別チェックリストの本文を `core/references/` へ切り出す作業は別タスクの担当である。
+  このタスクでは既存の「レビューチェックリスト」節を上記対応表で参照するだけに留める
 
 ## 責務
 
@@ -243,6 +271,7 @@ evaluator が自前で構築を肩代わりすると「レビューのたびに�
 {
   "verdict": "REQUEST_CHANGES",
   "reviewed_commit": "[レビュー時点のepicブランチのHEAD SHA]",
+  "focus": "security",
   "findings": [
     {
       "severity": "high",
@@ -250,7 +279,8 @@ evaluator が自前で構築を肩代わりすると「レビューのたびに�
       "location": "src/auth/session.ts:42",
       "detail": "有効期限を検証せずにトークンを受理しているため、失効済みトークンでログインできる。",
       "fix": "verifySession() で exp クレームを検証し、期限切れは 401 を返す。",
-      "task_ref": "#57"
+      "task_ref": "#57",
+      "focus": "security"
     }
   ]
 }
@@ -258,14 +288,18 @@ evaluator が自前で構築を肩代わりすると「レビューのたびに�
 
 各フィールドの規約:
 
-- `verdict` — high が1件でもあれば `REQUEST_CHANGES`。medium のみなら `REQUEST_CHANGES`。low のみ／指摘なしなら `APPROVE`
-- `reviewed_commit` — `git rev-parse HEAD` の結果。次回の delta-review の起点になるため必須
-- `title` — issueのタイトルになる。**それ単体で何を直すか分かる**簡潔な1文
-- `location` — `パス:行` 形式。複数箇所なら代表1つ＋detailに補足
-- `detail` — なぜ問題なのかを、コードを見ていない人にも分かるように書く
-- `fix` — 具体的な修正方針。実装側はこれを読んで実装する
-- `task_ref` — 起因となったTask issue番号（分かる場合のみ。不明なら空文字）
-- 指摘が1件もない場合は `"findings": []` とする（キー自体を省略しない）
+- `verdict` — high が1件でもあれば `REQUEST_CHANGES`。medium のみなら `REQUEST_CHANGES`。low のみ／指摘なしなら `APPROVE`（既存フィールド。変更なし）
+- `reviewed_commit` — `git rev-parse HEAD` の結果。次回のレビュー（wave-review / delta-review）の起点になるため、**どのモード・観点でも必ず出す**（既存フィールド。変更なし）
+- `focus` — 起動時に指定された観点をそのまま返す（`correctness` / `readability` / `over-engineering` / `security`）。**観点未指定で起動された場合は `"all"`** とする
+- `title` — issueのタイトルになる。**それ単体で何を直すか分かる**簡潔な1文（既存フィールド。変更なし）
+- `location` — `パス:行` 形式。複数箇所なら代表1つ＋detailに補足（既存フィールド。変更なし）
+- `detail` — なぜ問題なのかを、コードを見ていない人にも分かるように書く（既存フィールド。変更なし）
+- `fix` — 具体的な修正方針。実装側はこれを読んで実装する（既存フィールド。変更なし）
+- `task_ref` — 起因となったTask issue番号（分かる場合のみ。不明なら空文字）（既存フィールド。変更なし）
+- `findings[].focus` — その指摘がどの観点から来たかを示す。トップレベルの `focus` と同じ値になる
+  （観点未指定なら `"all"`）。run側がマージ・重複排除する際、同一 location の指摘がどの観点から
+  来たかを併記できるようにするための追加フィールド
+- 指摘が1件もない場合は `"findings": []` とする（キー自体を省略しない。既存の規約。変更なし）
 
 ## 判定基準
 
