@@ -142,8 +142,8 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
 
 ### R4: 打ち切り条件
 
-**レビューは最大2巡まで**（初回R1（4観点並列）+ delta-review 1回（1本）。
-合わせてevaluator起動は最大5回）。
+**レビューは最大2巡まで**（初回R1の観点別4本並列 + 確度判定1本（1本）+ delta-review 1回（1本）。
+合わせてevaluator起動は最大6回）。
 
 2巡目でも `REQUEST_CHANGES` が残る場合は、**そこで打ち切ってPRを作成する。**
 未対応の指摘は:

@@ -13180,6 +13180,91 @@ for h149_f in agents/planner.md agents/generator.md agents/evaluator.md \
 done
 
 # ---------------------------------------------------------------------------
+# Review #163: SKILL.md のモデル記述・evaluator起動回数の上限が、#157（モデル分離）と
+#              #149（観点別並列 + 確度判定 + delta-review）に追随していること
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Review #163: SKILL.mdのモデル記述・evaluator起動回数の上限の整合 =="
+
+H163_SKILL_RAW="${REPO_ROOT}/skills/run/SKILL.md"
+H163_REVIEW_REF="${REPO_ROOT}/skills/run/references/review.md"
+H163_README="${REPO_ROOT}/README.md"
+
+# --- (1) SKILL.mdの「モデル構成の確認」節が、#157（既定sonnet + 確度判定だけ起動時opus上書き）
+#     と食い違う古い記述（generator・evaluatorとも固定）を含んでいない ---
+if grep -Fq 'generator（sonnet）・evaluator（opus）のモデルはエージェント定義側で固定されており' \
+  "$H163_SKILL_RAW"; then
+  fail "skills/run/SKILL.md: #157以前の古いモデル固定記述（generator・evaluator一括固定）が残っていない（#163）" \
+    "古い記述が見つかりました"
+else
+  pass "skills/run/SKILL.md: #157以前の古いモデル固定記述（generator・evaluator一括固定）が残っていない（#163）"
+fi
+
+H163_SKILL_MODEL_SECTION="$(awk '/^### モデル構成の確認/{f=1} /^### Epicブランチ \+ 作業 worktree の準備/{f=0} f' \
+  "$H163_SKILL_RAW")"
+
+case "$H163_SKILL_MODEL_SECTION" in
+  *'generator（sonnet）のモデルはエージェント定義側で固定されており'*'確度判定役として起動する呼び出しだけ'*'model: opus'*'起動時に上書きする'*)
+    pass "skills/run/SKILL.md: モデル構成の確認節がgenerator固定+evaluator確度判定役opus上書きの記述に揃っている（#163）" ;;
+  *)
+    fail "skills/run/SKILL.md: モデル構成の確認節がgenerator固定+evaluator確度判定役opus上書きの記述に揃っている（#163）" \
+      "$H163_SKILL_MODEL_SECTION" ;;
+esac
+
+# --- README.mdの対応箇所（推奨settings.jsonの直後）にも同じ趣旨の記述がある ---
+if grep -Fq 'generator（sonnet）のモデルはエージェント定義側で固定されており' "$H163_README" \
+  && grep -Fq '確度判定役として起動する呼び出しだけ' "$H163_README"; then
+  pass "README.md: モデル構成の記述がSKILL.mdと同じ趣旨（generator固定+evaluator確度判定役opus上書き）になっている（#163）"
+else
+  fail "README.md: モデル構成の記述がSKILL.mdと同じ趣旨（generator固定+evaluator確度判定役opus上書き）になっている（#163）" \
+    "記述が見つかりません"
+fi
+
+# --- (2) evaluator起動回数の上限が「観点別4本＋確度判定1本＋delta-review1本＝最大6回」で
+#     SKILL.md・review.md・core/instructions.md・READMEの4か所すべて一致している ---
+if grep -Fq 'evaluator 起動は最大6回' "$H163_SKILL_RAW"; then
+  pass "skills/run/SKILL.md: evaluator起動の上限が最大6回と明記されている（#163）"
+else
+  fail "skills/run/SKILL.md: evaluator起動の上限が最大6回と明記されている（#163）" \
+    "$(grep -n 'evaluator.*起動は最大' "$H163_SKILL_RAW" || echo '該当行が見つかりません')"
+fi
+
+if grep -Fq 'evaluator起動は最大6回' "$H163_REVIEW_REF"; then
+  pass "skills/run/references/review.md: evaluator起動の上限が最大6回と明記されている（#163）"
+else
+  fail "skills/run/references/review.md: evaluator起動の上限が最大6回と明記されている（#163）" \
+    "$(grep -n 'evaluator起動は最大' "$H163_REVIEW_REF" || echo '該当行が見つかりません')"
+fi
+
+# --- SKILL.md・review.md に、#149以前の古い上限（最大3回・最大5回）が残っていない ---
+for h163_pair in "$H163_SKILL_RAW:skills/run/SKILL.md" "$H163_REVIEW_REF:skills/run/references/review.md"; do
+  h163_file="${h163_pair%%:*}"
+  h163_label="${h163_pair#*:}"
+  if grep -E -q 'evaluator ?起動は最大(3|5)回' "$h163_file"; then
+    fail "${h163_label}: #149以前の古いevaluator起動上限（最大3回・最大5回）が残っていない（#163）" \
+      "$(grep -nE 'evaluator ?起動は最大(3|5)回' "$h163_file")"
+  else
+    pass "${h163_label}: #149以前の古いevaluator起動上限（最大3回・最大5回）が残っていない（#163）"
+  fi
+done
+
+# --- core/instructions.md・READMEも同じ内訳（観点別4本＋確度判定1本＋delta-review1本）を
+#     述べており、SKILL.md・review.mdの「最大6回」と矛盾しない ---
+for h163_doc in "$CORE_INSTRUCTIONS_FLAT:core/instructions.md" "$H163_README:README.md"; do
+  h163_docfile="${h163_doc%%:*}"
+  h163_doclabel="${h163_doc#*:}"
+  h163_docbody="$(cat "$h163_docfile" 2>/dev/null)"
+  case "$h163_docbody" in
+    *'観点別4本'*'確度判定1本'*'delta-review'*'1本'*)
+      pass "${h163_doclabel}: evaluator起動回数の内訳（観点別4本＋確度判定1本＋delta-review1本）が明記されている（#163）" ;;
+    *)
+      fail "${h163_doclabel}: evaluator起動回数の内訳（観点別4本＋確度判定1本＋delta-review1本）が明記されている（#163）" \
+        "内訳の記述が見つかりません" ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
 # Task #153: レーンをウェーブ横断で維持し generator の cold start を除去する
 # ---------------------------------------------------------------------------
 

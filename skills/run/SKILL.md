@@ -66,8 +66,10 @@ grep -E '"(model|advisorModel|effortLevel)"' "$HOME/.claude/settings.json" 2>/de
   || echo "NOTE: ~/.claude/settings.json にモデル構成の記載なし（既定値で動作します）"
 ```
 
-- **generator（sonnet）・evaluator（opus）のモデルはエージェント定義側で固定されており、
-  この設定の影響を受けない。** ここで変わるのはオーケストレータ本体だけである
+- **generator（sonnet）のモデルはエージェント定義側で固定されており、この設定の影響を
+  受けない。** evaluatorは既定でsonnet（発見役）だが、確度判定役として起動する呼び出しだけ
+  `model: opus`を起動時に上書きする（Task #157。詳細は`docs/adr/0006-evaluator-model-split.md`）。
+  いずれもここで変わるのはオーケストレータ本体だけである
 - `advisorModel` が未設定でも run は動作する。設定は推奨であって前提条件ではない
 
 ### Epicブランチ + 作業 worktree の準備
@@ -997,7 +999,8 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
 
 - 指摘は **high と medium だけ** issue 化する。low は PR 本文に列挙するのみ
 - `reviewed_commit` は次の delta-review の起点になるので必ず控える
-- **レビューは最大2巡まで**（初回 + delta-review 1回、evaluator 起動は最大3回）。
+- **レビューは最大2巡まで**（初回R1の観点別4本並列 + 確度判定1本 + delta-review 1本、
+  evaluator 起動は最大6回）。
   2巡目でも `REQUEST_CHANGES` が残る場合はそこで打ち切り、未対応 issue をオープンのまま
   PR 本文に明記して人間へ渡す
 ## 完了条件
