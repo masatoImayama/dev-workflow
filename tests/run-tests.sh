@@ -14123,9 +14123,13 @@ fi
 # （コミット c6f6969 で後追い修正。#169）。以降の回帰を検出できるよう対象に加える。
 for H161_FILE in "core/roles/generator.md" "README.md" "skills/run/SKILL.md" \
   "skills-codex/dev-workflow-run/SKILL.md" "agents/generator.md" "codex-agents/generator.toml"; do
-  if grep -Fq 'git reset --hard HEAD' "${REPO_ROOT}/${H161_FILE}"; then
+  case "$H161_FILE" in
+    skills/run/SKILL.md) H161_PATH="$RUN_SKILL_FLAT" ;;
+    *)                   H161_PATH="${REPO_ROOT}/${H161_FILE}" ;;
+  esac
+  if grep -Fq 'git reset --hard HEAD' "$H161_PATH"; then
     fail "${H161_FILE}: 見送り時の作業ツリー復旧に git reset --hard HEAD が残っていない（#161）" \
-      "$(grep -n 'git reset --hard HEAD' "${REPO_ROOT}/${H161_FILE}")"
+      "$(grep -n 'git reset --hard HEAD' "$H161_PATH")"
   else
     pass "${H161_FILE}: 見送り時の作業ツリー復旧に git reset --hard HEAD が残っていない（#161）"
   fi
@@ -14138,12 +14142,16 @@ done
 # skills/run/SKILL.md も対象に加える（#169。実際に取りこぼしが起きたのはこのファイル）
 for H161_FILE in "core/roles/generator.md" "README.md" "skills/run/SKILL.md" \
   "skills-codex/dev-workflow-run/SKILL.md"; do
-  if grep -Fq 'git restore --source=HEAD --staged --worktree -- :/' "${REPO_ROOT}/${H161_FILE}" \
-    && grep -Fq 'git clean -nd -- :/' "${REPO_ROOT}/${H161_FILE}"; then
+  case "$H161_FILE" in
+    skills/run/SKILL.md) H161_PATH="$RUN_SKILL_FLAT" ;;
+    *)                   H161_PATH="${REPO_ROOT}/${H161_FILE}" ;;
+  esac
+  if grep -Fq 'git restore --source=HEAD --staged --worktree -- :/' "$H161_PATH" \
+    && grep -Fq 'git clean -nd -- :/' "$H161_PATH"; then
     pass "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd -- :/ に置き換わっている（#161, #167）"
   else
     fail "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd -- :/ に置き換わっている（#161, #167）" \
-      "$(grep -n 'git restore\|git clean' "${REPO_ROOT}/${H161_FILE}")"
+      "$(grep -n 'git restore\|git clean' "$H161_PATH")"
   fi
 done
 
