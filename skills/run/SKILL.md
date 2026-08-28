@@ -309,6 +309,11 @@ LANES="${DEV_WORKFLOW_MAX_LANES:-3}"
 ```bash
 SKIPPED_CSV=""   # 3回失敗して見送ったタスク番号のカンマ区切り。ループを回すうちに積み上げる
 
+# ウェーブ差分の先行レビュー（wave-review）用。詳細は references/wave-review.md を参照
+# （読むタイミング: wave-reviewの起動条件・REVIEWED_COMMITの更新規則を確認したいとき）。
+REVIEWED_COMMIT="$(git merge-base main "${EPIC_BRANCH}")"   # 「そこまではレビュー済み」の地点
+PREV_WAVE_INCORPORATED=false   # このrunセッション内で直前のウェーブをEpicへ取り込んだか
+
 # WAVE_NO: wave ブランチ名（wave/${EPIC_NUM}/${WAVE_NO}）に使う通し番号。
 # plan-waves.sh の出力の「wave番号」とは別物（再計算のたびに wave 1 から始まり直すため、
 # 通し番号はここで自前に管理する）。
@@ -520,6 +525,29 @@ Claude Code のサブエージェントは**バッチ全員が終わるまで結
 補充は原理的に実装できない。ウェーブの所要時間は**最長レーン（そのレーンのタスク列の合計）**で
 決まる。これは harness の制約として受け入れる。
 
+#### 同一メッセージで前ウェーブの wave-review を起動する（`PREV_WAVE_INCORPORATED` が true のときのみ）
+
+**バッチ全員が終わるまで結果が返らない**という上記の制約は、逆に言えば**同一バッチに含めれば
+並行に走る**ということでもある。この性質を使い、直前のウェーブが Epic ブランチへ取り込まれた
+直後の差分（`REVIEWED_COMMIT..WAVE_BASE`）を、**レーン起動と同一メッセージで** evaluator に
+先行レビューさせ、次ウェーブの実装と並行させる。レーンの動的補充（バッチ内の話）とは別の、
+**バッチ間（ウェーブ間）の並行化**であることに注意する。
+
+`PREV_WAVE_INCORPORATED` が `false`（このrunセッションでまだ一度もウェーブを取り込んでいない、
+最初のウェーブ）の間は wave-review を起動しない。起動条件・`REVIEWED_COMMIT` の初期値と更新・
+指摘の扱いの詳細は [references/wave-review.md](references/wave-review.md) を参照する
+（**wave-reviewを起動する段になったら読む**）。
+
+```
+@evaluator
+Epic #$ARGUMENTS のウェーブ差分を先行レビューしてください。
+- モード: wave-review
+- 差分範囲: [REVIEWED_COMMIT]..[WAVE_BASE]
+- 作業ディレクトリ: .claude/worktrees/[epicN]
+- 指摘はその場で直させない。high/mediumはissue化のためJSONで返すだけでよい
+- 最後に必ずJSONブロック（verdict / reviewed_commit / findings）を出力すること
+```
+
 ### Step 4: レーン内ゲートの結果を確認する
 
 各 generator は自分の isolation worktree 内で、タスクごとの完了報告（**変更範囲のテスト**結果）を
@@ -665,7 +693,16 @@ TOTAL_MERGE_SEC=$((TOTAL_MERGE_SEC + MERGE_SEC))
 DONE_TASK_COUNT=$((DONE_TASK_COUNT + N))   # N = 直前の「取り込めたレーンに対応するTask issueをクローズする」で閉じた件数
 ```
 
-4. → Step 1 に戻る（次のウェーブへ）
+4. Step 3 で同一メッセージで起動した wave-review（起動していれば）の結果を確定させる。
+   `APPROVE`/`REQUEST_CHANGES` が返り `reviewed_commit` が得られた場合のみ
+   `REVIEWED_COMMIT="$WAVE_BASE"`（このウェーブの起点。＝ wave-review が見た差分の上限）へ進め、
+   high/mediumの指摘を `review` issue化する（`- Epic: #$ARGUMENTS` と `- 前提: なし` を必ず書く。
+   書式は [references/review.md](references/review.md) の R2 と同じ）。evaluator の起動自体が
+   失敗した／JSON が読み取れなかった場合は `REVIEWED_COMMIT` を進めない（次の wave-review、
+   最終的には Epic 末レビューが拾う）。詳細は
+   [references/wave-review.md](references/wave-review.md) を参照する。
+   その後 `PREV_WAVE_INCORPORATED=true` にする（次ウェーブの Step 3 で wave-review を起動する条件）。
+5. → Step 1 に戻る（次のウェーブへ）
 
 全ウェーブが完了したら **「Epic 統合ゲート」** へ進む（フルスイートはここで初めて、Epicにつき
 1回だけ実行する）。
@@ -797,6 +834,12 @@ SKIP件数）と**食い違うことがある**（対象ツリーも対象範囲
 ## Epic一括レビュー（全タスク完了後・PR作成前）
 
 全Task issueがクローズされ、Epic統合ゲートを通過した時点で、**ここで初めてevaluatorを起動する。**
+
+**wave-review が各ウェーブの差分を先行レビュー済みのため、ここでの守備範囲は
+(1) 未レビュー差分（`REVIEWED_COMMIT..Epic tip`。通常は最終ウェーブ分）と
+(2) 全ウェーブ横断の整合（仕様書との照合・実装漏れ・タスク間の重複実装や命名の食い違い）に絞る**
+（詳細は [references/wave-review.md](references/wave-review.md)「最終ウェーブとEpic全体整合は
+Epic末レビューが見る」を参照）。
 
 ### R0: スキップ一覧をEpic issueにコメントする
 

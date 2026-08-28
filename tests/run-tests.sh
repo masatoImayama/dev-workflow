@@ -11947,6 +11947,134 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Task #148: ウェーブ差分の先行レビュー（wave-review）を次ウェーブの実装と並行させる
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #148: run側のwave-review起動・REVIEWED_COMMIT管理 =="
+
+H148_WAVEREVIEW_REF="${REPO_ROOT}/skills/run/references/wave-review.md"
+
+if [ -f "$H148_WAVEREVIEW_REF" ]; then
+  pass "skills/run/references/wave-review.md が新規作成されている（#148）"
+else
+  fail "skills/run/references/wave-review.md が新規作成されている（#148）" "ファイルが存在しません"
+fi
+
+if grep -Fq 'references/wave-review.md' "${REPO_ROOT}/skills/run/SKILL.md"; then
+  pass "SKILL.md本体からwave-review.mdへポインタで参照している（#148）"
+else
+  fail "SKILL.md本体からwave-review.mdへポインタで参照している（#148）" "参照が見つかりません"
+fi
+
+# --- Step 3: 同一メッセージでの起動と、その理由（バッチ全員が終わるまで結果が返らない）が書かれている ---
+H148_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$RUN_SKILL_FLAT")"
+
+case "$H148_RS_STEP3" in
+  *'同一メッセージ'*'wave-review'*)
+    pass "SKILL.md: Step 3にレーン起動と同一メッセージでwave-reviewを起動する旨が書かれている（#148）" ;;
+  *)
+    fail "SKILL.md: Step 3にレーン起動と同一メッセージでwave-reviewを起動する旨が書かれている（#148）" \
+      "$H148_RS_STEP3" ;;
+esac
+
+case "$H148_RS_STEP3" in
+  *'バッチ全員が終わるまで結果が返らない'*)
+    pass "SKILL.md: Step 3が同一メッセージでなければ並行にならない理由を明記している（#148）" ;;
+  *)
+    fail "SKILL.md: Step 3が同一メッセージでなければ並行にならない理由を明記している（#148）" \
+      "$H148_RS_STEP3" ;;
+esac
+
+# --- 最初のウェーブでは起動しないことが書かれている ---
+case "$H148_RS_STEP3" in
+  *'PREV_WAVE_INCORPORATED'*'false'*)
+    pass "SKILL.md: 最初のウェーブではwave-reviewを起動しないことが書かれている（#148）" ;;
+  *)
+    fail "SKILL.md: 最初のウェーブではwave-reviewを起動しないことが書かれている（#148）" \
+      "$H148_RS_STEP3" ;;
+esac
+
+# --- バッチ内の動的補充とバッチ間（ウェーブ間）の並行化が区別されている ---
+case "$H148_RS_STEP3" in
+  *'バッチ間'*)
+    pass "SKILL.md: バッチ内の動的補充とバッチ間の並行化が区別されている（#148）" ;;
+  *)
+    fail "SKILL.md: バッチ内の動的補充とバッチ間の並行化が区別されている（#148）" "$H148_RS_STEP3" ;;
+esac
+
+# --- REVIEWED_COMMITの初期値・更新・失敗時に進めない規定 ---
+if grep -Fq 'REVIEWED_COMMIT="$(git merge-base main' "${REPO_ROOT}/skills/run/SKILL.md"; then
+  pass "SKILL.md: REVIEWED_COMMITの初期値（mainとのmerge-base）が書かれている（#148）"
+else
+  fail "SKILL.md: REVIEWED_COMMITの初期値（mainとのmerge-base）が書かれている（#148）" \
+    "$(grep -n 'REVIEWED_COMMIT' "${REPO_ROOT}/skills/run/SKILL.md")"
+fi
+
+if grep -Fq '進めない' "$H148_WAVEREVIEW_REF"; then
+  pass "wave-review.md: 失敗時にREVIEWED_COMMITを進めない規定が書かれている（#148）"
+else
+  fail "wave-review.md: 失敗時にREVIEWED_COMMITを進めない規定が書かれている（#148）" \
+    "$(cat "$H148_WAVEREVIEW_REF" 2>/dev/null)"
+fi
+
+# --- 指摘をその場で直さずreview issue化し、Epic:と前提:なしを書く ---
+case "$(cat "$RUN_SKILL_FLAT")" in
+  *'wave-review の指摘はその場で直さない'*'review'*'ラベル'*)
+    pass "run スキル: wave-reviewの指摘はその場で直さずreview issue化する旨が明記されている（#148）" ;;
+  *)
+    fail "run スキル: wave-reviewの指摘はその場で直さずreview issue化する旨が明記されている（#148）" \
+      "見つかりません" ;;
+esac
+
+H148_WAVEREVIEW_ISSUE_SECTION="$(awk '/^## 指摘の扱い/{f=1} /^## 最終ウェーブ/{f=0} f' "$H148_WAVEREVIEW_REF")"
+case "$H148_WAVEREVIEW_ISSUE_SECTION" in
+  *'- Epic:'*'- 前提: なし'*)
+    pass "wave-review.md: issue本文に - Epic: と - 前提: なし を書く指示がある（#148）" ;;
+  *)
+    fail "wave-review.md: issue本文に - Epic: と - 前提: なし を書く指示がある（#148）" \
+      "$H148_WAVEREVIEW_ISSUE_SECTION" ;;
+esac
+
+# --- 最終ウェーブ差分と全体整合をEpic末レビューが見ることが明記されている ---
+H148_EPICREVIEW_INTRO="$(awk '/^## Epic一括レビュー/{f=1} /^### R0:/{f=0} f' "${REPO_ROOT}/skills/run/SKILL.md")"
+case "$H148_EPICREVIEW_INTRO" in
+  *'未レビュー差分'*'全ウェーブ横断の整合'*)
+    pass "SKILL.md: Epic一括レビューの守備範囲（未レビュー差分＋全ウェーブ横断整合）が明記されている（#148）" ;;
+  *)
+    fail "SKILL.md: Epic一括レビューの守備範囲（未レビュー差分＋全ウェーブ横断整合）が明記されている（#148）" \
+      "$H148_EPICREVIEW_INTRO" ;;
+esac
+
+# --- Codex版は変更しない（README・wave-review.mdに明記。skills-codex/adapters/codexにwave-reviewを持ち込まない） ---
+if grep -Fq 'wave-review' "${REPO_ROOT}/README.md"; then
+  pass "README.md: wave-review節が追加されている（#148）"
+else
+  fail "README.md: wave-review節が追加されている（#148）" "見つかりません"
+fi
+
+if grep -Fq 'wave-review' "$H148_WAVEREVIEW_REF" && grep -Fq 'Codex' "$H148_WAVEREVIEW_REF"; then
+  pass "wave-review.md: Codex版には実装しない旨が明記されている（#148）"
+else
+  fail "wave-review.md: Codex版には実装しない旨が明記されている（#148）" \
+    "$(cat "$H148_WAVEREVIEW_REF" 2>/dev/null)"
+fi
+
+if grep -rFq 'wave-review' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md" 2>/dev/null; then
+  fail "skills-codex/dev-workflow-run/SKILL.md: wave-reviewを持ち込んでいない（#148）" \
+    "$(grep -n 'wave-review' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md")"
+else
+  pass "skills-codex/dev-workflow-run/SKILL.md: wave-reviewを持ち込んでいない（#148）"
+fi
+
+if grep -Fq 'wave-review' "${REPO_ROOT}/adapters/codex/run-loop.sh" 2>/dev/null; then
+  fail "adapters/codex/run-loop.sh: wave-reviewを持ち込んでいない（#148）" \
+    "$(grep -n 'wave-review' "${REPO_ROOT}/adapters/codex/run-loop.sh")"
+else
+  pass "adapters/codex/run-loop.sh: wave-reviewを持ち込んでいない（#148）"
+fi
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
