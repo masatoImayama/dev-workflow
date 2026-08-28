@@ -12075,6 +12075,120 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Task #153: レーンをウェーブ横断で維持し generator の cold start を除去する
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #153: cross-wave lane reuseの検証結果とフォールバックの明記 =="
+
+H153_ADR="${REPO_ROOT}/docs/adr/0004-cross-wave-lane-reuse.md"
+
+if [ -f "$H153_ADR" ]; then
+  pass "docs/adr/0004-cross-wave-lane-reuse.md が新規作成されている（#153）"
+else
+  fail "docs/adr/0004-cross-wave-lane-reuse.md が新規作成されている（#153）" "ファイルが存在しません"
+fi
+
+# --- 検証結果（実際に確認した事実）がADRに書かれている ---
+H153_ADR_BODY="$(cat "$H153_ADR" 2>/dev/null)"
+case "$H153_ADR_BODY" in
+  *'手段（`SendMessage` に相当するツール）は存在しない'*)
+    pass "ADR 0004: SendMessage相当の継続手段が確認できなかった事実が書かれている（#153）" ;;
+  *)
+    fail "ADR 0004: SendMessage相当の継続手段が確認できなかった事実が書かれている（#153）" \
+      "$H153_ADR_BODY" ;;
+esac
+
+# --- 継続できない場合: 従来どおりの経路のまま、との決定が明記されている ---
+case "$H153_ADR_BODY" in
+  *'レーンのウェーブ横断維持は実装しない'*)
+    pass "ADR 0004: 継続できないため従来どおりの経路を維持する決定が明記されている（#153）" ;;
+  *)
+    fail "ADR 0004: 継続できないため従来どおりの経路を維持する決定が明記されている（#153）" \
+      "$H153_ADR_BODY" ;;
+esac
+
+# --- フォールバック用の環境変数を追加しなかった判断と理由がADRにある ---
+case "$H153_ADR_BODY" in
+  *'環境変数は追加しない'*)
+    pass "ADR 0004: フォールバック用環境変数を追加しない判断と理由が書かれている（#153）" ;;
+  *)
+    fail "ADR 0004: フォールバック用環境変数を追加しない判断と理由が書かれている（#153）" \
+      "$H153_ADR_BODY" ;;
+esac
+
+# --- 余ったレーンの扱いが決まっている ---
+case "$H153_ADR_BODY" in
+  *'余ったレーンの扱い'*)
+    pass "ADR 0004: 余ったレーンの扱いが決まっている（#153）" ;;
+  *)
+    fail "ADR 0004: 余ったレーンの扱いが決まっている（#153）" "$H153_ADR_BODY" ;;
+esac
+
+# --- SKILL.md Step 3: バッチ内の動的補充とバッチ間（ウェーブ間）継続の区別が明確 ---
+H153_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$RUN_SKILL_FLAT")"
+case "$H153_RS_STEP3" in
+  *'バッチ内'*'バッチ間'*'Task tool'*)
+    pass "SKILL.md: バッチ内の動的補充とバッチ間（ウェーブ間）継続の区別が明確に書かれている（#153）" ;;
+  *)
+    fail "SKILL.md: バッチ内の動的補充とバッチ間（ウェーブ間）継続の区別が明確に書かれている（#153）" \
+      "$H153_RS_STEP3" ;;
+esac
+
+# --- レーンはウェーブをまたいで維持されない旨とADR参照がSKILL.mdにある ---
+case "$H153_RS_STEP3" in
+  *'レーンはウェーブごとに新規 spawn する現行の方式のまま'*'0004-cross-wave-lane-reuse.md'*)
+    pass "SKILL.md: レーンをウェーブごとに新規spawnする現行方式を維持する旨とADR参照がある（#153）" ;;
+  *)
+    fail "SKILL.md: レーンをウェーブごとに新規spawnする現行方式を維持する旨とADR参照がある（#153）" \
+      "$H153_RS_STEP3" ;;
+esac
+
+# --- core/roles/generator.md にWAVE_BASE追従の書き分け（区別が生じない理由）が明記されている ---
+H153_GEN_ROLE="${REPO_ROOT}/core/roles/generator.md"
+if grep -Fq 'タスク境界／ウェーブ境界という書き分けは生じない' "$H153_GEN_ROLE"; then
+  pass "core/roles/generator.md: WAVE_BASE追従がタスク境界/ウェーブ境界で書き分け不要である理由が明記されている（#153）"
+else
+  fail "core/roles/generator.md: WAVE_BASE追従がタスク境界/ウェーブ境界で書き分け不要である理由が明記されている（#153）" \
+    "$(grep -n 'WAVE_BASE\|境界' "$H153_GEN_ROLE")"
+fi
+
+# --- core/instructions.md「タスク選定順序」項目3に、連続処理が同一ウェーブ内に限られる旨が追記されている ---
+H153_INSTR="${REPO_ROOT}/core/instructions.md"
+H153_INSTR_SEC="$(awk '/^### タスク選定順序/{f=1} /^## ブランチ戦略/{f=0} f' "$H153_INSTR")"
+case "$H153_INSTR_SEC" in
+  *'この連続処理は同一ウェーブ内に限られる'*)
+    pass "core/instructions.md: レーンの連続処理が同一ウェーブ内に限られる旨が明記されている（#153）" ;;
+  *)
+    fail "core/instructions.md: レーンの連続処理が同一ウェーブ内に限られる旨が明記されている（#153）" \
+      "$H153_INSTR_SEC" ;;
+esac
+
+# --- README.md にcross-wave lane reuseの検証結果が明記されている ---
+if grep -Fq 'cross-wave lane reuse' "${REPO_ROOT}/README.md"; then
+  pass "README.md: cross-wave lane reuseの検証結果が明記されている（#153）"
+else
+  fail "README.md: cross-wave lane reuseの検証結果が明記されている（#153）" "見つかりません"
+fi
+
+# --- 生成物（agents/*.md・codex-agents/*.toml）が core/ と一致している（build.sh実行済み） ---
+H153_BUILD_CLAUDE_CHECK="$(bash "${REPO_ROOT}/adapters/claude/build.sh" --check 2>&1)"
+H153_BUILD_CLAUDE_EXIT=$?
+if [ "$H153_BUILD_CLAUDE_EXIT" -eq 0 ]; then
+  pass "adapters/claude/build.sh --check: agents/ が core/ と一致している（#153）"
+else
+  fail "adapters/claude/build.sh --check: agents/ が core/ と一致している（#153）" "$H153_BUILD_CLAUDE_CHECK"
+fi
+
+H153_BUILD_CODEX_CHECK="$(bash "${REPO_ROOT}/adapters/codex/build.sh" --check 2>&1)"
+H153_BUILD_CODEX_EXIT=$?
+if [ "$H153_BUILD_CODEX_EXIT" -eq 0 ]; then
+  pass "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#153）"
+else
+  fail "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#153）" "$H153_BUILD_CODEX_CHECK"
+fi
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
