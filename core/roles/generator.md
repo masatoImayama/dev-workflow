@@ -311,10 +311,14 @@ ok  	example.com/pkg	0.032s
 `ok` の有無だけで判定しない。**SKIP件数は `tail` で目視して報告してはならない。**
 テスト出力を `tee` でログに保存し、`scripts/count-skips.sh` で機械的に数える。
 
+**並列レーンが同じ固定パスへ `tee` すると、他レーンの出力を上書きし合い誤ったSKIP件数を
+数えてしまう（issue #145）。`mktemp` で一意な一時ファイルを作ってから使うこと。**
+
 ```bash
+TEST_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-lane-test-output.XXXXXX")"
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic epicXX 'make test' 2>&1 \
-  | tee /tmp/test-output.log
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file /tmp/test-output.log
+  | tee "$TEST_LOG"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file "$TEST_LOG"
 ```
 
 出力は3行（`skips=<件数|unknown>` / `runner=<go|pytest|jest|custom|unknown>` /
@@ -428,11 +432,12 @@ $ bash .../share-prepared-dirs.sh ...
 ### テスト結果（変更範囲。サンドボックス内）
 対象範囲: [パッケージ／モジュール名。全テストを走らせた場合はその判断根拠]
 実行したコマンドの全文:
-$ bash .../sandbox-exec.sh '[実際に叩いたコマンドをそのまま]' | tee /tmp/test-output.log
+$ TEST_LOG=$(mktemp "${TMPDIR:-/tmp}/dw-lane-test-output.XXXXXX")
+$ bash .../sandbox-exec.sh '[実際に叩いたコマンドをそのまま]' | tee "$TEST_LOG"
 [実出力]
 
 ### SKIP件数（count-skips.shの実出力を貼る。tailでの目視や自己申告にしない）
-$ bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file /tmp/test-output.log
+$ bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file "$TEST_LOG"
 skips=[件数 または unknown]
 runner=[go|pytest|jest|custom|unknown]
 pattern=[使用したERE または none]

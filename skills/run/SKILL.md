@@ -483,11 +483,14 @@ generator自身は `fetch` / `checkout` / `pull` を行わない（`core/roles/g
   場合に限り全テストを走らせてよく、そのときは判断根拠を報告に書くこと
 - **SKIP件数は `tail` の目視ではなく `scripts/count-skips.sh` で機械的に数えること。**
   テスト出力を `tee` でログに保存してから数え、**数えたコマンドと実出力をそのまま報告に貼ること**
-  （`tail` で目視して「0件」と報告することは明示的に禁止する）:
+  （`tail` で目視して「0件」と報告することは明示的に禁止する）。**並列レーンが同じ固定パスへ
+  `tee` すると他レーンの出力を上書きし合うため、`mktemp` で一意な一時ファイルを作ってから
+  使うこと**（issue #145）:
   ```bash
+  TEST_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-lane-test-output.XXXXXX")"
   bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" '[変更範囲のテストコマンド]' \
-    2>&1 | tee /tmp/test-output.log
-  bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file /tmp/test-output.log
+    2>&1 | tee "$TEST_LOG"
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file "$TEST_LOG"
   ```
   （`$SKIP_PATTERN` が空でない場合のみ、次の行を追加する。空の場合はこの行を出さない）
   このプロジェクトのテスト出力は built-in ランナー（go/jest/pytest）と形式が異なるため、
@@ -731,13 +734,15 @@ git checkout "${EPIC_BRANCH}"
 EPIC_GATE_START_SEC=$(date +%s)   # 「Epic統合ゲート」フェーズの計測開始
 
 # 1) テスト（Docker sandbox内）— 1回にまとめる。落ちたら不合格
+# 固定パスは複数ウェーブ・並列実行間で衝突しうるため mktemp で一意化する（issue #145）
+EPIC_GATE_TEST_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-epic-gate-test-output.XXXXXX")"
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" '[全テストを走らせるコマンド]' \
-  2>&1 | tee /tmp/epic-gate-test-output.log
+  2>&1 | tee "$EPIC_GATE_TEST_LOG"
 
 # 1b) SKIP件数はレーンの自己申告に依存せず、run自身がcount-skips.shで機械的に数える。
 #     0件でも必ず表示する（黙って省略しない）
 [ -n "$SKIP_PATTERN" ] && export DEV_WORKFLOW_SKIP_PATTERN="$SKIP_PATTERN"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file /tmp/epic-gate-test-output.log
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file "$EPIC_GATE_TEST_LOG"
 
 # 2) 可読性ガード — Epicブランチの差分に対して実行（PostToolUseフックと同じ判定）
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-readability.sh" --git

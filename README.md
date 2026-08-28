@@ -779,6 +779,42 @@ Dockerfile の挙動は従来どおり `dirname(Dockerfile)` のままで変わ�
 非対称であることの唯一の実害は `--reset-cache` の誤爆（他 epic のキャッシュまで巻き込む）なので、
 そこだけを running コンテナ検出のガードで潰しています（後述）。
 
+#### 検証結果のスタンプ（呼び出しごとの固定オーバーヘッド削減。issue #145）
+
+dockerfile モードは1回の呼び出しで前置きの検証（イメージ存在・コンテナ存在・マウント元・
+イメージIDスキュー・running確認）に docker CLI が最大7回呼ばれ、Windows実測で約1.7秒かかります
+（Epicあたり数分の固定オーバーヘッド）。これを毎回やり直す代わりに、フル検証が成功した直後に
+「コンテナ名・解決イメージID・正規化済みマウント元」を**スタンプ**として
+`${DEV_WORKFLOW_STAMP_HOME:-${HOME}/.claude/dev-workflow/stamps}` 配下に残します。次回以降は
+この3点が現在の状態と一致し、かつコンテナが running のときだけ、前置き検証を「現在のイメージID
+再確認＋running確認」の2回に短縮し `docker exec` へ直行します（fast path）。
+
+**fail-safe**: スタンプが無い・読めない・3点のいずれかが不一致・`--rebuild` 指定時は、
+必ず従来どおりのフル検証に戻ります。`--down` / `--reset-cache` はコンテナ削除と同時にスタンプも
+無効化します。スタンプはリポジトリの追跡ファイルにせず `${HOME}` 配下に置くため、ハーネス非注入
+原則に適合します（Epic 専用 worktree と各レーンの isolation worktree の両方から共通に読めます）。
+`--print-plan` はスタンプの有無に関わらず docker に一切触れません（従来どおり）。
+compose モードは対象外です（詳細は `docs/adr/0002-sandbox-overhead-reduction.md`）。
+
+#### レーンスコープ・キャッシュ（並列レーンの資源競合の緩和。issue #145）
+
+キャッシュ volume はリポジトリ単位で共有するため、cargo registry・yarn v1 等
+**グローバルロックを取るキャッシュ**では並列レーンが直列化することがあります。volume 自体は
+分割せず、`DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV` で宣言した環境変数だけを、同じ volume 内の
+レーン別サブディレクトリ（`<宣言パス>/lanes/<レーンスコープ>`）に向けます。
+
+```bash
+DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV='CARGO_HOME=/root/.cargo/registry'
+```
+
+レーンスコープは呼び出し元 worktree から自動的に決まります: `.claude/worktrees/agent-*`
+（generator の isolation worktree）から呼ばれたら `agent-xxxx`、それ以外（リポジトリルート・
+epic worktree）は `shared` です。`shared` のときは env 上書きを行わず、従来どおり共有
+ディレクトリを使います。**既定は未宣言（空）で、現行と完全に同一の挙動です。** volume 名・
+`--reset-cache` / `--ls` / `--down` の作用範囲は変わりません（レーン別サブディレクトリも
+同じ volume 内にあるため `--reset-cache` で一緒に消えます）。設計判断の詳細は
+`docs/adr/0002-sandbox-overhead-reduction.md` を参照してください。
+
 ### サンドボックスへのコマンド投入
 
 `docker run` を直接組み立てず、`sandbox-exec.sh` を使います。
@@ -837,6 +873,10 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic epic259 --print-plan
 2. 同一リポジトリの管理コンテナが**1つでも running なら中断**し、`--force` の指定を促します
    （他 epic が実行中にキャッシュを壊さないためのガード）。
 3. `--force` を指定した場合のみ、running なコンテナがあっても実行します。
+
+volume 自体は分割していないため、`DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV` で作ったレーン別
+サブディレクトリ（`<パス>/lanes/<レーンスコープ>`）も同じ volume 内にあり、`--reset-cache` で
+まとめて削除されます（前述「レーンスコープ・キャッシュ」参照）。
 
 #### `--rebuild` の使いどころ
 
