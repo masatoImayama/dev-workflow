@@ -14118,9 +14118,11 @@ else
   fail "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#152）" "$H152_BUILD_CODEX_CHECK"
 fi
 
-# --- タスク見送り時の作業ツリー復旧が git reset --hard HEAD のまま残っていない（#161） ---
-for H161_FILE in "core/roles/generator.md" "README.md" "skills-codex/dev-workflow-run/SKILL.md" \
-  "agents/generator.md" "codex-agents/generator.toml"; do
+# --- タスク見送り時の作業ツリー復旧が git reset --hard HEAD のまま残っていない（#161, #169） ---
+# skills/run/SKILL.md は #161 の当初ループに含まれておらず、実際にここで取りこぼしが発生した
+# （コミット c6f6969 で後追い修正。#169）。以降の回帰を検出できるよう対象に加える。
+for H161_FILE in "core/roles/generator.md" "README.md" "skills/run/SKILL.md" \
+  "skills-codex/dev-workflow-run/SKILL.md" "agents/generator.md" "codex-agents/generator.toml"; do
   if grep -Fq 'git reset --hard HEAD' "${REPO_ROOT}/${H161_FILE}"; then
     fail "${H161_FILE}: 見送り時の作業ツリー復旧に git reset --hard HEAD が残っていない（#161）" \
       "$(grep -n 'git reset --hard HEAD' "${REPO_ROOT}/${H161_FILE}")"
@@ -14129,11 +14131,13 @@ for H161_FILE in "core/roles/generator.md" "README.md" "skills-codex/dev-workflo
   fi
 done
 
-# --- タスク見送り時の作業ツリー復旧が非破壊手順（git restore + git clean -nd）に置き換わっている（#161） ---
+# --- タスク見送り時の作業ツリー復旧が非破壊手順（git restore + git clean -nd）に置き換わっている（#161, #169） ---
 # -- :/ が付いていることも要求する（#167: pathspec省略はcwd相対になり、サブディレクトリから
 # 実行するとリポジトリ他所の変更・未追跡ファイルが戻らない／報告されないまま
 # 「残留なし」という誤った証跡が残るため）
-for H161_FILE in "core/roles/generator.md" "README.md" "skills-codex/dev-workflow-run/SKILL.md"; do
+# skills/run/SKILL.md も対象に加える（#169。実際に取りこぼしが起きたのはこのファイル）
+for H161_FILE in "core/roles/generator.md" "README.md" "skills/run/SKILL.md" \
+  "skills-codex/dev-workflow-run/SKILL.md"; do
   if grep -Fq 'git restore --source=HEAD --staged --worktree -- :/' "${REPO_ROOT}/${H161_FILE}" \
     && grep -Fq 'git clean -nd -- :/' "${REPO_ROOT}/${H161_FILE}"; then
     pass "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd -- :/ に置き換わっている（#161, #167）"
