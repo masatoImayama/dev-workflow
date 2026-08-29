@@ -15299,6 +15299,29 @@ esac
 # `.bin/*` のようなシンボリックリンクで部分的に失敗する（#178）。`-L` を付けて
 # シンボリックリンクを辿って実体をコピーすることで、この経路でも正しく実体化される
 # ことを確認する。
+#
+# レビュー #182 で「-L 無しのコピーを先に試す」順序に変更したため、`ln` バイナリを
+# 塞ぐだけでは -L 無しの `cp -a` 自体は（symlink(2) がテスト環境では実際には拒否
+# されていないため）成功してしまい、`-L` 経路を検証できない。そのため、-L を含まない
+# 呼び出しは失敗し、-L を含む呼び出しだけ本物へ委譲する偽 cp を追加し、symlink 作成が
+# 拒否される環境を模擬する（issue #139 が報告する状況そのもの）。
+spd182_make_cp_requires_l() {
+  # spd182_make_cp_requires_l <bindir>  cp を「第1引数に L を含む呼び出しのみ成功する」
+  # 偽物に差し替える。symlink 作成そのものが拒否される環境（-L 無しの cp が部分的に
+  # 失敗し、-L 付きの cp だけが成功する）を模擬するため。
+  local bindir="$1" real_cp
+  real_cp="$(command -v cp)"
+  mkdir -p "$bindir"
+  cat > "${bindir}/cp" <<EOF
+#!/bin/sh
+case "\$1" in
+  *L*) exec "${real_cp}" "\$@" ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "${bindir}/cp"
+}
+
 SPD178_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd178-source.XXXXXX")"
 SPD178_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd178-lane.XXXXXX")"
 mkdir -p "${SPD178_SOURCE}/node_modules/.bin" "${SPD178_SOURCE}/node_modules/pkgX"
@@ -15312,7 +15335,18 @@ cat > "${SPD178_FAKEBIN_LN}/ln" <<'EOF'
 exit 1
 EOF
 chmod +x "${SPD178_FAKEBIN_LN}/ln"
-SPD178_STUB="$(spd139_make_stub "$SPD139_CALL_LOG" "$SPD178_FAKEBIN_LN")"
+SPD178_FAKEBIN_CP="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd178-fakebin-cp.XXXXXX")"
+spd182_make_cp_requires_l "$SPD178_FAKEBIN_CP"
+
+SPD178_STUB="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd178-stub.XXXXXX")"
+cat > "$SPD178_STUB" <<EOF
+#!/bin/bash
+set -u
+PATH="${SPD178_FAKEBIN_CP}:${SPD178_FAKEBIN_LN}:\$PATH"
+cmd="\${@: -1}"
+sh -c "\$cmd"
+EOF
+chmod +x "$SPD178_STUB"
 
 SPD178_OUT="$(spd_run "$SPD178_LANE" "$SPD178_STUB" --source "$SPD178_SOURCE" --dir "node_modules")"
 case "$SPD178_OUT" in
@@ -15325,6 +15359,258 @@ assert_eq "#178: .bin 配下の symlink が実ファイルとして展開され�
   "yes" "$([ -f "${SPD178_LANE}/node_modules/.bin/real-bin" ] && [ ! -L "${SPD178_LANE}/node_modules/.bin/real-bin" ] && echo yes || echo no)"
 assert_eq "#178: 展開されたファイルの内容がリンク先の実体と一致する" \
   "yes" "$(cmp -s "${SPD178_SOURCE}/node_modules/pkgX/real-bin" "${SPD178_LANE}/node_modules/.bin/real-bin" && echo yes || echo no)"
+
+# ---------------------------------------------------------------------------
+# share-prepared-dirs.sh: コピー元パスの相対化（レビュー #181）
+#
+# コピー元 $s はコンテナ内ミニスクリプトへそのまま渡されるため、レーンの作業
+# ディレクトリ（コンテナ内 workdir）基準の相対パスでなければならない。共有元の
+# ホスト絶対パス（--source の値）をそのまま渡すと、コンテナはリポジトリルートを
+# /workspace にマウントするためコンテナ内には存在せず cp が必ず失敗していた
+# （#181）。生成されるミニスクリプトの s= 行を検査し、ホスト絶対パス（--source の
+# 値そのもの）を含まないことを確認する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== share-prepared-dirs.sh: コピー元パスの相対化（レビュー #181） =="
+
+SPD181_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd181-source.XXXXXX")"
+SPD181_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd181-lane.XXXXXX")"
+mkdir -p "${SPD181_SOURCE}/node_modules"
+printf 'pkg-content\n' > "${SPD181_SOURCE}/node_modules/f.txt"
+
+SPD181_FAKEBIN_LN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd181-fakebin-ln.XXXXXX")"
+cat > "${SPD181_FAKEBIN_LN}/ln" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "${SPD181_FAKEBIN_LN}/ln"
+
+SPD181_SCRIPT_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd181-scriptlog.XXXXXX")"
+SPD181_STUB="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd181-stub.XXXXXX")"
+cat > "$SPD181_STUB" <<EOF
+#!/bin/bash
+set -u
+cmd="\${@: -1}"
+{
+  printf '%s\n' "\$cmd"
+  printf '\n---SPD181-CALL-END---\n'
+} >> "${SPD181_SCRIPT_LOG}"
+PATH="${SPD181_FAKEBIN_LN}:\$PATH"
+sh -c "\$cmd"
+EOF
+chmod +x "$SPD181_STUB"
+
+SPD181_OUT="$(spd_run "$SPD181_LANE" "$SPD181_STUB" --source "$SPD181_SOURCE" --dir "node_modules")"
+
+case "$SPD181_OUT" in
+  *"copied"*"node_modules"*)
+    pass "#181: symlink失敗後のコピー・フォールバックが成立する（copied）" ;;
+  *)
+    fail "#181: symlink失敗後のコピー・フォールバックが成立する（copied）" "output=[${SPD181_OUT}]" ;;
+esac
+
+SPD181_S_LINES="$(grep -h '^s=' "$SPD181_SCRIPT_LOG" || true)"
+if [ -n "$SPD181_S_LINES" ]; then
+  pass "#181: コピー・ミニスクリプトに s= 行が生成される"
+else
+  fail "#181: コピー・ミニスクリプトに s= 行が生成される" "見つかりませんでした"
+fi
+
+case "$SPD181_S_LINES" in
+  *"$SPD181_SOURCE"*)
+    fail "#181: コピー元 s= がホスト絶対パス（--source の値）を含まない（コンテナ内で解決可能な相対パスであること）" \
+      "s=[${SPD181_S_LINES}]" ;;
+  *)
+    pass "#181: コピー元 s= がホスト絶対パス（--source の値）を含まない（コンテナ内で解決可能な相対パスであること）" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# share-prepared-dirs.sh: コピー・フォールバックの順序変更と循環シンボリックリンク対策
+# （レビュー #182）
+#
+# 「-L 無しのコピーを先に試す」順序変更と、-L を使う前の循環検査を検証する。
+# 循環シンボリックリンクの検証は暴走した場合に削除できない残骸を生みうるため、
+# ソースは実体5バイト級の最小構成にとどめ、下記の「-L 無しは失敗・-L 付きのみ成功」
+# 偽 cp（symlink 作成が拒否される環境の模擬）と組み合わせることで、循環検査に
+# よって -L 自体が一度も呼ばれないことを保証したうえで実行する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== share-prepared-dirs.sh: コピー・フォールバックの順序変更と循環対策（レビュー #182） =="
+
+# --- ケースA: -L 無しのコピーが先に試され、成功すればそれで完結する（順序の検証） ---
+#
+# 「-L 無しは成功・-L 付きは失敗する」偽 cp を使う。旧実装（-L を無条件に使う）なら
+# このソースは copyfailed になるはずで、新実装（-L 無しを先に試す）なら copied になる。
+spd182_make_cp_fails_with_l() {
+  local bindir="$1" real_cp
+  real_cp="$(command -v cp)"
+  mkdir -p "$bindir"
+  cat > "${bindir}/cp" <<EOF
+#!/bin/sh
+case "\$1" in
+  *L*) exit 1 ;;
+  *) exec "${real_cp}" "\$@" ;;
+esac
+EOF
+  chmod +x "${bindir}/cp"
+}
+
+SPD182A_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd182a-source.XXXXXX")"
+SPD182A_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd182a-lane.XXXXXX")"
+mkdir -p "${SPD182A_SOURCE}/node_modules"
+printf 'order-check\n' > "${SPD182A_SOURCE}/node_modules/f.txt"
+
+SPD182A_FAKEBIN_LN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd182a-fakebin-ln.XXXXXX")"
+cat > "${SPD182A_FAKEBIN_LN}/ln" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "${SPD182A_FAKEBIN_LN}/ln"
+SPD182A_FAKEBIN_CP="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd182a-fakebin-cp.XXXXXX")"
+spd182_make_cp_fails_with_l "$SPD182A_FAKEBIN_CP"
+
+SPD182A_STUB="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd182a-stub.XXXXXX")"
+cat > "$SPD182A_STUB" <<EOF
+#!/bin/bash
+set -u
+PATH="${SPD182A_FAKEBIN_CP}:${SPD182A_FAKEBIN_LN}:\$PATH"
+cmd="\${@: -1}"
+sh -c "\$cmd"
+EOF
+chmod +x "$SPD182A_STUB"
+
+SPD182A_OUT="$(spd_run "$SPD182A_LANE" "$SPD182A_STUB" --source "$SPD182A_SOURCE" --dir "node_modules")"
+case "$SPD182A_OUT" in
+  *"copied"*"node_modules"*)
+    pass "#182 ケースA: -L 無しのコピーが先に試され、成功すれば -L を使わず完結する（順序の検証）" ;;
+  *)
+    fail "#182 ケースA: -L 無しのコピーが先に試され、成功すれば -L を使わず完結する（順序の検証）" \
+      "output=[${SPD182A_OUT}]" ;;
+esac
+
+# --- ケースB: 循環シンボリックリンクがあるソースは、-L を試みず copy-failed のまま
+#     確定し、暴走したコピー（PATH_MAX級の残骸）を作らない（issue #182の本題） ---
+#
+# `-L` 無しは失敗・`-L` 付きのみ成功する偽 cp（symlink 作成が拒否される環境の模擬）と
+# 組み合わせ、循環検査（find -L -mindepth/-maxdepth）が -L 呼び出し自体を止めることを
+# 確認する。ソースの自己参照 symlink（`self -> ../..`）自体の作成は再帰しないため安全に
+# 行える。危険なのは -L で辿った場合であり、それを止めることが本テストの主眼。
+SPD182B_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd182b-source.XXXXXX")"
+SPD182B_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd182b-lane.XXXXXX")"
+mkdir -p "${SPD182B_SOURCE}/node_modules/pkg"
+printf 'x\n' > "${SPD182B_SOURCE}/node_modules/pkg/f.txt"
+ln -s ../.. "${SPD182B_SOURCE}/node_modules/pkg/self"
+
+SPD182B_FAKEBIN_LN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd182b-fakebin-ln.XXXXXX")"
+cat > "${SPD182B_FAKEBIN_LN}/ln" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "${SPD182B_FAKEBIN_LN}/ln"
+SPD182B_FAKEBIN_CP="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd182b-fakebin-cp.XXXXXX")"
+spd182_make_cp_requires_l "$SPD182B_FAKEBIN_CP"
+
+SPD182B_STUB="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd182b-stub.XXXXXX")"
+cat > "$SPD182B_STUB" <<EOF
+#!/bin/bash
+set -u
+PATH="${SPD182B_FAKEBIN_CP}:${SPD182B_FAKEBIN_LN}:\$PATH"
+cmd="\${@: -1}"
+sh -c "\$cmd"
+EOF
+chmod +x "$SPD182B_STUB"
+
+SPD182B_STDERR="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd182b-stderr.XXXXXX")"
+SPD182B_OUT="$(spd_run "$SPD182B_LANE" "$SPD182B_STUB" --source "$SPD182B_SOURCE" --dir "node_modules" 2>"$SPD182B_STDERR")"
+
+case "$SPD182B_OUT" in
+  *"copied"*)
+    fail "#182 ケースB: 循環シンボリックリンクを含むソースは copied にならない" "output=[${SPD182B_OUT}]" ;;
+  *)
+    pass "#182 ケースB: 循環シンボリックリンクを含むソースは copied にならない" ;;
+esac
+case "$SPD182B_OUT" in
+  *"skip"*"node_modules"*"reason"*"link-failed"*)
+    pass "#182 ケースB: 循環シンボリックリンクを含むソースは link-failed のまま確定する" ;;
+  *)
+    fail "#182 ケースB: 循環シンボリックリンクを含むソースは link-failed のまま確定する" \
+      "output=[${SPD182B_OUT}]" ;;
+esac
+
+# 循環検査が -L 呼び出し自体を止めているため、残骸（<dir>.dwtmp$$。SPD182B_LANE は
+# git worktree ではないためレーン直下に残る）は空のまま（-L が一度も走らなければ
+# 暴走した深い構造は作られない）。
+SPD182B_RESIDUE_DIR="$(find "$SPD182B_LANE" -maxdepth 1 -iname 'node_modules.dwtmp*' 2>/dev/null | head -n 1)"
+if [ -n "$SPD182B_RESIDUE_DIR" ]; then
+  pass "#182 ケースB: 残骸ディレクトリが見つかる（検証の前提）"
+  assert_eq "#182 ケースB: 循環検査により -L が一度も呼ばれず、残骸は空のまま（暴走コピーを作らない）" \
+    "" "$(ls -A "$SPD182B_RESIDUE_DIR" 2>/dev/null)"
+else
+  # -L 無しの cp が mkdir すら行わず tmp を作らずに失敗した場合、残骸自体が無い
+  # （これも「暴走コピーを作らない」という主張と矛盾しない。より強い結果）。
+  pass "#182 ケースB: 残骸ディレクトリすら作られない（-L 無しの失敗時点で何も書き込まれていない）"
+fi
+
+SPD182B_DEEP="$(find "$SPD182B_LANE" -mindepth 8 2>/dev/null | head -n 1)"
+assert_eq "#182 ケースB: レーン配下に深さ8を超えるパスが作られない（PATH_MAX級の暴走が無い）" \
+  "" "$SPD182B_DEEP"
+
+# ---------------------------------------------------------------------------
+# share-prepared-dirs.sh: 空の実体ディレクトリへのコピー経路は ln -s の成否と無関係
+# （レビュー #183。冒頭コメントの記述訂正の裏付け）
+#
+# #180 により、レーン側 <dir> が「空の」実体ディレクトリの場合は ln -s を一切試みず
+# 無条件に link-failed とする。この分岐は ln -s の成否と無関係なので、ln が正常動作する
+# 環境でも発火することを確認する（冒頭コメントが誤って「symlink が確認できる環境では
+# この経路は実行されない」と記載していたことの実地での反証）。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== share-prepared-dirs.sh: 空の実体ディレクトリへのコピー経路は ln の成否と無関係（レビュー #183） =="
+
+SPD183_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd183-source.XXXXXX")"
+SPD183_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd183-lane.XXXXXX")"
+mkdir -p "${SPD183_SOURCE}/node_modules"
+printf 'ok\n' > "${SPD183_SOURCE}/node_modules/f.txt"
+mkdir -p "${SPD183_LANE}/node_modules"   # レーン側に「空の」実体ディレクトリが既に存在する
+
+# ln は差し替えない（正常動作する環境を模す）。実際に ln -s を試みれば成功するはずの
+# 環境でも、空ディレクトリの分岐によりコピー経路が使われることを確認する。
+SPD183_OUT="$(spd_run "$SPD183_LANE" "$SPD_STUB" --source "$SPD183_SOURCE" --dir "node_modules")"
+case "$SPD183_OUT" in
+  *"copied"*"node_modules"*)
+    pass "#183: ln が正常動作する環境でも、空の実体ディレクトリはコピー経路が使われる（copied）" ;;
+  *)
+    fail "#183: ln が正常動作する環境でも、空の実体ディレクトリはコピー経路が使われる（copied）" \
+      "output=[${SPD183_OUT}]" ;;
+esac
+assert_eq "#183: レーン側の node_modules は symlink 化されず実体のまま（コピー経路が使われた証拠）" \
+  "yes" "$([ -d "${SPD183_LANE}/node_modules" ] && [ ! -L "${SPD183_LANE}/node_modules" ] && echo yes || echo no)"
+
+# 冒頭コメントの記述が訂正されていることも確認する（#183）。
+SPD_HEADER_183="$(awk '/^set -u/{exit} {print}' "$SPD_SCRIPT")"
+case "$SPD_HEADER_183" in
+  *"symlink が確認できる環境"*"この経路は実行されない"*"既存動作を変えない"*)
+    fail "#183: 冒頭コメントの誤った記述（symlink成功環境では実行されないと明記していたもの）が残っていない" \
+      "見つかりました" ;;
+  *)
+    pass "#183: 冒頭コメントの誤った記述（symlink成功環境では実行されないと明記していたもの）が残っていない" ;;
+esac
+case "$SPD_HEADER_183" in
+  *"ln -s"*"成否とは"*"無関係"*)
+    pass "#183: 冒頭コメントが、空ディレクトリのコピー経路が ln -s の成否と無関係であることを正しく記述している" ;;
+  *)
+    fail "#183: 冒頭コメントが、空ディレクトリのコピー経路が ln -s の成否と無関係であることを正しく記述している" \
+      "見つかりませんでした" ;;
+esac
+case "$SPD_HEADER_183" in
+  *"root 所有"*)
+    pass "#183: 冒頭コメントが root 所有のツリーが残る点に言及している" ;;
+  *)
+    fail "#183: 冒頭コメントが root 所有のツリーが残る点に言及している" "見つかりませんでした" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 結果集計
