@@ -122,8 +122,9 @@ run は1レーンに**複数のタスクを割り当てることがある**（`#
 #    ${TMPDIR:-/tmp} 配下＝リポジトリ外のためコミット対象にならない）
 BASE_EVIDENCE_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
 
-# 1) 作業ツリーが空であることを確認する（新規レーンなら空のはず）
-{ echo '$ git status --short'; git status --short; } | tee -a "$BASE_EVIDENCE_FILE"
+# 1) 作業ツリーが空であることを確認する（新規レーンなら空のはず。--untracked-files=all で
+#    status.showUntrackedFiles=no のようなローカル設定による空振りを防ぐ。#195）
+{ echo '$ git status --short --untracked-files=all'; git status --short --untracked-files=all; } | tee -a "$BASE_EVIDENCE_FILE"
 #    空でなければ実装を始めず、$BASE_EVIDENCE_FILE のパスを添えて報告し停止する
 #    （安全弁。作業ツリーが汚れた状態のまま先へ進まない）
 

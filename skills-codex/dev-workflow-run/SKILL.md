@@ -308,8 +308,9 @@ Task #<番号> を実装してください。
   ```bash
   BASE_EVIDENCE_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
   ```
-  1) `{ echo '$ git status --short'; git status --short; } | tee -a "$BASE_EVIDENCE_FILE"`
-     （空であることを確認。空でなければ実装を始めず、`$BASE_EVIDENCE_FILE` のパスを添えて報告し停止すること）
+  1) `{ echo '$ git status --short --untracked-files=all'; git status --short --untracked-files=all; } | tee -a "$BASE_EVIDENCE_FILE"`
+     （空であることを確認。`--untracked-files=all` で `status.showUntrackedFiles=no` のような
+     ローカル設定による空振りを防ぐ（#195）。空でなければ実装を始めず、`$BASE_EVIDENCE_FILE` のパスを添えて報告し停止すること）
   2) `{ echo '$ git merge --ff-only <WAVE_BASE>'; git merge --ff-only <WAVE_BASE>; } | tee -a "$BASE_EVIDENCE_FILE"`
      （HEADをWAVE_BASEに合わせる。fetch/checkout/pullではないためネットワーク不要。
      `git reset --hard` は一般的な安全設定でブロックされるため使わない。既に WAVE_BASE の

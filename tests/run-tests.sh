@@ -16290,6 +16290,36 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 「0. 渡されたベースにHEADを合わせる」手順1（作業ツリーが空であることを確認する安全弁）の
+# git status --short に --untracked-files=all が付いていることの回帰（issue #195）
+#
+# #193 は見送り時の作業ツリー復旧（上記H161の回帰テスト対象）には --untracked-files=all を
+# 付けたが、実装着手前のベース合わせ手順1は素の `git status --short` のまま据え置かれた。
+# status.showUntrackedFiles=no のローカル設定では出力が常に空になり、汚れた作業ツリーの上で
+# 着手したうえ「空だった」という誤った証跡が残ってしまう（#193 と同質の失敗モード）。
+# BASE_EVIDENCE_FILE 行に絞って検査し、H161（EVIDENCE_FILE = 見送り時の復旧）の対象と
+# 混同しないようにする。
+# ---------------------------------------------------------------------------
+
+echo "== ベース合わせ手順1のgit status --shortに--untracked-files=allが付いている（#195） =="
+
+for RG195_FILE in "core/roles/generator.md" "skills/run/SKILL.md" \
+  "skills-codex/dev-workflow-run/SKILL.md" "agents/generator.md" "codex-agents/generator.toml"; do
+  case "$RG195_FILE" in
+    skills/run/SKILL.md) RG195_PATH="$RUN_SKILL_FLAT" ;;
+    *)                   RG195_PATH="${REPO_ROOT}/${RG195_FILE}" ;;
+  esac
+  RG195_LINE="$(grep -n 'BASE_EVIDENCE_FILE' "$RG195_PATH" | grep -F 'git status --short' || true)"
+  RG195_MISSING_FLAG="$(echo "$RG195_LINE" | grep -Fv 'git status --short --untracked-files=all' || true)"
+  if [ -n "$RG195_LINE" ] && [ -z "$RG195_MISSING_FLAG" ]; then
+    pass "${RG195_FILE}: ベース合わせ手順1のgit status --shortに--untracked-files=allが付いている（#195）"
+  else
+    fail "${RG195_FILE}: ベース合わせ手順1のgit status --shortに--untracked-files=allが付いている（#195）" \
+      "$RG195_LINE"
+  fi
+done
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
