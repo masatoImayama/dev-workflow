@@ -16243,6 +16243,53 @@ RG188_GENOLD_EXIT=$?
 assert_exit_code "generated-old/は先頭一致に誤って一致せず引き続き検出される（検出力の維持・#188）" 2 "$RG188_GENOLD_EXIT"
 
 # ---------------------------------------------------------------------------
+# run が generator へ渡すプロンプト（Step 3/4）に、core/roles/generator.md が禁じる
+# シェルのポーリングループ例を書き込んでいないことの回帰（issue #194）
+#
+# #192 の書き直しで、次ウェーブ再割当て時に Step 3 のプロンプトへ添える一文として
+# `until grep -q ... done; do sleep 30; done` という具体例が紛れ込んだ。これは同じ差分の
+# #189 対応が core/roles/generator.md に明記した「シェルの until ... do ... done のような
+# ループ相当の待ち方を書かない（issue #140: 承認プロンプトを誘発する）」という禁止事項と
+# 正面から衝突する。run のプロンプトは generator にとって「目の前の具体的な指示」であり、
+# 抽象的なロール規定より優先されやすいため、一度紛れ込むと実害が大きい。
+#
+# 検査範囲は「generatorへ渡すプロンプトの記述」に限定する（run 自身が実行する正当なシェルの
+# for ループ等まで誤検出しないため）。具体的には、generator 起動・再指示に関わる Step 3
+# （Claude版はStep 4のレーン内ゲート確認も、Step 3のプロンプトに追記する一文の記述元として含む）
+# の範囲だけを抽出して調べる。
+# ---------------------------------------------------------------------------
+
+echo "== run スキル: generatorへの指示にシェルのポーリングループ例を書かない（#194） =="
+
+RG194_POLL_PATTERN='\b(until|while|for)\b.*\bdo\b.*\bdone\b'
+
+RG194_CLAUDE_STEP_REGION="$(sed -n '/^### Step 3:/,/^### Step 5:/p' "${REPO_ROOT}/skills/run/SKILL.md")"
+RG194_CLAUDE_HITS="$(echo "$RG194_CLAUDE_STEP_REGION" | grep -nE "$RG194_POLL_PATTERN" || true)"
+if [ -z "$RG194_CLAUDE_HITS" ]; then
+  pass "skills/run/SKILL.md: Step 3/4（generatorへ渡すプロンプトの記述範囲）にシェルのポーリングループ例が無い（#194）"
+else
+  fail "skills/run/SKILL.md: Step 3/4（generatorへ渡すプロンプトの記述範囲）にシェルのポーリングループ例が無い（#194）" \
+    "$RG194_CLAUDE_HITS"
+fi
+
+RG194_CODEX_STEP_REGION="$(sed -n '/^### Step 3:/,/^### Step 4:/p' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md")"
+RG194_CODEX_HITS="$(echo "$RG194_CODEX_STEP_REGION" | grep -nE "$RG194_POLL_PATTERN" || true)"
+if [ -z "$RG194_CODEX_HITS" ]; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: Step 3（generatorへ渡すプロンプトの記述範囲）にシェルのポーリングループ例が無い（#194）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: Step 3（generatorへ渡すプロンプトの記述範囲）にシェルのポーリングループ例が無い（#194）" \
+    "$RG194_CODEX_HITS"
+fi
+
+# --- 今回の再発そのもの（`until ... done; do sleep 30; done`）も併せて固定する ---
+
+if ! grep -Fq 'until grep -q' "${REPO_ROOT}/skills/run/SKILL.md"; then
+  pass "skills/run/SKILL.md: #192由来の具体的な until ポーリング文言が残っていない（#194）"
+else
+  fail "skills/run/SKILL.md: #192由来の具体的な until ポーリング文言が残っていない（#194）"
+fi
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
