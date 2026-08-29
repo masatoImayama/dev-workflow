@@ -80,6 +80,37 @@ SKIP_PATTERN="$(gh issue view $ARGUMENTS --json body -q '.body' \
   Step 6 の統合ゲートの両方に、`DEV_WORKFLOW_SKIP_PATTERN` として渡す
 - 節の書き方は README「Epic の `## SKIPパターン` 節」を参照
 
+#### 編集時チェック（Epic 本文の `## 編集時チェック` 節。任意）
+
+`scripts/edit-check.sh`（PostToolUse(Write|Edit|MultiEdit)フック）は、編集直後にホスト側で
+型チェック単体・lint単体のような軽量チェックを実行し、違反があれば即座にエージェントへ
+差し戻す。目的は「編集 → sandbox-exec.sh でビルド/テスト → エラーを読む → 修正」という
+Docker往復を伴うループの短縮（Task #155、`docs/adr/0005-edit-time-check-hook.md`）。
+
+「準備コマンド」節・「SKIPパターン」節と同じ位置・同じ方法で抽出する:
+
+```bash
+# Epic本文に「## 編集時チェック」節があれば、その中身（フェンスコードブロックの内容）を取り出す
+EDIT_CHECK="$(gh issue view $ARGUMENTS --json body -q '.body' \
+  | awk '/^## 編集時チェック/{f=1; next} /^## /{f=0} f' \
+  | sed -n '/^```/,/^```/p' | sed '1d;$d')"
+
+# マーカーファイルへ書く（節が無ければ--clearし、前回Epicの内容を残さない）
+if [ -n "$EDIT_CHECK" ]; then
+  printf '%s\n' "$EDIT_CHECK" | bash "${CLAUDE_PLUGIN_ROOT}/scripts/edit-check.sh" --write
+else
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/edit-check.sh" --clear
+fi
+```
+
+- **節が無ければ何もしない**（マーカーファイルが `--clear` され、既存 Epic の挙動と完全に同じ
+  になる）
+- **他の3節と異なり、Step 3 のレーンプロンプトへ埋め込む必要が無い。** PostToolUse フックは
+  CLI 本体の子プロセスとして起動されるため、generator が Bash ツール越しに `export` した
+  環境変数は届かない（`scripts/heartbeat.sh` の `--abort` フラグ判定と同じ制約）。そのため
+  マーカーファイル経由にしており、書き込みが済めば以降は編集のたびに自動発火する
+- 節の書き方は README「Epic の `## 編集時チェック` 節」・ADR 0005 を参照
+
 ### サンドボックスへのコマンド投入は sandbox-exec.sh 経由に統一する
 
 **`docker run` を直接組み立ててはならない。** 以下をすべて `scripts/sandbox-exec.sh` が引き受ける:

@@ -28,6 +28,43 @@ done
 unset _ref
 trap 'rm -f "$RUN_SKILL_FLAT"' EXIT
 
+# core/instructions.md も同じ progressive disclosure 構成（本体 + core/references/*.md）を
+# 採る（Task #146）。本体だけを見ると参照ファイルへ移した記述を取りこぼすため、同じ作法で
+# 平坦化ビューを1つ作る。
+CORE_INSTRUCTIONS_FLAT="$(mktemp "${TMPDIR:-/tmp}/dw-core-instructions-flat.XXXXXX")"
+cat "${REPO_ROOT}/core/instructions.md" > "$CORE_INSTRUCTIONS_FLAT"
+for _ref in "${REPO_ROOT}"/core/references/*.md; do
+  [ -f "$_ref" ] || continue
+  printf '\n' >> "$CORE_INSTRUCTIONS_FLAT"
+  cat "$_ref" >> "$CORE_INSTRUCTIONS_FLAT"
+done
+unset _ref
+
+# core/roles/evaluator.md も同じ構成（本体 + core/references/review-checklist-*.md 等）を
+# 採る（Task #151）。evaluator 用の平坦化ビューを2つ作る:
+# - EVALUATOR_ROLE_FLAT: 正本（core/roles/evaluator.md）+ core/references/*.md
+# - AGENT_EVALUATOR_FLAT: 生成物（agents/evaluator.md）+ core/references/*.md
+#   （生成物は <!-- include: --> で core/roles/evaluator.md をそのまま束ねるだけで
+#   core/references/*.md は束ねない＝実行時に evaluator が Read ツールで読む設計のため、
+#   生成物単体を見るテストは参照ファイルへ移った記述を取りこぼす）
+EVALUATOR_ROLE_FLAT="$(mktemp "${TMPDIR:-/tmp}/dw-evaluator-role-flat.XXXXXX")"
+cat "${REPO_ROOT}/core/roles/evaluator.md" > "$EVALUATOR_ROLE_FLAT"
+AGENT_EVALUATOR_FLAT="$(mktemp "${TMPDIR:-/tmp}/dw-agent-evaluator-flat.XXXXXX")"
+cat "${REPO_ROOT}/agents/evaluator.md" > "$AGENT_EVALUATOR_FLAT"
+CODEX_AGENT_EVALUATOR_FLAT="$(mktemp "${TMPDIR:-/tmp}/dw-codex-agent-evaluator-flat.XXXXXX")"
+cat "${REPO_ROOT}/codex-agents/evaluator.toml" > "$CODEX_AGENT_EVALUATOR_FLAT"
+for _ref in "${REPO_ROOT}"/core/references/*.md; do
+  [ -f "$_ref" ] || continue
+  printf '\n' >> "$EVALUATOR_ROLE_FLAT"
+  cat "$_ref" >> "$EVALUATOR_ROLE_FLAT"
+  printf '\n' >> "$AGENT_EVALUATOR_FLAT"
+  cat "$_ref" >> "$AGENT_EVALUATOR_FLAT"
+  printf '\n' >> "$CODEX_AGENT_EVALUATOR_FLAT"
+  cat "$_ref" >> "$CODEX_AGENT_EVALUATOR_FLAT"
+done
+unset _ref
+trap 'rm -f "$RUN_SKILL_FLAT" "$CORE_INSTRUCTIONS_FLAT" "$EVALUATOR_ROLE_FLAT" "$AGENT_EVALUATOR_FLAT" "$CODEX_AGENT_EVALUATOR_FLAT"' EXIT
+
 PASS=0
 FAIL=0
 SKIP=0
@@ -1179,6 +1216,13 @@ IMG_TEST_RUNNING_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-test-imgrunning.XXXXXX")"
 run_img_case() {
   # run_img_case <container_exists 0/1> <container_running true/false> <container_image_id>
   #              <container_mount> <image_exists 0/1> <image_id> [追加の sandbox-exec.sh 引数...]
+  #
+  # DEV_WORKFLOW_STAMP_HOME は呼び出しごとに新規の空ディレクトリにする。スタンプ機構
+  # （issue #145）はコンテナ名・イメージID・マウント元が一致すればフル検証を省略するため、
+  # このヘルパーで固定の値を使い回すと、ケースをまたいでスタンプが再利用されてしまい
+  # （実際に発生した：後続ケースが期待するフル検証がスキップされ、削除/作り直しの
+  # アサーションが失敗した）、かつ既定値のままだと実ホストの $HOME を汚染する。
+  # このヘルパーが検証する対象はあくまで「フル検証」なので、常にスタンプ不在から始める。
   local container_exists="$1" container_running="$2" container_image_id="$3" container_mount="$4"
   local image_exists="$5" image_id="$6"
   shift 6
@@ -1192,7 +1236,8 @@ run_img_case() {
 
   (
     cd "$IMG_REPO" || exit 1
-    DW_IMG_LOG="$IMG_TEST_LOG" \
+    DEV_WORKFLOW_STAMP_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-imgstamp.XXXXXX")" \
+      DW_IMG_LOG="$IMG_TEST_LOG" \
       DW_IMG_RM_LOG="$IMG_TEST_RM_LOG" \
       DW_IMG_RUN_LOG="$IMG_TEST_RUN_LOG" \
       DW_IMG_EXEC_LOG="$IMG_TEST_EXEC_LOG" \
@@ -1398,6 +1443,221 @@ assert_eq "マウント元が別表現（Docker Desktop 形式等）でも同一
 
 IMG_H_RUN_COUNT="$(grep -c '^run ' "$IMG_TEST_LOG" || true)"
 assert_eq "マウント元が別表現（Docker Desktop 形式等）でも同一ツリーなら作り直さない（issue #25 / #30）" "0" "$IMG_H_RUN_COUNT"
+
+# ---------------------------------------------------------------------------
+# 検証結果のスタンプ（fast path。issue #145、docs/adr/0002-sandbox-overhead-reduction.md 決定1）
+#
+# run_img_case とは異なり、複数回の呼び出しにまたがって同一の DEV_WORKFLOW_STAMP_HOME を
+# 使い回すことで「1回目のフル検証で書いたスタンプを2回目が読む」という時系列を検証する。
+# ---------------------------------------------------------------------------
+
+echo "== 検証結果のスタンプ（fast path・issue #145） =="
+
+STAMP_TEST_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-stamphome.XXXXXX")"
+
+run_img_case_stamped() {
+  # run_img_case_stamped <stamp_home> <container_exists> <container_running> <container_image_id>
+  #                       <container_mount> <image_exists> <image_id> [追加の sandbox-exec.sh 引数...]
+  local stamp_home="$1" container_exists="$2" container_running="$3" container_image_id="$4"
+  local container_mount="$5" image_exists="$6" image_id="$7"
+  shift 7
+
+  : > "$IMG_TEST_LOG"
+  : > "$IMG_TEST_RM_LOG"
+  : > "$IMG_TEST_RUN_LOG"
+  : > "$IMG_TEST_EXEC_LOG"
+  printf '%s' "$container_exists" > "$IMG_TEST_STATE_FILE"
+  printf '%s\n' "$container_running" > "$IMG_TEST_RUNNING_FILE"
+
+  (
+    cd "$IMG_REPO" || exit 1
+    DEV_WORKFLOW_STAMP_HOME="$stamp_home" \
+      DW_IMG_LOG="$IMG_TEST_LOG" \
+      DW_IMG_RM_LOG="$IMG_TEST_RM_LOG" \
+      DW_IMG_RUN_LOG="$IMG_TEST_RUN_LOG" \
+      DW_IMG_EXEC_LOG="$IMG_TEST_EXEC_LOG" \
+      DW_IMG_CONTAINER_STATE="$IMG_TEST_STATE_FILE" \
+      DW_IMG_CONTAINER_RUNNING_STATE="$IMG_TEST_RUNNING_FILE" \
+      DW_IMG_CONTAINER_IMAGE_ID="$container_image_id" \
+      DW_IMG_CONTAINER_MOUNT="$container_mount" \
+      DW_IMG_IMAGE_EXISTS="$image_exists" \
+      DW_IMG_IMAGE_ID="$image_id" \
+      PATH="${FAKE_DOCKER_IMAGE_DIR}:${PATH}" \
+      bash scripts/sandbox-exec.sh "$@"
+  )
+}
+
+stamp_call_count() { wc -l < "$IMG_TEST_LOG" | tr -d ' '; }
+
+# --- 1回目: スタンプが無いのでフル検証する ---
+STAMP1_EXIT=0
+run_img_case_stamped "$STAMP_TEST_HOME" 1 true "sha256:same" "$IMG_MOUNT_SOURCE" 1 "sha256:same" 'true' \
+  >/dev/null 2>&1 || STAMP1_EXIT=$?
+assert_exit_code "スタンプ: 1回目（スタンプ無し・フル検証）は成功する" 0 "$STAMP1_EXIT"
+STAMP1_CALLS="$(stamp_call_count)"
+
+# --- 2回目: 直前と同じ状態で再実行すると fast path になり、docker CLI 呼び出しが減る ---
+STAMP2_EXIT=0
+run_img_case_stamped "$STAMP_TEST_HOME" 1 true "sha256:same" "$IMG_MOUNT_SOURCE" 1 "sha256:same" 'true' \
+  >/dev/null 2>&1 || STAMP2_EXIT=$?
+assert_exit_code "スタンプ: 2回目（fast path）も成功する" 0 "$STAMP2_EXIT"
+STAMP2_CALLS="$(stamp_call_count)"
+
+if [ "$STAMP2_CALLS" -lt "$STAMP1_CALLS" ]; then
+  pass "スタンプ: fast path は1回目より docker CLI 呼び出しが少ない（1回目=${STAMP1_CALLS}件 → 2回目=${STAMP2_CALLS}件）"
+else
+  fail "スタンプ: fast path は1回目より docker CLI 呼び出しが少ない" "1回目=${STAMP1_CALLS}件 2回目=${STAMP2_CALLS}件"
+fi
+
+assert_eq "スタンプ: fast path では既存コンテナを削除しない" "0" "$(grep -c . "$IMG_TEST_RM_LOG" || true)"
+assert_eq "スタンプ: fast path ではコンテナを作り直さない" "0" "$(grep -c '^run ' "$IMG_TEST_LOG" || true)"
+assert_eq "スタンプ: fast path でも docker exec は実行される" "1" "$(grep -c . "$IMG_TEST_EXEC_LOG" || true)"
+
+# --- 3回目: イメージIDが変わっている場合はスタンプを無視してフル検証に戻る（バージョンスキュー解消） ---
+STAMP3_EXIT=0
+run_img_case_stamped "$STAMP_TEST_HOME" 1 true "sha256:same" "$IMG_MOUNT_SOURCE" 1 "sha256:different" 'true' \
+  >/dev/null 2>&1 || STAMP3_EXIT=$?
+assert_exit_code "スタンプ: イメージID変更時も成功する" 0 "$STAMP3_EXIT"
+STAMP3_CALLS="$(stamp_call_count)"
+
+if [ "$STAMP3_CALLS" -ge "$STAMP1_CALLS" ]; then
+  pass "スタンプ: イメージID変更時はフル検証に戻る（呼び出し数=${STAMP3_CALLS}件、1回目=${STAMP1_CALLS}件）"
+else
+  fail "スタンプ: イメージID変更時はフル検証に戻る" "呼び出し数=${STAMP3_CALLS}件（1回目=${STAMP1_CALLS}件）"
+fi
+assert_eq "スタンプ: イメージID変更時は既存コンテナを削除して作り直す" "1" "$(grep -c . "$IMG_TEST_RM_LOG" || true)"
+
+# --- マウント元不一致: スタンプへ直接、現在の状態と異なるマウント元を書き込み、
+#     フル検証に戻ることを確認する（実際の呼び出し元の違いによる不一致を模擬） ---
+STAMP_CONTAINER_SLUG="$(printf '%s' "$IMG_CONTAINER" | tr -c 'A-Za-z0-9_.-' '-')"
+STAMP_BOGUS_FILE="${STAMP_TEST_HOME}/${STAMP_CONTAINER_SLUG}.stamp"
+{
+  printf 'CONTAINER=%s\n'    "$IMG_CONTAINER"
+  printf 'IMAGE_ID=%s\n'     "sha256:same"
+  printf 'MOUNT_SOURCE=%s\n' "/some/other/tree"
+} > "$STAMP_BOGUS_FILE"
+
+STAMP4_EXIT=0
+run_img_case_stamped "$STAMP_TEST_HOME" 1 true "sha256:same" "$IMG_MOUNT_SOURCE" 1 "sha256:same" 'true' \
+  >/dev/null 2>&1 || STAMP4_EXIT=$?
+assert_exit_code "スタンプ: マウント元不一致時も成功する" 0 "$STAMP4_EXIT"
+STAMP4_CALLS="$(stamp_call_count)"
+
+if [ "$STAMP4_CALLS" -ge "$STAMP1_CALLS" ]; then
+  pass "スタンプ: マウント元不一致時はフル検証に戻る（呼び出し数=${STAMP4_CALLS}件）"
+else
+  fail "スタンプ: マウント元不一致時はフル検証に戻る" "呼び出し数=${STAMP4_CALLS}件（1回目=${STAMP1_CALLS}件）"
+fi
+
+# --- --rebuild: スタンプが（直前の呼び出しで）温まっていても必ずフル検証・再ビルドする ---
+STAMP5_EXIT=0
+run_img_case_stamped "$STAMP_TEST_HOME" 1 true "sha256:same" "$IMG_MOUNT_SOURCE" 1 "sha256:same" --rebuild 'true' \
+  >/dev/null 2>&1 || STAMP5_EXIT=$?
+assert_exit_code "スタンプ: --rebuild 指定時も成功する" 0 "$STAMP5_EXIT"
+assert_eq "スタンプ: --rebuild 指定時はスタンプがあってもビルドする" "1" "$(grep -c '^build ' "$IMG_TEST_LOG" || true)"
+
+# --- スタンプ不在（新規の空ディレクトリ）では必ずフル検証になる ---
+STAMP_EMPTY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-stampempty.XXXXXX")"
+STAMP6_EXIT=0
+run_img_case_stamped "$STAMP_EMPTY_HOME" 1 true "sha256:same" "$IMG_MOUNT_SOURCE" 1 "sha256:same" 'true' \
+  >/dev/null 2>&1 || STAMP6_EXIT=$?
+assert_exit_code "スタンプ: スタンプ不在（新規ディレクトリ）でも成功する" 0 "$STAMP6_EXIT"
+STAMP6_CALLS="$(stamp_call_count)"
+if [ "$STAMP6_CALLS" -ge "$STAMP1_CALLS" ]; then
+  pass "スタンプ: スタンプ不在時はフル検証になる（呼び出し数=${STAMP6_CALLS}件）"
+else
+  fail "スタンプ: スタンプ不在時はフル検証になる" "呼び出し数=${STAMP6_CALLS}件（1回目=${STAMP1_CALLS}件）"
+fi
+
+# --- --print-plan はスタンプの有無に関わらず docker に一切触れない ---
+STAMP_PLAN_MARKER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-stampplanmarker.XXXXXX")"
+STAMP_PLAN_MARKER="${STAMP_PLAN_MARKER_DIR}/docker-called-marker"
+cat > "${STAMP_PLAN_MARKER_DIR}/docker" <<FAKE_DOCKER_PLAN_STAMP
+#!/bin/bash
+echo "\$@" >> "${STAMP_PLAN_MARKER}"
+exit 1
+FAKE_DOCKER_PLAN_STAMP
+chmod +x "${STAMP_PLAN_MARKER_DIR}/docker"
+
+(
+  cd "$IMG_REPO" || exit 1
+  DEV_WORKFLOW_STAMP_HOME="$STAMP_TEST_HOME" \
+    PATH="${STAMP_PLAN_MARKER_DIR}:${PATH}" \
+    bash scripts/sandbox-exec.sh --print-plan
+) >/dev/null 2>&1
+
+if [ -f "$STAMP_PLAN_MARKER" ]; then
+  fail "スタンプ: --print-plan はスタンプ有効時も docker を起動しない" "docker が呼ばれました: $(cat "$STAMP_PLAN_MARKER")"
+else
+  pass "スタンプ: --print-plan はスタンプ有効時も docker を起動しない"
+fi
+
+# ---------------------------------------------------------------------------
+# レーンスコープ・キャッシュ（issue #145、docs/adr/0002-sandbox-overhead-reduction.md 決定2）
+#
+# --print-plan のドライラン出力（lane_scope / lane_cache_env）と、dockerfile モードでの
+# 実行時の -e 付与・mkdir 実行を検証する。
+# ---------------------------------------------------------------------------
+
+echo "== レーンスコープ・キャッシュ（issue #145） =="
+
+assert_eq "lane_scope: リポジトリルートは shared" "shared" "$(plan_value lane_scope "$CASE1_OUTPUT")"
+assert_eq "lane_scope: epic worktree も shared" "shared" "$(plan_value lane_scope "$CASE2_OUTPUT")"
+assert_eq "lane_scope: agent worktree（.claude/worktrees/agent-x）は agent-x" "agent-x" "$(plan_value lane_scope "$CASE3_OUTPUT")"
+
+LANE_ENV_UNDECLARED_COUNT="$(printf '%s\n' "$CASE3_OUTPUT" | grep -c '^lane_cache_env=' || true)"
+assert_eq "lane_cache_env: 未宣言時は0行（既定は現行と同一の挙動）" "0" "$LANE_ENV_UNDECLARED_COUNT"
+
+LANE_ENV_OUTPUT="$(
+  cd "$AGENT_WORKTREE_DIR" || exit 1
+  DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV='CARGO_HOME=/root/.cargo/registry' \
+    PATH="${FAKE_BIN_DIR}:${PATH}" bash scripts/sandbox-exec.sh --print-plan
+)"
+assert_eq "lane_cache_env: 宣言時に <ENV>=<path>/lanes/<scope> が出る" \
+  "CARGO_HOME=/root/.cargo/registry/lanes/agent-x" "$(plan_value lane_cache_env "$LANE_ENV_OUTPUT")"
+
+# --- dockerfile モード実行時: agent worktree では -e と mkdir が実際に効く ---
+DOCKER_LANE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-dockerlanecache.XXXXXX")"
+DOCKER_LANE_BASE="${DOCKER_LANE_TMP}/cargo-registry"
+
+: > "$IMG_TEST_LOG"
+: > "$IMG_TEST_RM_LOG"
+: > "$IMG_TEST_RUN_LOG"
+: > "$IMG_TEST_EXEC_LOG"
+printf '0' > "$IMG_TEST_STATE_FILE"
+printf 'false\n' > "$IMG_TEST_RUNNING_FILE"
+
+DOCKER_LANE_EXIT=0
+(
+  cd "$AGENT_WORKTREE_DIR" || exit 1
+  DEV_WORKFLOW_STAMP_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-dockerlanestamp.XXXXXX")" \
+    DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV="CARGO_HOME=${DOCKER_LANE_BASE}" \
+    DW_IMG_LOG="$IMG_TEST_LOG" \
+    DW_IMG_RM_LOG="$IMG_TEST_RM_LOG" \
+    DW_IMG_RUN_LOG="$IMG_TEST_RUN_LOG" \
+    DW_IMG_EXEC_LOG="$IMG_TEST_EXEC_LOG" \
+    DW_IMG_CONTAINER_STATE="$IMG_TEST_STATE_FILE" \
+    DW_IMG_CONTAINER_RUNNING_STATE="$IMG_TEST_RUNNING_FILE" \
+    DW_IMG_IMAGE_EXISTS=0 \
+    PATH="${FAKE_DOCKER_IMAGE_DIR}:${PATH}" \
+    bash scripts/sandbox-exec.sh 'true'
+) >/dev/null 2>&1 || DOCKER_LANE_EXIT=$?
+assert_exit_code "dockerfile: レーンスコープ・キャッシュ宣言時も成功する（agent worktree）" 0 "$DOCKER_LANE_EXIT"
+
+DOCKER_LANE_LAST_LINE="$(tail -n1 "$IMG_TEST_LOG")"
+case "$DOCKER_LANE_LAST_LINE" in
+  *"-e CARGO_HOME=${DOCKER_LANE_BASE}/lanes/agent-x"*)
+    pass "dockerfile: agent worktree では docker exec に -e <ENV>=<path>/lanes/<scope> が渡る" ;;
+  *)
+    fail "dockerfile: agent worktree では docker exec に -e <ENV>=<path>/lanes/<scope> が渡る" \
+      "last_line=[${DOCKER_LANE_LAST_LINE}]" ;;
+esac
+
+if [ -d "${DOCKER_LANE_BASE}/lanes/agent-x" ]; then
+  pass "dockerfile: 実行前にレーン別キャッシュディレクトリが作られる"
+else
+  fail "dockerfile: 実行前にレーン別キャッシュディレクトリが作られる" "作られていません: ${DOCKER_LANE_BASE}/lanes/agent-x"
+fi
 
 # ---------------------------------------------------------------------------
 # ケース10: compose_conflict_warnings（Docker 非依存の衝突検出関数、Task #9）
@@ -3546,10 +3806,14 @@ esac
 # Review #37: mechanical_gate() が check-readability.sh --git だけを実行しており、
 # sandbox-exec.sh 経由でプロジェクトの全テストを走らせていなかった（statically
 # 検証できる範囲に限定し、実際の gh/docker 呼び出しは行わない）。
+#
+# #144でフルスイートはウェーブ（＝タスク）ごとから Epic につき1回に移動した。
+# mechanical_gate() は readability_gate()（wave取り込み検証・可読性ガードのみ）と
+# epic_gate()（Epic統合ゲート・全テスト+可読性ガード）に分割された。
 # ---------------------------------------------------------------------------
 
 echo ""
-echo "== adapters/codex/run-loop.sh（統合ゲートの全テスト実行・回帰防止 #37） =="
+echo "== adapters/codex/run-loop.sh（統合ゲートの全テスト実行・回帰防止 #37, #144） =="
 
 RUN_LOOP_SCRIPT="${REPO_ROOT}/adapters/codex/run-loop.sh"
 
@@ -3568,31 +3832,64 @@ else
   skip "shellcheck: run-loop.sh" "コマンドが見つからないためスキップ"
 fi
 
-# mechanical_gate() の関数本体だけを取り出して静的に検証する
-RL_MECH_GATE_BODY="$(sed -n '/^mechanical_gate() {/,/^}/p' "$RUN_LOOP_SCRIPT")"
-RL_MECH_GATE_ONELINE="$(printf '%s' "$RL_MECH_GATE_BODY" | tr '\n' ' ')"
+# epic_gate()（Epicにつき1回のフルスイート）の関数本体だけを取り出して静的に検証する
+RL_EPIC_GATE_BODY="$(sed -n '/^epic_gate() {/,/^}/p' "$RUN_LOOP_SCRIPT")"
+RL_EPIC_GATE_ONELINE="$(printf '%s' "$RL_EPIC_GATE_BODY" | tr '\n' ' ')"
 
-case "$RL_MECH_GATE_ONELINE" in
+case "$RL_EPIC_GATE_ONELINE" in
   *"sandbox-exec.sh"*'"$TEST_CMD"'*)
-    pass "run-loop.sh: mechanical_gate() が sandbox-exec.sh に \$TEST_CMD を渡している" ;;
+    pass "run-loop.sh: epic_gate() が sandbox-exec.sh に \$TEST_CMD を渡している（#144）" ;;
   *)
-    fail "run-loop.sh: mechanical_gate() が sandbox-exec.sh に \$TEST_CMD を渡している" "$RL_MECH_GATE_BODY" ;;
+    fail "run-loop.sh: epic_gate() が sandbox-exec.sh に \$TEST_CMD を渡している（#144）" "$RL_EPIC_GATE_BODY" ;;
 esac
 
-case "$RL_MECH_GATE_ONELINE" in
+case "$RL_EPIC_GATE_ONELINE" in
+  *"count-skips.sh"*)
+    pass "run-loop.sh: epic_gate() が count-skips.sh を呼んでいる（#144）" ;;
+  *)
+    fail "run-loop.sh: epic_gate() が count-skips.sh を呼んでいる（#144）" "$RL_EPIC_GATE_BODY" ;;
+esac
+
+case "$RL_EPIC_GATE_ONELINE" in
   *"check-readability.sh"*)
-    pass "run-loop.sh: mechanical_gate() が check-readability.sh を呼んでいる" ;;
+    pass "run-loop.sh: epic_gate() が check-readability.sh を呼んでいる（#144）" ;;
   *)
-    fail "run-loop.sh: mechanical_gate() が check-readability.sh を呼んでいる" "$RL_MECH_GATE_BODY" ;;
+    fail "run-loop.sh: epic_gate() が check-readability.sh を呼んでいる（#144）" "$RL_EPIC_GATE_BODY" ;;
 esac
 
-# テストと可読性ガードが && で連結され、テスト失敗時に可読性ガードへ進まない（AND判定）こと
-case "$RL_MECH_GATE_ONELINE" in
-  *"sandbox-exec.sh"*'&&'*"check-readability.sh"*)
-    pass "run-loop.sh: mechanical_gate() はテストと可読性ガードを && で連結している" ;;
+# readability_gate()（wave取り込み検証。可読性ガードのみ、フルスイートは走らせない）の
+# 関数本体だけを取り出して静的に検証する
+RL_READABILITY_GATE_BODY="$(sed -n '/^readability_gate() {/,/^}/p' "$RUN_LOOP_SCRIPT")"
+RL_READABILITY_GATE_ONELINE="$(printf '%s' "$RL_READABILITY_GATE_BODY" | tr '\n' ' ')"
+
+case "$RL_READABILITY_GATE_ONELINE" in
+  *"check-readability.sh"*)
+    pass "run-loop.sh: readability_gate() が check-readability.sh を呼んでいる（#144）" ;;
   *)
-    fail "run-loop.sh: mechanical_gate() はテストと可読性ガードを && で連結している" "$RL_MECH_GATE_BODY" ;;
+    fail "run-loop.sh: readability_gate() が check-readability.sh を呼んでいる（#144）" "$RL_READABILITY_GATE_BODY" ;;
 esac
+
+case "$RL_READABILITY_GATE_ONELINE" in
+  *"sandbox-exec.sh"*)
+    fail "run-loop.sh: readability_gate() はプロジェクトの全テストを走らせない（Epic統合ゲートへ集約。#144）" "$RL_READABILITY_GATE_BODY" ;;
+  *)
+    pass "run-loop.sh: readability_gate() はプロジェクトの全テストを走らせない（Epic統合ゲートへ集約。#144）" ;;
+esac
+
+# 取り込み成功時に呼ばれるのが readability_gate() であり、旧 mechanical_gate() が
+# 残っていない（呼び出し漏れの回帰防止）こと
+if grep -q 'mechanical_gate' "$RUN_LOOP_SCRIPT"; then
+  fail "run-loop.sh: 旧関数名 mechanical_gate が残っていない（#144）" "$(grep -n 'mechanical_gate' "$RUN_LOOP_SCRIPT")"
+else
+  pass "run-loop.sh: 旧関数名 mechanical_gate が残っていない（#144）"
+fi
+
+if grep -q 'readability_gate' "$RUN_LOOP_SCRIPT" && grep -q '&& readability_gate; then' "$RUN_LOOP_SCRIPT"; then
+  pass "run-loop.sh: レーン取り込み成功後に readability_gate() を呼んでいる（#144）"
+else
+  fail "run-loop.sh: レーン取り込み成功後に readability_gate() を呼んでいる（#144）" \
+    "$(grep -n 'readability_gate' "$RUN_LOOP_SCRIPT")"
+fi
 
 # DEV_WORKFLOW_TEST_CMD 未設定時は、gh/git を呼ぶ前に停止すること
 RL_FAKE_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-fakebin-rl.XXXXXX")"
@@ -4095,22 +4392,17 @@ esac
 
 # ---------------------------------------------------------------------------
 # skills-codex/dev-workflow-run/SKILL.md: 統合ゲートの記述が Claude 版と揃っていること
-# （回帰防止 #37）
+# （回帰防止 #37。#144でフルスイートはEpicにつき1回の「Epic 統合ゲート」に移動したため、
+# Step 5 は取り込み検証＝可読性ガードだけを見る）
 # ---------------------------------------------------------------------------
 
 echo ""
-echo "== skills-codex/dev-workflow-run/SKILL.md（統合ゲートの記述・回帰防止 #37） =="
+echo "== skills-codex/dev-workflow-run/SKILL.md（統合ゲートの記述・回帰防止 #37, #144） =="
 
 CODEX_RUN_SKILL="${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md"
 
 CRS_STEP5="$(awk '/^### Step 5:/{f=1} /^### Step 6:/{f=0} f' "$CODEX_RUN_SKILL")"
-
-case "$CRS_STEP5" in
-  *"sandbox-exec.sh"*)
-    pass "SKILL.md(codex): Step 5 が sandbox-exec.sh で全テストを実行する記述を含む" ;;
-  *)
-    fail "SKILL.md(codex): Step 5 が sandbox-exec.sh で全テストを実行する記述を含む" "$CRS_STEP5" ;;
-esac
+CRS_EPICGATE="$(awk '/^## Epic 統合ゲート/{f=1} /^## Epic一括レビュー/{f=0} f' "$CODEX_RUN_SKILL")"
 
 case "$CRS_STEP5" in
   *"check-readability.sh"*)
@@ -4120,17 +4412,31 @@ case "$CRS_STEP5" in
 esac
 
 case "$CRS_STEP5" in
-  *"対象の選択を"*"generator に委ねない"*)
-    pass "SKILL.md(codex): Step 5 が「対象の選択をgeneratorに委ねない」を含む" ;;
+  *"sandbox-exec.sh"*)
+    fail "SKILL.md(codex): Step 5 はプロジェクトの全テストを走らせない（Epic統合ゲートへ集約。#144）" "$CRS_STEP5" ;;
   *)
-    fail "SKILL.md(codex): Step 5 が「対象の選択をgeneratorに委ねない」を含む" "$CRS_STEP5" ;;
+    pass "SKILL.md(codex): Step 5 はプロジェクトの全テストを走らせない（Epic統合ゲートへ集約。#144）" ;;
 esac
 
-case "$CRS_STEP5" in
-  *"SKIP を通過扱いにしない"*)
-    pass "SKILL.md(codex): Step 5 が「SKIPを通過扱いにしない」を含む" ;;
+case "$CRS_EPICGATE" in
+  *"sandbox-exec.sh"*)
+    pass "SKILL.md(codex): Epic統合ゲートが sandbox-exec.sh で全テストを実行する記述を含む（#144）" ;;
   *)
-    fail "SKILL.md(codex): Step 5 が「SKIPを通過扱いにしない」を含む" "$CRS_STEP5" ;;
+    fail "SKILL.md(codex): Epic統合ゲートが sandbox-exec.sh で全テストを実行する記述を含む（#144）" "$CRS_EPICGATE" ;;
+esac
+
+case "$CRS_EPICGATE" in
+  *"対象の選択を"*"generator に委ねない"*)
+    pass "SKILL.md(codex): Epic統合ゲートが「対象の選択をgeneratorに委ねない」を含む（#144）" ;;
+  *)
+    fail "SKILL.md(codex): Epic統合ゲートが「対象の選択をgeneratorに委ねない」を含む（#144）" "$CRS_EPICGATE" ;;
+esac
+
+case "$CRS_EPICGATE" in
+  *"SKIP を通過扱いにしない"*)
+    pass "SKILL.md(codex): Epic統合ゲートが「SKIPを通過扱いにしない」を含む（#144）" ;;
+  *)
+    fail "SKILL.md(codex): Epic統合ゲートが「SKIPを通過扱いにしない」を含む（#144）" "$CRS_EPICGATE" ;;
 esac
 
 if grep -q '^EPIC_NUMBER' "$CODEX_RUN_SKILL"; then
@@ -6466,7 +6772,8 @@ echo "== ドキュメント（共通ルール・generator・README）とアダ�
 
 DOC55_CLAUDE_PLUGIN_JSON="${REPO_ROOT}/.claude-plugin/plugin.json"
 DOC55_CODEX_PLUGIN_JSON="${REPO_ROOT}/.codex-plugin/plugin.json"
-DOC55_INSTRUCTIONS="${REPO_ROOT}/core/instructions.md"
+# core/instructions.md 本体だけでなく core/references/*.md への退避先も見る（#146）。
+DOC55_INSTRUCTIONS="$CORE_INSTRUCTIONS_FLAT"
 DOC55_GENERATOR_ROLE="${REPO_ROOT}/core/roles/generator.md"
 DOC55_README="${REPO_ROOT}/README.md"
 DOC55_AGENT_GENERATOR="${REPO_ROOT}/agents/generator.md"
@@ -6816,14 +7123,15 @@ echo "== 「過剰実装・過剰設計」をレビュー観点に追加（#70�
 # 検出観点を core/roles/evaluator.md と core/instructions.md に規定する。
 # core/instructions.md は agents/*.md と codex-agents/*.toml の全ファイルに反映される。
 
-DOC70_EVALUATOR_ROLE="${REPO_ROOT}/core/roles/evaluator.md"
 DOC70_INSTRUCTIONS="${REPO_ROOT}/core/instructions.md"
 DOC70_AGENT_EVALUATOR="${REPO_ROOT}/agents/evaluator.md"
 DOC70_CODEX_AGENT_EVALUATOR="${REPO_ROOT}/codex-agents/evaluator.toml"
 
 # --- core/roles/evaluator.md のレビューチェックリストに「過剰実装・過剰設計」の小節がある ---
+# （Task #151で core/references/review-checklist-over-engineering.md へ退避されたため、
+#   平坦化ビュー EVALUATOR_ROLE_FLAT を見る）
 
-if grep -Fq '#### 過剰実装・過剰設計' "$DOC70_EVALUATOR_ROLE"; then
+if grep -Fq '#### 過剰実装・過剰設計' "$EVALUATOR_ROLE_FLAT"; then
   pass "core/roles/evaluator.md: レビューチェックリストに「過剰実装・過剰設計」の小節がある（#70）"
 else
   fail "core/roles/evaluator.md: レビューチェックリストに「過剰実装・過剰設計」の小節がある（#70）"
@@ -6831,7 +7139,7 @@ fi
 
 # --- チェックリストに「削ってはいけないものを削っていないか」の項目が含まれている ---
 
-if grep -Fq 'テスト・回帰確認・検証・セキュリティ・データ損失の扱いを「削減」していないか' "$DOC70_EVALUATOR_ROLE"; then
+if grep -Fq 'テスト・回帰確認・検証・セキュリティ・データ損失の扱いを「削減」していないか' "$EVALUATOR_ROLE_FLAT"; then
   pass "core/roles/evaluator.md: 「削ってはいけないものを削っていないか」の項目が含まれている（#70）"
 else
   fail "core/roles/evaluator.md: 「削ってはいけないものを削っていないか」の項目が含まれている（#70）"
@@ -6849,9 +7157,10 @@ else
 fi
 
 # --- 生成物（agents/evaluator.md・codex-agents/evaluator.toml）に反映されている ---
+# （agents/evaluator.md は core/references/*.md を束ねないため AGENT_EVALUATOR_FLAT を見る）
 
 if [ -f "$DOC70_AGENT_EVALUATOR" ] \
-  && grep -Fq '#### 過剰実装・過剰設計' "$DOC70_AGENT_EVALUATOR" \
+  && grep -Fq '#### 過剰実装・過剰設計' "$AGENT_EVALUATOR_FLAT" \
   && grep -Fq '過剰実装・過剰設計の重要度の当てはめ' "$DOC70_AGENT_EVALUATOR"; then
   pass "agents/evaluator.md: 正本の「過剰実装・過剰設計」追記内容が反映されている（#70）"
 else
@@ -6860,7 +7169,7 @@ else
 fi
 
 if [ -f "$DOC70_CODEX_AGENT_EVALUATOR" ] \
-  && grep -Fq '#### 過剰実装・過剰設計' "$DOC70_CODEX_AGENT_EVALUATOR" \
+  && grep -Fq '#### 過剰実装・過剰設計' "$CODEX_AGENT_EVALUATOR_FLAT" \
   && grep -Fq '過剰実装・過剰設計の重要度の当てはめ' "$DOC70_CODEX_AGENT_EVALUATOR"; then
   pass "codex-agents/evaluator.toml: 正本の「過剰実装・過剰設計」追記内容が反映されている（#70）"
 else
@@ -7166,6 +7475,134 @@ else
   fail "codex-agents/generator.toml: 正本のcontext7使いどころ追記内容が反映されている（#72）" \
     "見つかりません: ${DOC72_CODEX_AGENT_GENERATOR}"
 fi
+
+echo "== generator に LSP ツールを与え、探索のターン数を減らす（#154） =="
+
+# Epic #143（#154）: generatorのfrontmatterにLSPのMCPツールを追加し、正本
+# （core/roles/generator.md）に「Grepの総当たりより先にLSPを引く」使用方針・
+# 「LSP（ホスト）とsandbox-exec.sh（コンテナ）の役割分担」・「未導入なら従来どおり」を明記する。
+# Codex側はLSPの同等機能が確認できていないため、宣言せず「非対応」の事実を残す。
+
+DOC154_GENERATOR_ROLE="${REPO_ROOT}/core/roles/generator.md"
+DOC154_OVERLAY_GENERATOR="${REPO_ROOT}/adapters/claude/overlays/generator.md"
+DOC154_CODEX_OVERLAY_GENERATOR="${REPO_ROOT}/adapters/codex/overlays/generator.toml"
+DOC154_AGENT_GENERATOR="${REPO_ROOT}/agents/generator.md"
+DOC154_CODEX_AGENT_GENERATOR="${REPO_ROOT}/codex-agents/generator.toml"
+DOC154_README="${REPO_ROOT}/README.md"
+
+# --- adapters/claude/overlays/generator.md: frontmatter の tools: に LSP ツールが含まれる ---
+
+if grep -Fq 'mcp__typescript-lsp__' "$DOC154_OVERLAY_GENERATOR" \
+  && grep -Fq 'mcp__lua-lsp__' "$DOC154_OVERLAY_GENERATOR" \
+  && grep -Fq 'mcp__gopls-lsp__' "$DOC154_OVERLAY_GENERATOR" \
+  && grep -Fq 'mcp__rust-analyzer-lsp__' "$DOC154_OVERLAY_GENERATOR"; then
+  pass "adapters/claude/overlays/generator.md: tools: に LSP ツール（typescript/lua/gopls/rust-analyzer）が含まれる（#154）"
+else
+  fail "adapters/claude/overlays/generator.md: tools: に LSP ツール（typescript/lua/gopls/rust-analyzer）が含まれる（#154）" \
+    "見つかりません: ${DOC154_OVERLAY_GENERATOR}"
+fi
+
+# --- 生成物（agents/generator.md）にも反映されている ---
+
+if [ -f "$DOC154_AGENT_GENERATOR" ] && grep -Fq 'mcp__typescript-lsp__' "$DOC154_AGENT_GENERATOR"; then
+  pass "agents/generator.md: 正本（overlay）の LSP ツール追加が反映されている（#154）"
+else
+  fail "agents/generator.md: 正本（overlay）の LSP ツール追加が反映されている（#154）" \
+    "見つかりません: ${DOC154_AGENT_GENERATOR}"
+fi
+
+# --- core/roles/generator.md: 「Grepの総当たりより先にLSPを引く」使用方針が書かれている ---
+
+if grep -Fq 'LSP' "$DOC154_GENERATOR_ROLE" \
+  && grep -Fq 'Grep の総当たり' "$DOC154_GENERATOR_ROLE" \
+  && grep -Fq '先に' "$DOC154_GENERATOR_ROLE"; then
+  pass "core/roles/generator.md: 「Grepの総当たりより先にLSPを引く」使用方針が書かれている（#154）"
+else
+  fail "core/roles/generator.md: 「Grepの総当たりより先にLSPを引く」使用方針が書かれている（#154）"
+fi
+
+# --- core/roles/generator.md: 「探索はLSP（ホスト）/ビルド・テストはsandbox-exec.sh（コンテナ）」の役割分担 ---
+
+if grep -Fq 'ホスト側' "$DOC154_GENERATOR_ROLE" \
+  && grep -Eq 'sandbox-exec\.sh|Docker sandbox' "$DOC154_GENERATOR_ROLE"; then
+  pass "core/roles/generator.md: LSP（ホスト）とビルド・テスト（コンテナ）の役割分担が明記されている（#154）"
+else
+  fail "core/roles/generator.md: LSP（ホスト）とビルド・テスト（コンテナ）の役割分担が明記されている（#154）"
+fi
+
+# --- core/roles/generator.md: LSPが使えない環境でも従来どおり動作する旨が明記されている ---
+
+DOC154_LSP_SECTION="$(awk '/定義・参照の追跡は、Grep の総当たりより先に LSP を引く/,/^### [0-9]/' "$DOC154_GENERATOR_ROLE")"
+
+if printf '%s' "$DOC154_LSP_SECTION" | grep -Fq '未導入なら従来どおり動く' \
+  && printf '%s' "$DOC154_LSP_SECTION" | grep -Fq 'Grep' \
+  && printf '%s' "$DOC154_LSP_SECTION" | grep -Fq '任意依存'; then
+  pass "core/roles/generator.md: LSPが使えない環境でも従来どおり動作する旨が明記されている（#154）"
+else
+  fail "core/roles/generator.md: LSPが使えない環境でも従来どおり動作する旨が明記されている（#154）" \
+    "section=[${DOC154_LSP_SECTION}]"
+fi
+
+# --- 生成物（agents/generator.md）にもLSP探索手順の記述が反映されている ---
+
+if [ -f "$DOC154_AGENT_GENERATOR" ] && grep -Fq 'Grep の総当たりより先に LSP を引く' "$DOC154_AGENT_GENERATOR"; then
+  pass "agents/generator.md: 正本のLSP探索手順の記述が反映されている（#154）"
+else
+  fail "agents/generator.md: 正本のLSP探索手順の記述が反映されている（#154）" \
+    "見つかりません: ${DOC154_AGENT_GENERATOR}"
+fi
+
+# --- Codex側: 同等機能が無い事実が明記されている（推測で書かず、非対応と明記） ---
+
+if grep -Fq 'Codex 側には同等の機能が無い' "$DOC154_CODEX_OVERLAY_GENERATOR"; then
+  pass "adapters/codex/overlays/generator.toml: LSPのCodex側非対応の事実が明記されている（#154）"
+else
+  fail "adapters/codex/overlays/generator.toml: LSPのCodex側非対応の事実が明記されている（#154）"
+fi
+
+if [ -f "$DOC154_CODEX_AGENT_GENERATOR" ] && grep -Fq 'Codex 側には同等の機能が無い' "$DOC154_CODEX_AGENT_GENERATOR"; then
+  pass "codex-agents/generator.toml: 正本のCodex非対応の記述が反映されている（#154）"
+else
+  fail "codex-agents/generator.toml: 正本のCodex非対応の記述が反映されている（#154）" \
+    "見つかりません: ${DOC154_CODEX_AGENT_GENERATOR}"
+fi
+
+# --- Codex側にはLSPのmcp_serversを宣言していない（推測で結線しない） ---
+
+if grep -Eq '^\[mcp_servers\.(typescript|lua|gopls|rust-analyzer)' "$DOC154_CODEX_OVERLAY_GENERATOR"; then
+  fail "adapters/codex/overlays/generator.toml: 未確認のLSP mcp_serversを宣言していない（#154）" \
+    "$(grep -E '^\[mcp_servers\.' "$DOC154_CODEX_OVERLAY_GENERATOR")"
+else
+  pass "adapters/codex/overlays/generator.toml: 未確認のLSP mcp_serversを宣言していない（#154）"
+fi
+
+# --- README.md: 利用者側の有効化方法（enabledPlugins）が「任意依存の外部ツール」節に書かれている ---
+
+if grep -Fq 'enabledPlugins' "$DOC154_README" && grep -Fq 'treflebonbon/dotfiles' "$DOC154_README"; then
+  pass "README.md: LSPの有効化方法（enabledPlugins・確認元）が明記されている（#154）"
+else
+  fail "README.md: LSPの有効化方法（enabledPlugins・確認元）が明記されている（#154）"
+fi
+
+# --- README.md: 「推奨settings.json」節にもenabledPluginsの例が書かれている ---
+
+DOC154_README_SETTINGS_SECTION="$(awk '/### 推奨 settings.json/,/^### パーミッション設定/' "$DOC154_README")"
+
+if printf '%s' "$DOC154_README_SETTINGS_SECTION" | grep -Fq 'enabledPlugins'; then
+  pass "README.md: 「推奨settings.json」節にenabledPluginsの例がある（#154）"
+else
+  fail "README.md: 「推奨settings.json」節にenabledPluginsの例がある（#154）"
+fi
+
+# --- build.sh --check が通る（生成物の直接編集が無いことの検査） ---
+
+DOC154_CLAUDE_BUILD_CHECK="$(bash "${REPO_ROOT}/adapters/claude/build.sh" --check 2>&1)"
+DOC154_CLAUDE_BUILD_CHECK_EXIT=$?
+assert_exit_code "adapters/claude/build.sh --check が通る（#154）" 0 "$DOC154_CLAUDE_BUILD_CHECK_EXIT"
+
+DOC154_CODEX_BUILD_CHECK="$(bash "${REPO_ROOT}/adapters/codex/build.sh" --check 2>&1)"
+DOC154_CODEX_BUILD_CHECK_EXIT=$?
+assert_exit_code "adapters/codex/build.sh --check が通る（#154）" 0 "$DOC154_CODEX_BUILD_CHECK_EXIT"
 
 echo "== Epic一括レビューに「変更50ファイル超」しきい値の3分岐を入れる（#74） =="
 
@@ -7868,9 +8305,16 @@ fi
 # `skills/run/SKILL.md:378-381`（修正前）は generator に対して「あなたの isolation
 # worktree は WAVE_BASE から分岐している」という偽の前提を伝えつつ fetch/checkout/pull を
 # 禁止しており、ウェーブ2以降で必ずベース検証が失敗する（詳細は docs/dev-workflow-handover.md
-# のH1節）。fetch/checkout/pullの禁止は維持したまま git reset --hard <WAVE_BASE> のみを
-# 明示的に許可し、実装着手前に git status --short / git reset --hard /
-# git merge-base --is-ancestor / git log --oneline -1 をこの順で実行させる。
+# のH1節）。fetch/checkout/pullの禁止は維持したまま実装着手前に git status --short /
+# [ベース合わせコマンド] / git merge-base --is-ancestor / git log --oneline -1 を
+# この順で実行させる。
+#
+# ベース合わせコマンドは当初 `git reset --hard <WAVE_BASE>` のみを例外として許可していたが、
+# Task #152 で `git merge --ff-only <WAVE_BASE>` に変更した。`git reset --hard` は一般的な
+# 安全設定（permission deny）でブロックされる代表的なコマンドであり、実際に本Epicのウェーブ2で
+# 全3レーンがこれにより着手不能になって停止した実績があるため（`merge --ff-only` は破壊的でなく
+# ブロックされにくいうえ、isolation worktreeの分岐元はWAVE_BASEの祖先であるためfast-forwardは
+# 必ず成功する）。
 # ---------------------------------------------------------------------------
 
 echo ""
@@ -7906,9 +8350,9 @@ assert_order() {
 # --- skills/run/SKILL.md: Step 3 プロンプト雛形に4手順がこの順で現れる ---
 RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$RUN_SKILL_FLAT")"
 
-assert_order "SKILL.md: Step 3 雛形に git status --short → git reset --hard → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89）" \
+assert_order "SKILL.md: Step 3 雛形に git status --short → git merge --ff-only → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89）" \
   "$RS_STEP3" \
-  "git status --short" "git reset --hard" "git merge-base --is-ancestor" "git log --oneline -1"
+  "git status --short" "git merge --ff-only" "git merge-base --is-ancestor" "git log --oneline -1"
 
 case "$RS_STEP3" in
   *'あなたの isolation worktree は WAVE_BASE から分岐している'*)
@@ -7928,9 +8372,9 @@ esac
 # --- skills-codex/dev-workflow-run/SKILL.md: Step 3 にも同じ4手順がこの順で現れる ---
 CRS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md")"
 
-assert_order "SKILL.md(codex): Step 3 に git status --short → git reset --hard → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89）" \
+assert_order "SKILL.md(codex): Step 3 に git status --short → git merge --ff-only → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89）" \
   "$CRS_STEP3" \
-  "git status --short" "git reset --hard" "git merge-base --is-ancestor" "git log --oneline -1"
+  "git status --short" "git merge --ff-only" "git merge-base --is-ancestor" "git log --oneline -1"
 
 case "$CRS_STEP3" in
   *'git fetch'*'git checkout'*'git pull'*'実行しないこと'*)
@@ -7949,13 +8393,13 @@ else
 fi
 
 # 手順の順序は「実行する具体的なコマンド列」（```bash フェンス内）だけで検査する。
-# 節の冒頭には reset --hard の許可理由を説明する散文（同じ文字列を含む）があるため、
-# 節全体を対象にすると散文側の言及に引きずられて誤検知する。
+# 節の冒頭には merge --ff-only を選んだ理由（reset --hard を使わない理由）を説明する散文
+# （同じ文字列を含む）があるため、節全体を対象にすると散文側の言及に引きずられて誤検知する。
 GEN_STEP0_FENCE="$(printf '%s\n' "$GEN_STEP0" | awk '/^```bash/{f=1;next} /^```/{f=0} f')"
 
-assert_order "core/roles/generator.md: 「0. 」節のコマンド列に git status --short → git reset --hard → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89）" \
+assert_order "core/roles/generator.md: 「0. 」節のコマンド列に git status --short → git merge --ff-only → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89）" \
   "$GEN_STEP0_FENCE" \
-  "git status --short" "git reset --hard" "git merge-base --is-ancestor" "git log --oneline -1"
+  "git status --short" "git merge --ff-only" "git merge-base --is-ancestor" "git log --oneline -1"
 
 case "$GEN_STEP0" in
   *'実装着手前に'*'1回だけ'*)
@@ -7965,17 +8409,24 @@ case "$GEN_STEP0" in
 esac
 
 case "$GEN_STEP0" in
-  *'コミットを積んだ後に再実行してはならない'*)
-    pass "core/roles/generator.md: 「0. 」節に『コミット後に再実行してはならない』の明記がある（#89）" ;;
+  *'コミットを積んだ後に再実行する必要は無い'*)
+    pass "core/roles/generator.md: 「0. 」節に『コミット後に再実行する必要は無い』の明記がある（#89, #152）" ;;
   *)
-    fail "core/roles/generator.md: 「0. 」節に『コミット後に再実行してはならない』の明記がある（#89）" "$GEN_STEP0" ;;
+    fail "core/roles/generator.md: 「0. 」節に『コミット後に再実行する必要は無い』の明記がある（#89, #152）" "$GEN_STEP0" ;;
 esac
 
 case "$GEN_STEP0" in
-  *'`git reset --hard <WAVE_BASE>` のみを例外として許可する'*)
-    pass "core/roles/generator.md: 「0. 」節に reset --hard のみを例外として許可する旨の明記がある（#89）" ;;
+  *'`git merge --ff-only <WAVE_BASE>` のみを例外として許可する'*)
+    pass "core/roles/generator.md: 「0. 」節に merge --ff-only のみを例外として許可する旨の明記がある（#152）" ;;
   *)
-    fail "core/roles/generator.md: 「0. 」節に reset --hard のみを例外として許可する旨の明記がある（#89）" "$GEN_STEP0" ;;
+    fail "core/roles/generator.md: 「0. 」節に merge --ff-only のみを例外として許可する旨の明記がある（#152）" "$GEN_STEP0" ;;
+esac
+
+case "$GEN_STEP0" in
+  *'git reset --hard'*'一般的な安全設定'*)
+    pass "core/roles/generator.md: 「0. 」節に reset --hard を使わない理由（permission denyでの着手不能実績）が明記されている（#152）" ;;
+  *)
+    fail "core/roles/generator.md: 「0. 」節に reset --hard を使わない理由（permission denyでの着手不能実績）が明記されている（#152）" "$GEN_STEP0" ;;
 esac
 
 case "$GEN_STEP0" in
@@ -8005,6 +8456,77 @@ case "$README_WAVE_SECTION" in
   *)
     fail "README.md: 「ウェーブと wave ブランチ」節が分岐元はハーネス依存でWAVE_BASEとは限らない旨に改められている（#89）" \
       "$README_WAVE_SECTION" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# H152（Task #152）: WAVE_BASEへのベース合わせ手段を git reset --hard から
+# git merge --ff-only へ変更する（回帰防止）。
+#
+# 背景: git reset --hard は一般的な安全設定（permission deny）でブロックされる代表的な
+# コマンドであり、実際に本Epicのウェーブ2で全3レーンが着手不能になって停止した。
+# isolation worktreeの分岐元はWAVE_BASEの祖先であるため、破壊的でない git merge --ff-only
+# で必ずfast-forwardできる。この回帰テストは「reset --hardが実行コマンドとして規定されて
+# いないこと」と「merge --ff-onlyが実行コマンドとして規定されていること」を機械的に検査する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== H152: WAVE_BASEへのベース合わせ手段が reset --hard から merge --ff-only へ変更されている =="
+
+# --- 実行コマンド行（`$ git ...` の形でechoされている行）だけを対象に、
+#     reset --hard が実行コマンドとして残っていないことを検査する ---
+for h152_pair in \
+  "skills/run/SKILL.md:${RS_STEP3}" \
+  "skills-codex/dev-workflow-run/SKILL.md:${CRS_STEP3}" \
+  "core/roles/generator.md:${GEN_STEP0_FENCE}"; do
+  h152_f="${h152_pair%%:*}"
+  h152_text="${h152_pair#*:}"
+  h152_exec_lines="$(printf '%s\n' "$h152_text" | grep -F "echo '\$ git")"
+  if printf '%s\n' "$h152_exec_lines" | grep -Fq 'reset --hard'; then
+    fail "${h152_f}: WAVE_BASE合わせの実行コマンド行に reset --hard が残っていない（#152）" \
+      "$h152_exec_lines"
+  else
+    pass "${h152_f}: WAVE_BASE合わせの実行コマンド行に reset --hard が残っていない（#152）"
+  fi
+  if printf '%s\n' "$h152_exec_lines" | grep -Fq 'merge --ff-only'; then
+    pass "${h152_f}: WAVE_BASE合わせの実行コマンド行に merge --ff-only が規定されている（#152）"
+  else
+    fail "${h152_f}: WAVE_BASE合わせの実行コマンド行に merge --ff-only が規定されている（#152）" \
+      "$h152_exec_lines"
+  fi
+done
+
+# --- README.md: WAVE_BASE合わせの説明箇所が merge --ff-only を規定し、
+#     reset --hard を使わない理由（permission denyでの着手不能実績）に触れている ---
+README_WAVE_BASE_ALIGN="$(awk '/^### ウェーブと wave ブランチ/{f=1} /^### `--ff-only`/{f=0} f' "${REPO_ROOT}/README.md")"
+case "$README_WAVE_BASE_ALIGN" in
+  *'`git merge --ff-only "$WAVE_BASE"`'*)
+    pass "README.md: WAVE_BASE合わせの説明に merge --ff-only が規定されている（#152）" ;;
+  *)
+    fail "README.md: WAVE_BASE合わせの説明に merge --ff-only が規定されている（#152）" \
+      "$README_WAVE_BASE_ALIGN" ;;
+esac
+case "$README_WAVE_BASE_ALIGN" in
+  *'`git reset --hard "$WAVE_BASE"`'*)
+    fail "README.md: WAVE_BASE合わせの説明に reset --hard が実行コマンドとして残っていない（#152）" \
+      "$README_WAVE_BASE_ALIGN" ;;
+  *)
+    pass "README.md: WAVE_BASE合わせの説明に reset --hard が実行コマンドとして残っていない（#152）" ;;
+esac
+if printf '%s\n' "$README_WAVE_BASE_ALIGN" | tr -s ' \n' ' ' | grep -Fq 'ウェーブ2で 全レーンがこれにより着手不能になって停止した'; then
+  pass "README.md: reset --hard を使わない理由（実測の着手不能実績）が明記されている（#152）"
+else
+  fail "README.md: reset --hard を使わない理由（実測の着手不能実績）が明記されている（#152）" \
+    "$README_WAVE_BASE_ALIGN"
+fi
+
+# --- core/instructions.md「ブランチ戦略」節: reset --hardを使わない理由とmerge --ff-onlyの規定 ---
+H152_INSTR_BRANCH="$(awk '/^## ブランチ戦略/{f=1} /^### レーン → wave ブランチ/{f=0} f' "${REPO_ROOT}/core/instructions.md")"
+case "$H152_INSTR_BRANCH" in
+  *'`git merge --ff-only <WAVE_BASE>`'*'`git reset --hard` は使わない'*)
+    pass "core/instructions.md: ブランチ戦略節が merge --ff-only を規定し reset --hard を使わない旨を明記している（#152）" ;;
+  *)
+    fail "core/instructions.md: ブランチ戦略節が merge --ff-only を規定し reset --hard を使わない旨を明記している（#152）" \
+      "$H152_INSTR_BRANCH" ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -8628,7 +9150,7 @@ GEN_STEP0_H2="$(awk '/^### 0\. /{f=1} /^### 1\. /{f=0} f' "${REPO_ROOT}/core/rol
 
 assert_order "core/roles/generator.md: H2向け編集後も「0. 」節のコマンド列の順序（#89）が保たれている（#94）" \
   "$(printf '%s\n' "$GEN_STEP0_H2" | awk '/^```bash/{f=1;next} /^```/{f=0} f')" \
-  "git status --short" "git reset --hard" "git merge-base --is-ancestor" "git log --oneline -1"
+  "git status --short" "git merge --ff-only" "git merge-base --is-ancestor" "git log --oneline -1"
 
 # --- README.md: 「この1回の準備がウェーブ・レーンをまたいで効く」が消えている ---
 if grep -Fq -- 'この1回の準備がウェーブ・レーンをまたいで効く' "${REPO_ROOT}/README.md"; then
@@ -9029,14 +9551,16 @@ case "$H97_GEN_SKIP" in
       "$H97_GEN_SKIP" ;;
 esac
 
-# --- core/roles/generator.md: 完了報告テンプレートがcount-skips.shの出力を貼る形になっている ---
+# --- core/roles/generator.md: 完了報告テンプレートのSKIP件数欄がcount-skips.shの出力キー（skips=）
+#     と同じ命名になっている（Task #156で「count-skips.shの出力をそのまま貼る」形から
+#     「証跡ファイルへの参照+1行」形へ変わったため、キー名の一致で検証する） ---
 H97_GEN_REPORT="$(awk '/^## 完了報告/{f=1} f' "${REPO_ROOT}/core/roles/generator.md")"
 
 case "$H97_GEN_REPORT" in
-  *'count-skips.sh'*'skips=[件数 または unknown]'*)
-    pass "core/roles/generator.md: 完了報告テンプレートのSKIP件数欄がcount-skips.shの出力を貼る形になっている（#97）" ;;
+  *'skips=[件数|unknown]'*)
+    pass "core/roles/generator.md: 完了報告テンプレートのSKIP件数欄がcount-skips.shの出力キー（skips=）と同じ命名になっている（#97/#156）" ;;
   *)
-    fail "core/roles/generator.md: 完了報告テンプレートのSKIP件数欄がcount-skips.shの出力を貼る形になっている（#97）" \
+    fail "core/roles/generator.md: 完了報告テンプレートのSKIP件数欄がcount-skips.shの出力キー（skips=）と同じ命名になっている（#97/#156）" \
       "$H97_GEN_REPORT" ;;
 esac
 
@@ -9080,36 +9604,36 @@ case "$H97_RS_SKIPPATTERN" in
       "$H97_RS_SKIPPATTERN" ;;
 esac
 
-# --- skills/run/SKILL.md: Step 6（統合ゲート）がrun自身でcount-skips.shを実行し、
-#     0件でも必ず表示し、レーンの自己申告と食い違った場合は統合ゲートの値を採用する ---
-H97_RS_STEP6="$(awk '/^### Step 6:/{f=1} /^### Step 7:/{f=0} f' "$RUN_SKILL_FLAT")"
+# --- skills/run/SKILL.md: 「Epic 統合ゲート」節（フルスイートはEpicにつき1回に集約。#144）が
+#     run自身でcount-skips.shを実行し、0件でも必ず表示する ---
+H97_RS_EPICGATE="$(awk '/^## Epic 統合ゲート/{f=1} /^## Epic一括レビュー/{f=0} f' "$RUN_SKILL_FLAT")"
 
-case "$H97_RS_STEP6" in
+case "$H97_RS_EPICGATE" in
   *'tee'*'count-skips.sh'*)
-    pass "SKILL.md: Step 6 統合ゲートがテスト出力をteeで保存しcount-skips.shで数えている（#97）" ;;
+    pass "SKILL.md: Epic統合ゲートがテスト出力をteeで保存しcount-skips.shで数えている（#97, #144）" ;;
   *)
-    fail "SKILL.md: Step 6 統合ゲートがテスト出力をteeで保存しcount-skips.shで数えている（#97）" \
-      "$H97_RS_STEP6" ;;
+    fail "SKILL.md: Epic統合ゲートがテスト出力をteeで保存しcount-skips.shで数えている（#97, #144）" \
+      "$H97_RS_EPICGATE" ;;
 esac
 
-case "$H97_RS_STEP6" in
+case "$H97_RS_EPICGATE" in
   *'0件でも必ず表示'*)
-    pass "SKILL.md: Step 6 統合ゲートがSKIP件数を0件でも必ず表示する旨を明記している（#97）" ;;
+    pass "SKILL.md: Epic統合ゲートがSKIP件数を0件でも必ず表示する旨を明記している（#97, #144）" ;;
   *)
-    fail "SKILL.md: Step 6 統合ゲートがSKIP件数を0件でも必ず表示する旨を明記している（#97）" \
-      "$H97_RS_STEP6" ;;
+    fail "SKILL.md: Epic統合ゲートがSKIP件数を0件でも必ず表示する旨を明記している（#97, #144）" \
+      "$H97_RS_EPICGATE" ;;
 esac
 
-case "$H97_RS_STEP6" in
-  *'食い違った場合は統合ゲートの値を採用'*'Epic issue にコメント'*)
-    pass "SKILL.md: Step 6 統合ゲートがレーンの自己申告と食い違った場合に統合ゲートの値を採用しEpic issueにコメントする旨を明記している（#97）" ;;
+case "$H97_RS_EPICGATE" in
+  *'食い違った場合はEpic統合ゲートの値を採用'*'Epic issue にコメント'*)
+    pass "SKILL.md: Epic統合ゲートがレーンの自己申告と食い違った場合にEpic統合ゲートの値を採用しEpic issueにコメントする旨を明記している（#97, #144）" ;;
   *)
-    fail "SKILL.md: Step 6 統合ゲートがレーンの自己申告と食い違った場合に統合ゲートの値を採用しEpic issueにコメントする旨を明記している（#97）" \
-      "$H97_RS_STEP6" ;;
+    fail "SKILL.md: Epic統合ゲートがレーンの自己申告と食い違った場合にEpic統合ゲートの値を採用しEpic issueにコメントする旨を明記している（#97, #144）" \
+      "$H97_RS_EPICGATE" ;;
 esac
 
 # --- skills/run/SKILL.md: 「SKIP を通過扱いにしない」節がskips=unknownの扱いを明記している ---
-H97_RS_SKIPSECTION="$(awk '/^#### SKIP を通過扱いにしない/{f=1} /^### Step 7:/{f=0} f' \
+H97_RS_SKIPSECTION="$(awk '/^#### SKIP を通過扱いにしない/{f=1} /^## Epic一括レビュー/{f=0} f' \
   "$RUN_SKILL_FLAT")"
 
 case "$H97_RS_SKIPSECTION" in
@@ -9150,23 +9674,23 @@ case "$H97_CRS_STEP3" in
       "$H97_CRS_STEP3" ;;
 esac
 
-H97_CRS_STEP5="$(awk '/^### Step 5:/{f=1} /^### Step 6:/{f=0} f' \
+H97_CRS_EPICGATE="$(awk '/^## Epic 統合ゲート/{f=1} /^## Epic一括レビュー/{f=0} f' \
   "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md")"
 
-case "$H97_CRS_STEP5" in
+case "$H97_CRS_EPICGATE" in
   *'tee'*'count-skips.sh'*'0件でも必ず表示'*)
-    pass "SKILL.md(codex): Step 5 統合ゲートがteeで保存しcount-skips.shで数え0件でも表示する（#97）" ;;
+    pass "SKILL.md(codex): Epic統合ゲートがteeで保存しcount-skips.shで数え0件でも表示する（#97, #144）" ;;
   *)
-    fail "SKILL.md(codex): Step 5 統合ゲートがteeで保存しcount-skips.shで数え0件でも表示する（#97）" \
-      "$H97_CRS_STEP5" ;;
+    fail "SKILL.md(codex): Epic統合ゲートがteeで保存しcount-skips.shで数え0件でも表示する（#97, #144）" \
+      "$H97_CRS_EPICGATE" ;;
 esac
 
-case "$H97_CRS_STEP5" in
+case "$H97_CRS_EPICGATE" in
   *'skips=unknown'*'「0件」として扱ってはならない'*)
-    pass "SKILL.md(codex): 『SKIP を通過扱いにしない』節がskips=unknownを0件扱いしない旨を明記している（#97）" ;;
+    pass "SKILL.md(codex): 『SKIP を通過扱いにしない』節がskips=unknownを0件扱いしない旨を明記している（#97, #144）" ;;
   *)
-    fail "SKILL.md(codex): 『SKIP を通過扱いにしない』節がskips=unknownを0件扱いしない旨を明記している（#97）" \
-      "$H97_CRS_STEP5" ;;
+    fail "SKILL.md(codex): 『SKIP を通過扱いにしない』節がskips=unknownを0件扱いしない旨を明記している（#97, #144）" \
+      "$H97_CRS_EPICGATE" ;;
 esac
 
 # --- README.md: count-skips.sh の使い方・出力・判定順序・DEV_WORKFLOW_SKIP_PATTERN が書かれている ---
@@ -9238,22 +9762,23 @@ case "$PLANNER_SKIP_SECTION" in
       "$PLANNER_SKIP_SECTION" ;;
 esac
 
-# --- core/instructions.md: 「## 準備コマンド」節と対称に「Epic本文の『## SKIPパターン』節」が
-#     planner が判断する規定として存在する ---
-INSTR_SKIP_SECTION="$(awk '/^### Epic 本文の `## SKIPパターン` 節/{f=1} /^## 安全ルール/{f=0} f' \
-  "${REPO_ROOT}/core/instructions.md")"
+# --- core/references/epic-sections.md: 「## 準備コマンド」節と対称に「Epic本文の『## SKIPパターン』節」が
+#     planner が判断する規定として存在する（詳細は core/instructions.md 本体から
+#     core/references/epic-sections.md へ退避されている・#146） ---
+INSTR_SKIP_SECTION="$(awk '/^### Epic 本文の `## SKIPパターン` 節/{f=1} f' \
+  "${REPO_ROOT}/core/references/epic-sections.md")"
 
 if [ -z "$INSTR_SKIP_SECTION" ]; then
-  fail "core/instructions.md: 『### Epic 本文の \`## SKIPパターン\` 節』が見つかる（#102）" "節が空でした"
+  fail "core/references/epic-sections.md: 『### Epic 本文の \`## SKIPパターン\` 節』が見つかる（#102）" "節が空でした"
 else
-  pass "core/instructions.md: 『### Epic 本文の \`## SKIPパターン\` 節』が見つかる（#102）"
+  pass "core/references/epic-sections.md: 『### Epic 本文の \`## SKIPパターン\` 節』が見つかる（#102）"
 fi
 
 case "$INSTR_SKIP_SECTION" in
   *'節を書くかどうかの判断は'*'準備コマンド'*'節と同様に planner が行う'*)
-    pass "core/instructions.md: SKIPパターン節を書くかどうかの判断もplannerが行う旨が準備コマンド節と対称に規定されている（#102）" ;;
+    pass "core/references/epic-sections.md: SKIPパターン節を書くかどうかの判断もplannerが行う旨が準備コマンド節と対称に規定されている（#102）" ;;
   *)
-    fail "core/instructions.md: SKIPパターン節を書くかどうかの判断もplannerが行う旨が準備コマンド節と対称に規定されている（#102）" \
+    fail "core/references/epic-sections.md: SKIPパターン節を書くかどうかの判断もplannerが行う旨が準備コマンド節と対称に規定されている（#102）" \
       "$INSTR_SKIP_SECTION" ;;
 esac
 
@@ -10542,46 +11067,50 @@ case "$INSTR_PREREQ_SECTION" in
       "$INSTR_PREREQ_SECTION" ;;
 esac
 
-# --- core/instructions.md: 「## ハーネス非注入原則」が「## サンドボックス方針」の後・
-#     「## 安全ルール（例外なし）」の前に新設されている ---
-INSTR_NOINJECT_SECTION="$(awk '/^## ハーネス非注入原則/{f=1} /^## 安全ルール（例外なし）/{f=0} f' \
+# --- core/instructions.md 本体に「## ハーネス非注入原則」の見出し・原則1文・検証コマンドが
+#     残っている。詳細な対応表・背景は core/references/harness-hygiene.md へ退避されている
+#     （#125。退避は #146） ---
+INSTR_NOINJECT_MAIN_SECTION="$(awk '/^## ハーネス非注入原則/{f=1} /^## 停止させるものと、記録して進めるもの/{f=0} f' \
   "${REPO_ROOT}/core/instructions.md")"
 
-if [ -z "$INSTR_NOINJECT_SECTION" ]; then
+if [ -z "$INSTR_NOINJECT_MAIN_SECTION" ]; then
   fail "core/instructions.md: 『## ハーネス非注入原則』節が見つかる（#125）" "節が空でした"
 else
   pass "core/instructions.md: 『## ハーネス非注入原則』節が見つかる（#125）"
 fi
 
-case "$INSTR_NOINJECT_SECTION" in
+case "$INSTR_NOINJECT_MAIN_SECTION" in
   *'駆動先の業務リポジトリに注入しない'*)
     pass "core/instructions.md: ハーネス非注入原則の宣言文がある（#125）" ;;
   *)
     fail "core/instructions.md: ハーネス非注入原則の宣言文がある（#125）" \
-      "$INSTR_NOINJECT_SECTION" ;;
+      "$INSTR_NOINJECT_MAIN_SECTION" ;;
 esac
 
-case "$INSTR_NOINJECT_SECTION" in
-  *'サンドボックス定義'*'~/.claude/dev-workflow/sandbox/<repo>/'*'YOLO 用の permission 設定'*'.claude/settings.local.json'*'マーカー・状態ファイル・worktree'*'.git/info/exclude'*'.gitignore'*'駆動先の共有ファイルなので触らない'*)
-    pass "core/instructions.md: ハーネス由来のものと置き場所の対応表（3行）が明記されている（#125）" ;;
-  *)
-    fail "core/instructions.md: ハーネス由来のものと置き場所の対応表（3行）が明記されている（#125）" \
-      "$INSTR_NOINJECT_SECTION" ;;
-esac
-
-case "$INSTR_NOINJECT_SECTION" in
+case "$INSTR_NOINJECT_MAIN_SECTION" in
   *'check-repo-hygiene.sh'*)
     pass "core/instructions.md: 検証はscripts/check-repo-hygiene.shが行う旨が明記されている（#125）" ;;
   *)
     fail "core/instructions.md: 検証はscripts/check-repo-hygiene.shが行う旨が明記されている（#125）" \
+      "$INSTR_NOINJECT_MAIN_SECTION" ;;
+esac
+
+# --- core/references/harness-hygiene.md に対応表・詳細な背景が退避されている（#146） ---
+INSTR_NOINJECT_SECTION="$(cat "${REPO_ROOT}/core/references/harness-hygiene.md")"
+
+case "$INSTR_NOINJECT_SECTION" in
+  *'サンドボックス定義'*'~/.claude/dev-workflow/sandbox/<repo>/'*'YOLO 用の permission 設定'*'.claude/settings.local.json'*'マーカー・状態ファイル・worktree'*'.git/info/exclude'*'.gitignore'*'駆動先の共有ファイルなので触らない'*)
+    pass "core/references/harness-hygiene.md: ハーネス由来のものと置き場所の対応表（3行）が明記されている（#125）" ;;
+  *)
+    fail "core/references/harness-hygiene.md: ハーネス由来のものと置き場所の対応表（3行）が明記されている（#125）" \
       "$INSTR_NOINJECT_SECTION" ;;
 esac
 
 case "$INSTR_NOINJECT_SECTION" in
   *'DEV_WORKFLOW_ALLOW_TRACKED_SETTINGS=1'*'同意なく適用される'*)
-    pass "core/instructions.md: git追跡されたsettings.local.jsonはrunをブロックする旨とその理由が明記されている（#125）" ;;
+    pass "core/references/harness-hygiene.md: git追跡されたsettings.local.jsonはrunをブロックする旨とその理由が明記されている（#125）" ;;
   *)
-    fail "core/instructions.md: git追跡されたsettings.local.jsonはrunをブロックする旨とその理由が明記されている（#125）" \
+    fail "core/references/harness-hygiene.md: git追跡されたsettings.local.jsonはrunをブロックする旨とその理由が明記されている（#125）" \
       "$INSTR_NOINJECT_SECTION" ;;
 esac
 
@@ -10768,28 +11297,31 @@ esac
 
 # --- core/instructions.md: 「Epic 本文の『## SKIPパターン』節」と対称な位置に
 #     「Epic 本文の『## 共有ディレクトリ』節」がある ---
+# --- core/references/epic-sections.md: 「Epic 本文の『## SKIPパターン』節」と対称な位置に
+#     「Epic 本文の『## 共有ディレクトリ』節」がある（詳細は core/instructions.md 本体から
+#     core/references/epic-sections.md へ退避されている・#146） ---
 INSTR_SHAREDIR_SECTION="$(awk '/^### Epic 本文の `## 共有ディレクトリ` 節/{f=1} /^### Epic 本文の `## SKIPパターン` 節/{f=0} f' \
-  "${REPO_ROOT}/core/instructions.md")"
+  "${REPO_ROOT}/core/references/epic-sections.md")"
 
 if [ -z "$INSTR_SHAREDIR_SECTION" ]; then
-  fail "core/instructions.md: 『### Epic 本文の \`## 共有ディレクトリ\` 節』が見つかる（#107）" "節が空でした"
+  fail "core/references/epic-sections.md: 『### Epic 本文の \`## 共有ディレクトリ\` 節』が見つかる（#107）" "節が空でした"
 else
-  pass "core/instructions.md: 『### Epic 本文の \`## 共有ディレクトリ\` 節』が見つかる（#107）"
+  pass "core/references/epic-sections.md: 『### Epic 本文の \`## 共有ディレクトリ\` 節』が見つかる（#107）"
 fi
 
 case "$INSTR_SHAREDIR_SECTION" in
   *'#104'*'Step 3'*'generator プロンプトへ渡す'*)
-    pass "core/instructions.md: runがEpic開始時に節を読みStep 3のgeneratorプロンプトへ渡す旨が明記されている（#107）" ;;
+    pass "core/references/epic-sections.md: runがEpic開始時に節を読みStep 3のgeneratorプロンプトへ渡す旨が明記されている（#107）" ;;
   *)
-    fail "core/instructions.md: runがEpic開始時に節を読みStep 3のgeneratorプロンプトへ渡す旨が明記されている（#107）" \
+    fail "core/references/epic-sections.md: runがEpic開始時に節を読みStep 3のgeneratorプロンプトへ渡す旨が明記されている（#107）" \
       "$INSTR_SHAREDIR_SECTION" ;;
 esac
 
 case "$INSTR_SHAREDIR_SECTION" in
   *'節を書くかどうかの判断は planner が行う'*)
-    pass "core/instructions.md: 節を書くかどうかの判断はplannerが行う旨が明記されている（#107）" ;;
+    pass "core/references/epic-sections.md: 節を書くかどうかの判断はplannerが行う旨が明記されている（#107）" ;;
   *)
-    fail "core/instructions.md: 節を書くかどうかの判断はplannerが行う旨が明記されている（#107）" \
+    fail "core/references/epic-sections.md: 節を書くかどうかの判断はplannerが行う旨が明記されている（#107）" \
       "$INSTR_SHAREDIR_SECTION" ;;
 esac
 
@@ -10815,6 +11347,118 @@ for f in agents/planner.md codex-agents/planner.toml; do
       "節が見つかりませんでした"
   fi
 done
+
+# ---------------------------------------------------------------------------
+# Task #146: core/references/ による参照機構（core/instructions.md の progressive disclosure）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #146: core/references/ による参照機構 =="
+
+# --- core/references/ に退避先ファイルが実在する ---
+for f in watchdog.md epic-sections.md harness-hygiene.md; do
+  if [ -f "${REPO_ROOT}/core/references/${f}" ]; then
+    pass "core/references/${f}: ファイルが実在する（#146）"
+  else
+    fail "core/references/${f}: ファイルが実在する（#146）" "見つかりません"
+  fi
+done
+
+# --- core/instructions.md のポインタ行から参照されているパスが実際に解決できる ---
+# `${CLAUDE_PLUGIN_ROOT}/core/references/<名前>.md` という記法でポインタ行に書かれている
+# パスを1つずつ取り出し、リポジトリルートからの相対パスとして実在するかを確認する。
+# for/whileのパイプはサブシェルになりPASS/FAILカウンタが親シェルに伝播しないため、
+# 配列 + for（サブシェルを作らない）で回す（review#99 と同じ作法）。
+CORE146_POINTER_PATHS=()
+while IFS= read -r p; do
+  [ -n "$p" ] && CORE146_POINTER_PATHS+=("$p")
+done < <(grep -oE 'core/references/[A-Za-z0-9_-]+\.md' "${REPO_ROOT}/core/instructions.md" | sort -u)
+
+if [ "${#CORE146_POINTER_PATHS[@]}" -eq 0 ]; then
+  fail "core/instructions.md: core/references/ へのポインタ行が1つ以上ある（#146）" "見つかりません"
+else
+  pass "core/instructions.md: core/references/ へのポインタ行が1つ以上ある（#146）"
+fi
+
+for p in "${CORE146_POINTER_PATHS[@]}"; do
+  if [ -f "${REPO_ROOT}/${p}" ]; then
+    pass "core/instructions.md のポインタ行: ${p} が解決できる（#146）"
+  else
+    fail "core/instructions.md のポインタ行: ${p} が解決できる（#146）" "見つかりません: ${p}"
+  fi
+done
+
+# --- core/instructions.md は core/references/*.md を <!-- include: --> でインライン展開して
+#     いない（インライン展開すると本文が再び膨らみ、薄くする目的に反するため） ---
+if grep -Fq -- '<!-- include: core/references/' "${REPO_ROOT}/core/instructions.md"; then
+  fail "core/instructions.md: core/references/*.md を <!-- include: --> で展開していない（#146）" \
+    "include指定が見つかりました"
+else
+  pass "core/instructions.md: core/references/*.md を <!-- include: --> で展開していない（#146）"
+fi
+
+# --- 生成物（agents/*.md・codex-agents/*.toml）にも core/references/*.md の本文が
+#     インライン展開されていない（本文だけを include する既存の仕組みを踏襲しているため、
+#     参照ファイルの本文そのものは生成物に現れないはず） ---
+CORE146_WATCHDOG_ONLY_PHRASE='しきい値（既定値。環境変数で変更可'
+CORE146_EPIC_ONLY_PHRASE='含むディレクトリ生成が支配的なコストになる'
+CORE146_HYGIENE_ONLY_PHRASE='clone したチームメンバー全員のセッションに'
+
+for f in agents/planner.md agents/generator.md agents/evaluator.md \
+         codex-agents/planner.toml codex-agents/generator.toml codex-agents/evaluator.toml; do
+  if grep -Fq -- "$CORE146_WATCHDOG_ONLY_PHRASE" "${REPO_ROOT}/${f}" \
+    || grep -Fq -- "$CORE146_EPIC_ONLY_PHRASE" "${REPO_ROOT}/${f}" \
+    || grep -Fq -- "$CORE146_HYGIENE_ONLY_PHRASE" "${REPO_ROOT}/${f}"; then
+    fail "${f}: core/references/*.md の本文がインライン展開されていない（#146）" \
+      "参照ファイル専用の記述が生成物中に見つかりました"
+  else
+    pass "${f}: core/references/*.md の本文がインライン展開されていない（#146）"
+  fi
+done
+
+# --- core/instructions.md から退避した内容が core/references/*.md 側に実在する
+#     （内容消失の回帰防止。移設した代表的なフレーズを1つずつ確認する） ---
+case "$(cat "${REPO_ROOT}/core/references/watchdog.md")" in
+  *'自動打ち切りは原理的に実装できない'*'アダプタ間に'*'機能差を作らないため採用していない'*)
+    pass "core/references/watchdog.md: 退避したアダプタ差異・しきい値の記述が残っている（#146）" ;;
+  *)
+    fail "core/references/watchdog.md: 退避したアダプタ差異・しきい値の記述が残っている（#146）" \
+      "$(cat "${REPO_ROOT}/core/references/watchdog.md")" ;;
+esac
+
+case "$(cat "${REPO_ROOT}/core/references/epic-sections.md")" in
+  *'isolation'*'worktree）で初回1回だけ実行'*'issue #104'*'DEV_WORKFLOW_SKIP_PATTERN'*)
+    pass "core/references/epic-sections.md: 退避した3節の詳細記述が残っている（#146）" ;;
+  *)
+    fail "core/references/epic-sections.md: 退避した3節の詳細記述が残っている（#146）" \
+      "$(cat "${REPO_ROOT}/core/references/epic-sections.md")" ;;
+esac
+
+case "$(cat "${REPO_ROOT}/core/references/harness-hygiene.md")" in
+  *'サンドボックス定義'*'YOLO 用の permission 設定'*'マーカー・状態ファイル・worktree'*)
+    pass "core/references/harness-hygiene.md: 退避した対応表が残っている（#146）" ;;
+  *)
+    fail "core/references/harness-hygiene.md: 退避した対応表が残っている（#146）" \
+      "$(cat "${REPO_ROOT}/core/references/harness-hygiene.md")" ;;
+esac
+
+# --- README.md: progressive disclosure 方針の節がある ---
+if grep -Fq '## プロンプトの progressive disclosure 方針' "${REPO_ROOT}/README.md"; then
+  pass "README.md: 「プロンプトの progressive disclosure 方針」の節がある（#146）"
+else
+  fail "README.md: 「プロンプトの progressive disclosure 方針」の節がある（#146）" "節が見つかりません"
+fi
+
+DOC146_README_PD_SECTION="$(awk '/^## プロンプトの progressive disclosure 方針/{f=1} /^## ワークフロー/{f=0} f' \
+  "${REPO_ROOT}/README.md")"
+
+case "$DOC146_README_PD_SECTION" in
+  *'skills/run/references/'*'core/references/'*)
+    pass "README.md: skills/*/references/ と core/references/ の使い分けが書かれている（#146）" ;;
+  *)
+    fail "README.md: skills/*/references/ と core/references/ の使い分けが書かれている（#146）" \
+      "$DOC146_README_PD_SECTION" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # share-prepared-dirs.sh のロック兼完了マーカーと --run-prep（Task #111）
@@ -11728,6 +12372,1884 @@ assert_eq "空白入りHOME/リポジトリルート: eval後もDEV_WORKFLOW_SAN
   "${RS9_HOME}/${RS9_NAME}/Dockerfile.dev" "$(plan_value RS9_DOCKERFILE "$RS9_EVAL_RESULT")"
 assert_eq "空白入りHOME/リポジトリルート: eval後もDEV_WORKFLOW_SANDBOX_CONTEXTが完全なパスとして復元される（#132）" \
   "$(normalize_test_path "$RS9_REPO")" "$(plan_value RS9_CONTEXT "$RS9_EVAL_RESULT")"
+
+# ---------------------------------------------------------------------------
+# Task #147: evaluator に観点別レビュー（focus）と wave-review モードを追加する
+#
+# run側の並列起動・マージ手順は別タスクの担当。ここではevaluator側の契約
+# （core/roles/evaluator.md・adapters/codex/schemas/evaluator-verdict.json・
+# docs/adr/0003）が仕様どおりであることだけを検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #147: evaluator の観点別レビュー（focus）と wave-review モードの契約 =="
+
+H147_EVALUATOR_ROLE="${REPO_ROOT}/core/roles/evaluator.md"
+
+# --- 4観点の定義と、自分の観点の指摘だけを出す規定がある ---
+if grep -Fq '`correctness`' "$H147_EVALUATOR_ROLE" \
+  && grep -Fq '`readability`' "$H147_EVALUATOR_ROLE" \
+  && grep -Fq '`over-engineering`' "$H147_EVALUATOR_ROLE" \
+  && grep -Fq '`security`' "$H147_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: 4観点（correctness/readability/over-engineering/security）が定義されている（#147）"
+else
+  fail "core/roles/evaluator.md: 4観点（correctness/readability/over-engineering/security）が定義されている（#147）" \
+    "$(grep -n 'focus' "$H147_EVALUATOR_ROLE" | head -20)"
+fi
+
+if grep -Fq '観点を指定して起動された evaluator は、自分の観点の指摘だけを出す' "$H147_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: 「自分の観点の指摘だけを出す」規定がある（#147）"
+else
+  fail "core/roles/evaluator.md: 「自分の観点の指摘だけを出す」規定がある（#147）" "節が見つかりません"
+fi
+
+# --- 観点未指定時は従来どおり全観点を見る（後方互換）ことが明記されている ---
+if grep -Fq '観点未指定で起動された場合は従来どおり全観点を見る' "$H147_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: 観点未指定時は従来どおり全観点を見る旨（後方互換）が明記されている（#147）"
+else
+  fail "core/roles/evaluator.md: 観点未指定時は従来どおり全観点を見る旨（後方互換）が明記されている（#147）" \
+    "節が見つかりません"
+fi
+
+if grep -Fq 'Codexは観点未指定のまま使う' "$H147_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: Codexは観点未指定のまま使う旨が明記されている（#147）"
+else
+  fail "core/roles/evaluator.md: Codexは観点未指定のまま使う旨が明記されている（#147）" "節が見つかりません"
+fi
+
+# --- wave-review モードが定義され、差分範囲と「範囲外を蒸し返さない」規律が書かれている ---
+H147_WAVEREVIEW_ROW="$(grep -n 'wave-review' "$H147_EVALUATOR_ROLE" | head -1)"
+case "$H147_WAVEREVIEW_ROW" in
+  *'前回レビュー済みcommit'*'epic-branch'*)
+    pass "core/roles/evaluator.md: wave-review モードの差分範囲が定義されている（#147）" ;;
+  *)
+    fail "core/roles/evaluator.md: wave-review モードの差分範囲が定義されている（#147）" "$H147_WAVEREVIEW_ROW" ;;
+esac
+
+H147_WAVEREVIEW_SECTION="$(awk '/^### wave-review 特有の規律/{f=1} /^## 観点/{f=0} f' "$H147_EVALUATOR_ROLE")"
+case "$H147_WAVEREVIEW_SECTION" in
+  *'そのウェーブ差分だけを見る'*)
+    pass "core/roles/evaluator.md: wave-reviewが範囲外を蒸し返さない規律を明記している（#147）" ;;
+  *)
+    fail "core/roles/evaluator.md: wave-reviewが範囲外を蒸し返さない規律を明記している（#147）" \
+      "$H147_WAVEREVIEW_SECTION" ;;
+esac
+
+case "$H147_WAVEREVIEW_SECTION" in
+  *'指摘はその場で直させない'*)
+    pass "core/roles/evaluator.md: wave-reviewの指摘はその場で直させない旨が明記されている（#147）" ;;
+  *)
+    fail "core/roles/evaluator.md: wave-reviewの指摘はその場で直させない旨が明記されている（#147）" \
+      "$H147_WAVEREVIEW_SECTION" ;;
+esac
+
+# --- 出力JSONに focus（トップレベルとfindings[]の各要素）が追加され、既存フィールドが変更されていない ---
+H147_JSON_EXAMPLE="$(awk '/^```json$/{f=1} f{print} f && /^```$/ && NR>1 && !/^```json$/{exit}' "$H147_EVALUATOR_ROLE")"
+
+for h147_field in '"verdict"' '"reviewed_commit"' '"focus"' '"findings"' '"severity"' '"title"' '"location"' '"detail"' '"fix"' '"task_ref"'; do
+  if printf '%s\n' "$H147_JSON_EXAMPLE" | grep -Fq -- "$h147_field"; then
+    pass "core/roles/evaluator.md: 出力JSON例に ${h147_field} が含まれる（#147）"
+  else
+    fail "core/roles/evaluator.md: 出力JSON例に ${h147_field} が含まれる（#147）" "$H147_JSON_EXAMPLE"
+  fi
+done
+
+# focus がトップレベルとfindings要素の両方に出現する（2回以上）こと
+H147_FOCUS_COUNT="$(printf '%s\n' "$H147_JSON_EXAMPLE" | grep -c '"focus"')"
+if [ "$H147_FOCUS_COUNT" -ge 2 ]; then
+  pass "core/roles/evaluator.md: 出力JSON例でfocusがトップレベルとfindings要素の両方に出現する（#147）"
+else
+  fail "core/roles/evaluator.md: 出力JSON例でfocusがトップレベルとfindings要素の両方に出現する（#147）" \
+    "出現回数=${H147_FOCUS_COUNT}"
+fi
+
+# reviewed_commit がどのモード・観点でも必須である旨の明記
+if grep -Fq 'どのモード・観点でも必ず出す' "$H147_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: reviewed_commitはどのモード・観点でも必須である旨が明記されている（#147）"
+else
+  fail "core/roles/evaluator.md: reviewed_commitはどのモード・観点でも必須である旨が明記されている（#147）" \
+    "節が見つかりません"
+fi
+
+# --- adapters/codex/schemas/evaluator-verdict.json が新しいJSONと整合している ---
+H147_SCHEMA="${REPO_ROOT}/adapters/codex/schemas/evaluator-verdict.json"
+
+if [ -f "$H147_SCHEMA" ]; then
+  pass "adapters/codex/schemas/evaluator-verdict.json: ファイルが存在する（#147）"
+else
+  fail "adapters/codex/schemas/evaluator-verdict.json: ファイルが存在する（#147）" "ファイルが見つかりません"
+fi
+
+if _hj_json_syntax_ok "$H147_SCHEMA"; then
+  pass "adapters/codex/schemas/evaluator-verdict.json: JSONとして構文的に妥当である（括弧の対応が取れている）（#147）"
+else
+  fail "adapters/codex/schemas/evaluator-verdict.json: JSONとして構文的に妥当である（括弧の対応が取れている）（#147）" \
+    "$(cat "$H147_SCHEMA" 2>&1)"
+fi
+
+for h147_schema_field in '"focus"' '"verdict"' '"reviewed_commit"' '"findings"'; do
+  if grep -Fq -- "$h147_schema_field" "$H147_SCHEMA"; then
+    pass "evaluator-verdict.json: ${h147_schema_field} が定義されている（#147）"
+  else
+    fail "evaluator-verdict.json: ${h147_schema_field} が定義されている（#147）" \
+      "$(grep -n -- "$h147_schema_field" "$H147_SCHEMA")"
+  fi
+done
+
+if grep -Fq '"all", "correctness", "readability", "over-engineering", "security"' "$H147_SCHEMA"; then
+  pass "evaluator-verdict.json: focusのenumに4観点+allが定義されている（#147）"
+else
+  fail "evaluator-verdict.json: focusのenumに4観点+allが定義されている（#147）" \
+    "$(grep -n 'enum' "$H147_SCHEMA")"
+fi
+
+# --- docs/adr/0003-parallel-review-by-focus.md が書かれている ---
+H147_ADR="${REPO_ROOT}/docs/adr/0003-parallel-review-by-focus.md"
+
+if [ -f "$H147_ADR" ]; then
+  pass "docs/adr/0003-parallel-review-by-focus.md: ファイルが存在する（#147）"
+else
+  fail "docs/adr/0003-parallel-review-by-focus.md: ファイルが存在する（#147）" "ファイルが見つかりません"
+fi
+
+for h147_adr_heading in '## 決定' '## 理由' '## トレードオフ' '## 却下した代案'; do
+  if grep -Fq -- "$h147_adr_heading" "$H147_ADR" 2>/dev/null; then
+    pass "docs/adr/0003: 『${h147_adr_heading}』節がある（#147）"
+  else
+    fail "docs/adr/0003: 『${h147_adr_heading}』節がある（#147）" "節が見つかりません"
+  fi
+done
+
+if grep -Fq 'Codex' "$H147_ADR" 2>/dev/null && grep -Fq '単一' "$H147_ADR" 2>/dev/null; then
+  pass "docs/adr/0003: Codexは単一evaluatorのままにする理由が書かれている（#147）"
+else
+  fail "docs/adr/0003: Codexは単一evaluatorのままにする理由が書かれている（#147）" "節が見つかりません"
+fi
+
+# --- 生成物（agents/evaluator.md・codex-agents/evaluator.toml）にfocus契約が反映されている ---
+H147_AGENT_EVALUATOR="${REPO_ROOT}/agents/evaluator.md"
+H147_CODEX_AGENT_EVALUATOR="${REPO_ROOT}/codex-agents/evaluator.toml"
+
+if grep -Fq 'wave-review' "$H147_AGENT_EVALUATOR" 2>/dev/null; then
+  pass "agents/evaluator.md: core/roles/evaluator.mdのwave-review契約が生成物に反映されている（#147）"
+else
+  fail "agents/evaluator.md: core/roles/evaluator.mdのwave-review契約が生成物に反映されている（#147）" \
+    "反映されていません"
+fi
+
+if grep -Fq 'wave-review' "$H147_CODEX_AGENT_EVALUATOR" 2>/dev/null; then
+  pass "codex-agents/evaluator.toml: core/roles/evaluator.mdのwave-review契約が生成物に反映されている（#147）"
+else
+  fail "codex-agents/evaluator.toml: core/roles/evaluator.mdのwave-review契約が生成物に反映されている（#147）" \
+    "反映されていません"
+fi
+
+# ---------------------------------------------------------------------------
+# Task #151: evaluator プロンプトを観点別チェックリストに分割して薄くする
+#
+# core/roles/evaluator.md の「レビューチェックリスト」を観点ごとに
+# core/references/review-checklist-*.md へ分割する。本体には観点と参照先の対応表・
+# 「自分の観点だけを読む」指示・可読性原則の要点・JSON規約・判定基準を残す。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #151: evaluator チェックリストの観点別分割（薄化） =="
+
+H151_EVALUATOR_ROLE="${REPO_ROOT}/core/roles/evaluator.md"
+H151_REF_CORRECTNESS="${REPO_ROOT}/core/references/review-checklist-correctness.md"
+H151_REF_OVERENG="${REPO_ROOT}/core/references/review-checklist-over-engineering.md"
+H151_REF_SECURITY="${REPO_ROOT}/core/references/review-checklist-security.md"
+
+# --- 4つの参照ファイル（over-engineering / security / correctness、readabilityは本体）が存在する ---
+
+for h151_ref in "$H151_REF_CORRECTNESS" "$H151_REF_OVERENG" "$H151_REF_SECURITY"; do
+  if [ -f "$h151_ref" ]; then
+    pass "$(basename "$h151_ref") が存在する（#151）"
+  else
+    fail "$(basename "$h151_ref") が存在する（#151）" "見つかりません: ${h151_ref}"
+  fi
+done
+
+# --- 退避した記述が1文字も失われていない（各観点のチェックリスト項目が参照ファイルに残っている） ---
+
+if grep -Fq '#### コード品質' "$H151_REF_CORRECTNESS" && grep -Fq '#### アーキテクチャ' "$H151_REF_CORRECTNESS" \
+  && grep -Fq '#### テスト' "$H151_REF_CORRECTNESS" && grep -Fq '#### プロジェクト固有ルール' "$H151_REF_CORRECTNESS"; then
+  pass "review-checklist-correctness.md: コード品質・アーキテクチャ・テスト・プロジェクト固有ルールの小節が残っている（#151）"
+else
+  fail "review-checklist-correctness.md: コード品質・アーキテクチャ・テスト・プロジェクト固有ルールの小節が残っている（#151）" \
+    "$(cat "$H151_REF_CORRECTNESS" 2>&1)"
+fi
+
+if grep -Fq '#### セキュリティ' "$H151_REF_SECURITY" && grep -Fq '#### テスト安全性' "$H151_REF_SECURITY"; then
+  pass "review-checklist-security.md: セキュリティ・テスト安全性の小節が残っている（#151）"
+else
+  fail "review-checklist-security.md: セキュリティ・テスト安全性の小節が残っている（#151）" \
+    "$(cat "$H151_REF_SECURITY" 2>&1)"
+fi
+
+# --- 本体に観点と参照先の対応表があり、「自分の観点だけを読む」指示がある ---
+
+if grep -Fq 'core/references/review-checklist-correctness.md' "$H151_EVALUATOR_ROLE" \
+  && grep -Fq 'core/references/review-checklist-over-engineering.md' "$H151_EVALUATOR_ROLE" \
+  && grep -Fq 'core/references/review-checklist-security.md' "$H151_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: 観点と参照先の対応表がある（#151）"
+else
+  fail "core/roles/evaluator.md: 観点と参照先の対応表がある（#151）"
+fi
+
+if grep -Fq '自分に指定された観点の参照ファイルだけを読む' "$H151_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: 「自分の観点の参照ファイルだけを読む」指示がある（#151）"
+else
+  fail "core/roles/evaluator.md: 「自分の観点の参照ファイルだけを読む」指示がある（#151）"
+fi
+
+# --- 観点未指定時は全参照ファイルを読む旨が明記されている（後方互換） ---
+
+if grep -Fq 'この場合は上記表の**全ファイルを読む**' "$H151_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: 観点未指定時は全参照ファイルを読む旨が明記されている（#151）"
+else
+  fail "core/roles/evaluator.md: 観点未指定時は全参照ファイルを読む旨が明記されている（#151）"
+fi
+
+# --- 可読性原則の要点が本体に残っている ---
+
+if grep -Fq '#### 可読性（最優先・違反は即REQUEST_CHANGES' "$H151_EVALUATOR_ROLE" \
+  && grep -Fq 'どの観点で起動されても、可読性原則違反は見逃してよいわけではない' "$H151_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: 可読性原則の要点が本体に残っている（#151）"
+else
+  fail "core/roles/evaluator.md: 可読性原則の要点が本体に残っている（#151）"
+fi
+
+# --- JSONの規約・判定基準が本体から動いていない（既存 #147 の検査と同じ H147_EVALUATOR_ROLE 相当を再確認） ---
+
+if grep -Fq '"verdict"' "$H151_EVALUATOR_ROLE" && grep -Fq '"reviewed_commit"' "$H151_EVALUATOR_ROLE" \
+  && grep -Fq '## 判定基準' "$H151_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: JSONの規約・判定基準が本体に残っている（#151）"
+else
+  fail "core/roles/evaluator.md: JSONの規約・判定基準が本体に残っている（#151）"
+fi
+
+# --- core/roles/evaluator.md が薄くなっている（元254行に対し目安180行以下。行数競技にはしない。
+#     Task #157 が「発見役と確度判定役」の役割分担節を正当に追加するため、しきい値は
+#     220行に緩めて「有意に薄くなっていること」だけを検査する） ---
+
+H151_LINES="$(wc -l < "$H151_EVALUATOR_ROLE" | tr -d ' ')"
+if [ "$H151_LINES" -le 220 ]; then
+  pass "core/roles/evaluator.md: 元254行より有意に薄くなっている（実測 ${H151_LINES} 行）（#151）"
+else
+  fail "core/roles/evaluator.md: 元254行より有意に薄くなっている（実測 ${H151_LINES} 行）（#151）" \
+    "目安の220行を超えています"
+fi
+
+# --- 生成物（agents/evaluator.md・codex-agents/evaluator.toml）に対応表・可読性要点が反映されている ---
+
+H151_AGENT_EVALUATOR="${REPO_ROOT}/agents/evaluator.md"
+H151_CODEX_AGENT_EVALUATOR="${REPO_ROOT}/codex-agents/evaluator.toml"
+
+if [ -f "$H151_AGENT_EVALUATOR" ] \
+  && grep -Fq 'core/references/review-checklist-correctness.md' "$H151_AGENT_EVALUATOR" \
+  && grep -Fq '自分に指定された観点の参照ファイルだけを読む' "$H151_AGENT_EVALUATOR"; then
+  pass "agents/evaluator.md: 正本のチェックリスト分割内容が反映されている（#151）"
+else
+  fail "agents/evaluator.md: 正本のチェックリスト分割内容が反映されている（#151）" \
+    "見つかりません: ${H151_AGENT_EVALUATOR}"
+fi
+
+if [ -f "$H151_CODEX_AGENT_EVALUATOR" ] \
+  && grep -Fq 'core/references/review-checklist-correctness.md' "$H151_CODEX_AGENT_EVALUATOR" \
+  && grep -Fq '自分に指定された観点の参照ファイルだけを読む' "$H151_CODEX_AGENT_EVALUATOR"; then
+  pass "codex-agents/evaluator.toml: 正本のチェックリスト分割内容が反映されている（#151）"
+else
+  fail "codex-agents/evaluator.toml: 正本のチェックリスト分割内容が反映されている（#151）" \
+    "見つかりません: ${H151_CODEX_AGENT_EVALUATOR}"
+fi
+
+# ---------------------------------------------------------------------------
+# Task #157: evaluator を「発見は sonnet、確度判定は opus」に変える
+#
+# ハーネスで確認できた「起動時のモデル指定」（別エージェント定義を増やさない方式）で
+# 発見役（既定sonnet）と確度判定役（起動時にopusを明示）を分ける。レビュー基準
+# （core/instructions.md）は変更しない。Codex側は未確認のため据え置き、その事実を記述に残す。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #157: evaluatorの発見役(sonnet)・確度判定役(opus)の分離 =="
+
+H157_CLAUDE_OVERLAY="${REPO_ROOT}/adapters/claude/overlays/evaluator.md"
+H157_EVALUATOR_ROLE="${REPO_ROOT}/core/roles/evaluator.md"
+H157_REVIEW_REF="${REPO_ROOT}/skills/run/references/review.md"
+H157_CODEX_OVERLAY="${REPO_ROOT}/adapters/codex/overlays/evaluator.toml"
+H157_AGENT_EVALUATOR="${REPO_ROOT}/agents/evaluator.md"
+H157_CODEX_AGENT_EVALUATOR="${REPO_ROOT}/codex-agents/evaluator.toml"
+H157_README="${REPO_ROOT}/README.md"
+H157_ADR="${REPO_ROOT}/docs/adr/0006-evaluator-model-split.md"
+H157_INSTRUCTIONS="${REPO_ROOT}/core/instructions.md"
+
+# --- adapters/claude/overlays/evaluator.md: frontmatterのmodelがsonnetに変わっている
+#     （別エージェント定義を増やす方式ではなく、起動時上書き方式を採ったことの確認） ---
+
+H157_FRONTMATTER="$(awk '/^---$/{c++; print; next} c==1' "$H157_CLAUDE_OVERLAY")"
+if printf '%s\n' "$H157_FRONTMATTER" | grep -Fq 'model: sonnet'; then
+  pass "adapters/claude/overlays/evaluator.md: frontmatterのmodelがsonnet（発見役の既定）になっている（#157）"
+else
+  fail "adapters/claude/overlays/evaluator.md: frontmatterのmodelがsonnet（発見役の既定）になっている（#157）" \
+    "$H157_FRONTMATTER"
+fi
+
+if grep -Fq 'model: opus' "$H157_CLAUDE_OVERLAY" && grep -Fq '起動時モデル指定' "$H157_CLAUDE_OVERLAY"; then
+  pass "adapters/claude/overlays/evaluator.md: 確度判定は起動時にmodel: opusへ上書きする旨が明記されている（#157）"
+else
+  fail "adapters/claude/overlays/evaluator.md: 確度判定は起動時にmodel: opusへ上書きする旨が明記されている（#157）"
+fi
+
+# --- core/roles/evaluator.md: 発見役と確度判定役の責務が分かれている ---
+
+if grep -Fq '## 発見役と確度判定役' "$H157_EVALUATOR_ROLE" \
+  && grep -Fq '**発見役**（既定モデル・sonnet）' "$H157_EVALUATOR_ROLE" \
+  && grep -Fq '**確度判定役**（起動時に `model: opus` を明示して上書き）' "$H157_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: 発見役(sonnet)と確度判定役(opus)の責務が分かれている（#157）"
+else
+  fail "core/roles/evaluator.md: 発見役(sonnet)と確度判定役(opus)の責務が分かれている（#157）"
+fi
+
+# --- core/roles/evaluator.md: 確度判定を通らなかった指摘を黙って落とさない旨 ---
+
+if grep -Fq '確度判定を経ずに黙って捨てる経路は無い' "$H157_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: highの指摘を黙って落とす経路が無い旨が明記されている（#157）"
+else
+  fail "core/roles/evaluator.md: highの指摘を黙って落とす経路が無い旨が明記されている（#157）"
+fi
+
+# --- core/roles/evaluator.md: wave-review/delta-reviewは確度判定を経由しない旨 ---
+
+if grep -Fq 'wave-review / delta-review はこの確度判定を経由しない' "$H157_EVALUATOR_ROLE"; then
+  pass "core/roles/evaluator.md: wave-review/delta-reviewは確度判定を経由しない旨が明記されている（#157）"
+else
+  fail "core/roles/evaluator.md: wave-review/delta-reviewは確度判定を経由しない旨が明記されている（#157）"
+fi
+
+# --- レビュー基準（重要度3段階・判定）が変更されていない ---
+# core/instructions.md「レビュー基準」の判定式（APPROVE/REQUEST_CHANGES）が既存のまま残っている
+
+if grep -Fq '**APPROVE**: 指摘なし、または low のみ' "$H157_INSTRUCTIONS" \
+  && grep -Fq '**REQUEST_CHANGES**: high または medium の指摘がある' "$H157_INSTRUCTIONS"; then
+  pass "core/instructions.md: レビュー基準の判定（APPROVE/REQUEST_CHANGES）が変更されていない（#157）"
+else
+  fail "core/instructions.md: レビュー基準の判定（APPROVE/REQUEST_CHANGES）が変更されていない（#157）"
+fi
+
+# --- skills/run/references/review.md: 確度判定の1節がR1〜R2の間に追加され、R1→確度判定→R2の順序が明確 ---
+
+H157_REVIEW_R1_LINE="$(grep -n '^### R1の結果マージ' "$H157_REVIEW_REF" | head -1 | cut -d: -f1)"
+H157_REVIEW_CONF_LINE="$(grep -n '^### 確度判定' "$H157_REVIEW_REF" | head -1 | cut -d: -f1)"
+H157_REVIEW_R2_LINE="$(grep -n '^### R2: 指摘をissue化' "$H157_REVIEW_REF" | head -1 | cut -d: -f1)"
+
+if [ -n "$H157_REVIEW_R1_LINE" ] && [ -n "$H157_REVIEW_CONF_LINE" ] && [ -n "$H157_REVIEW_R2_LINE" ] \
+  && [ "$H157_REVIEW_R1_LINE" -lt "$H157_REVIEW_CONF_LINE" ] \
+  && [ "$H157_REVIEW_CONF_LINE" -lt "$H157_REVIEW_R2_LINE" ]; then
+  pass "review.md: R1の結果マージ → 確度判定 → R2の順序でセクションが並んでいる（#157）"
+else
+  fail "review.md: R1の結果マージ → 確度判定 → R2の順序でセクションが並んでいる（#157）" \
+    "R1=${H157_REVIEW_R1_LINE} 確度判定=${H157_REVIEW_CONF_LINE} R2=${H157_REVIEW_R2_LINE}"
+fi
+
+# --- #162で、プロンプト本文の1行ではなくTask/Agentツールの起動時パラメータで
+#     model: opusを渡す手順に変わった（詳細な検証は下記『Review #162』ブロック）。
+#     ここではその移行後も「確度判定はopusで上書きする」という趣旨自体は残っていることだけを見る ---
+if grep -Fq 'Task/Agent起動パラメータ: model: opus' "$H157_REVIEW_REF"; then
+  pass "review.md: 確度判定の呼び出しでmodel: opusを明示的に上書きする指示がある（#157）"
+else
+  fail "review.md: 確度判定の呼び出しでmodel: opusを明示的に上書きする指示がある（#157）"
+fi
+
+if grep -Fq 'low-confidence` と判定された指摘は、破棄せず' "$H157_REVIEW_REF"; then
+  pass "review.md: low-confidenceの指摘は破棄せず軽微な指摘として記録する旨が明記されている（#157）"
+else
+  fail "review.md: low-confidenceの指摘は破棄せず軽微な指摘として記録する旨が明記されている（#157）"
+fi
+
+# --- Codex側: 同等機構は未確認である事実が記述に残っている ---
+
+if grep -Fq '未確認' "$H157_CODEX_OVERLAY" && grep -Fq '推測で実装しない' "$H157_CODEX_OVERLAY"; then
+  pass "adapters/codex/overlays/evaluator.toml: モデル切り替え機構が未確認である事実が明記されている（#157）"
+else
+  fail "adapters/codex/overlays/evaluator.toml: モデル切り替え機構が未確認である事実が明記されている（#157）"
+fi
+
+# --- docs/adr/0006-evaluator-model-split.md: 必須節と確認結果・却下した代案が書かれている ---
+
+if [ -f "$H157_ADR" ]; then
+  pass "docs/adr/0006-evaluator-model-split.md: ファイルが存在する（#157）"
+else
+  fail "docs/adr/0006-evaluator-model-split.md: ファイルが存在する（#157）" "ファイルが見つかりません"
+fi
+
+for h157_adr_heading in '## 決定' '## 理由' '## トレードオフ' '## 却下した代案'; do
+  if grep -Fq -- "$h157_adr_heading" "$H157_ADR" 2>/dev/null; then
+    pass "docs/adr/0006: 『${h157_adr_heading}』節がある（#157）"
+  else
+    fail "docs/adr/0006: 『${h157_adr_heading}』節がある（#157）" "節が見つかりません"
+  fi
+done
+
+if grep -Fq '(b) が実際に可能であることを確認した' "$H157_ADR" 2>/dev/null \
+  && grep -Fq 'advisor toolの有無は確認していない' "$H157_ADR" 2>/dev/null \
+  && grep -Fq 'Codex側' "$H157_ADR" 2>/dev/null && grep -Fq '確認していない' "$H157_ADR" 2>/dev/null; then
+  pass "docs/adr/0006: ハーネスで確認した方法・未確認事項が事実ベースで書かれている（#157）"
+else
+  fail "docs/adr/0006: ハーネスで確認した方法・未確認事項が事実ベースで書かれている（#157）"
+fi
+
+# --- 生成物（agents/evaluator.md・codex-agents/evaluator.toml）に反映されている ---
+
+if [ -f "$H157_AGENT_EVALUATOR" ] \
+  && grep -Fq 'model: sonnet' "$H157_AGENT_EVALUATOR" \
+  && grep -Fq '## 発見役と確度判定役' "$H157_AGENT_EVALUATOR"; then
+  pass "agents/evaluator.md: 正本のモデル分離内容が反映されている（#157）"
+else
+  fail "agents/evaluator.md: 正本のモデル分離内容が反映されている（#157）" \
+    "見つかりません: ${H157_AGENT_EVALUATOR}"
+fi
+
+if [ -f "$H157_CODEX_AGENT_EVALUATOR" ] \
+  && grep -Fq '## 発見役と確度判定役' "$H157_CODEX_AGENT_EVALUATOR" \
+  && grep -Fq '未確認' "$H157_CODEX_AGENT_EVALUATOR"; then
+  pass "codex-agents/evaluator.toml: 正本のモデル分離内容・Codex未対応の明記が反映されている（#157）"
+else
+  fail "codex-agents/evaluator.toml: 正本のモデル分離内容・Codex未対応の明記が反映されている（#157）" \
+    "見つかりません: ${H157_CODEX_AGENT_EVALUATOR}"
+fi
+
+# --- README.md: 3エージェント節のモデル構成説明が更新されている ---
+
+if grep -Fq 'Sonnet（発見役・既定） / Opus（確度判定役・起動時上書き）' "$H157_README"; then
+  pass "README.md: 3エージェント節のevaluatorモデル構成が発見役/確度判定役に更新されている（#157）"
+else
+  fail "README.md: 3エージェント節のevaluatorモデル構成が発見役/確度判定役に更新されている（#157）"
+fi
+
+# --- adapters/claude/build.sh --check / adapters/codex/build.sh --check が通る ---
+
+if bash "${REPO_ROOT}/adapters/claude/build.sh" --check >/dev/null 2>&1; then
+  pass "adapters/claude/build.sh --check: agents/ が core/ と一致している（#157）"
+else
+  fail "adapters/claude/build.sh --check: agents/ が core/ と一致している（#157）"
+fi
+
+if bash "${REPO_ROOT}/adapters/codex/build.sh" --check >/dev/null 2>&1; then
+  pass "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#157）"
+else
+  fail "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#157）"
+fi
+
+# ---------------------------------------------------------------------------
+# Task #148: ウェーブ差分の先行レビュー（wave-review）を次ウェーブの実装と並行させる
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #148: run側のwave-review起動・REVIEWED_COMMIT管理 =="
+
+H148_WAVEREVIEW_REF="${REPO_ROOT}/skills/run/references/wave-review.md"
+
+if [ -f "$H148_WAVEREVIEW_REF" ]; then
+  pass "skills/run/references/wave-review.md が新規作成されている（#148）"
+else
+  fail "skills/run/references/wave-review.md が新規作成されている（#148）" "ファイルが存在しません"
+fi
+
+if grep -Fq 'references/wave-review.md' "${REPO_ROOT}/skills/run/SKILL.md"; then
+  pass "SKILL.md本体からwave-review.mdへポインタで参照している（#148）"
+else
+  fail "SKILL.md本体からwave-review.mdへポインタで参照している（#148）" "参照が見つかりません"
+fi
+
+# --- Step 3: 同一メッセージでの起動と、その理由（バッチ全員が終わるまで結果が返らない）が書かれている ---
+H148_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$RUN_SKILL_FLAT")"
+
+case "$H148_RS_STEP3" in
+  *'同一メッセージ'*'wave-review'*)
+    pass "SKILL.md: Step 3にレーン起動と同一メッセージでwave-reviewを起動する旨が書かれている（#148）" ;;
+  *)
+    fail "SKILL.md: Step 3にレーン起動と同一メッセージでwave-reviewを起動する旨が書かれている（#148）" \
+      "$H148_RS_STEP3" ;;
+esac
+
+case "$H148_RS_STEP3" in
+  *'バッチ全員が終わるまで結果が返らない'*)
+    pass "SKILL.md: Step 3が同一メッセージでなければ並行にならない理由を明記している（#148）" ;;
+  *)
+    fail "SKILL.md: Step 3が同一メッセージでなければ並行にならない理由を明記している（#148）" \
+      "$H148_RS_STEP3" ;;
+esac
+
+# --- 最初のウェーブでは起動しないことが書かれている ---
+case "$H148_RS_STEP3" in
+  *'PREV_WAVE_INCORPORATED'*'false'*)
+    pass "SKILL.md: 最初のウェーブではwave-reviewを起動しないことが書かれている（#148）" ;;
+  *)
+    fail "SKILL.md: 最初のウェーブではwave-reviewを起動しないことが書かれている（#148）" \
+      "$H148_RS_STEP3" ;;
+esac
+
+# --- バッチ内の動的補充とバッチ間（ウェーブ間）の並行化が区別されている ---
+case "$H148_RS_STEP3" in
+  *'バッチ間'*)
+    pass "SKILL.md: バッチ内の動的補充とバッチ間の並行化が区別されている（#148）" ;;
+  *)
+    fail "SKILL.md: バッチ内の動的補充とバッチ間の並行化が区別されている（#148）" "$H148_RS_STEP3" ;;
+esac
+
+# --- REVIEWED_COMMITの初期値・更新・失敗時に進めない規定 ---
+if grep -Fq 'REVIEWED_COMMIT="$(git merge-base "$BASE_BRANCH"' "${REPO_ROOT}/skills/run/SKILL.md"; then
+  pass "SKILL.md: REVIEWED_COMMITの初期値（gh repo viewで解決したベースブランチとのmerge-base）が書かれている（#148, #160）"
+else
+  fail "SKILL.md: REVIEWED_COMMITの初期値（gh repo viewで解決したベースブランチとのmerge-base）が書かれている（#148, #160）" \
+    "$(grep -n 'REVIEWED_COMMIT' "${REPO_ROOT}/skills/run/SKILL.md")"
+fi
+
+# --- REVIEWED_COMMITの初期化がベースブランチをmain/masterに決め打ちしていない（#160） ---
+if grep -Fq 'REVIEWED_COMMIT="$(git merge-base main' "${REPO_ROOT}/skills/run/SKILL.md" \
+  || grep -Fq 'REVIEWED_COMMIT="$(git merge-base main' "${REPO_ROOT}/skills/run/references/wave-review.md"; then
+  fail "SKILL.md / wave-review.md: REVIEWED_COMMITの初期化がmainにハードコードされていない（#160）" \
+    "ハードコードされた 'git merge-base main' が見つかった"
+else
+  pass "SKILL.md / wave-review.md: REVIEWED_COMMITの初期化がmainにハードコードされていない（#160）"
+fi
+
+# --- REVIEWED_COMMITの初期化がgh repo view --json defaultBranchRefで解決している（#160） ---
+if grep -Fq 'gh repo view --json defaultBranchRef' "${REPO_ROOT}/skills/run/SKILL.md" \
+  && grep -Fq 'gh repo view --json defaultBranchRef' "${REPO_ROOT}/skills/run/references/wave-review.md"; then
+  pass "SKILL.md / wave-review.md: REVIEWED_COMMITの初期化がgh repo viewでベースブランチを解決している（#160）"
+else
+  fail "SKILL.md / wave-review.md: REVIEWED_COMMITの初期化がgh repo viewでベースブランチを解決している（#160）" \
+    "$(grep -n 'defaultBranchRef' "${REPO_ROOT}/skills/run/SKILL.md" "${REPO_ROOT}/skills/run/references/wave-review.md")"
+fi
+
+if grep -Fq '進めない' "$H148_WAVEREVIEW_REF"; then
+  pass "wave-review.md: 失敗時にREVIEWED_COMMITを進めない規定が書かれている（#148）"
+else
+  fail "wave-review.md: 失敗時にREVIEWED_COMMITを進めない規定が書かれている（#148）" \
+    "$(cat "$H148_WAVEREVIEW_REF" 2>/dev/null)"
+fi
+
+# --- 指摘をその場で直さずreview issue化し、Epic:と前提:なしを書く ---
+case "$(cat "$RUN_SKILL_FLAT")" in
+  *'wave-review の指摘はその場で直さない'*'review'*'ラベル'*)
+    pass "run スキル: wave-reviewの指摘はその場で直さずreview issue化する旨が明記されている（#148）" ;;
+  *)
+    fail "run スキル: wave-reviewの指摘はその場で直さずreview issue化する旨が明記されている（#148）" \
+      "見つかりません" ;;
+esac
+
+H148_WAVEREVIEW_ISSUE_SECTION="$(awk '/^## 指摘の扱い/{f=1} /^## 最終ウェーブ/{f=0} f' "$H148_WAVEREVIEW_REF")"
+case "$H148_WAVEREVIEW_ISSUE_SECTION" in
+  *'- Epic:'*'- 前提: なし'*)
+    pass "wave-review.md: issue本文に - Epic: と - 前提: なし を書く指示がある（#148）" ;;
+  *)
+    fail "wave-review.md: issue本文に - Epic: と - 前提: なし を書く指示がある（#148）" \
+      "$H148_WAVEREVIEW_ISSUE_SECTION" ;;
+esac
+
+# --- 最終ウェーブ差分と全体整合をEpic末レビューが見ることが明記されている ---
+H148_EPICREVIEW_INTRO="$(awk '/^## Epic一括レビュー/{f=1} /^### R0:/{f=0} f' "${REPO_ROOT}/skills/run/SKILL.md")"
+case "$H148_EPICREVIEW_INTRO" in
+  *'未レビュー差分'*'全ウェーブ横断の整合'*)
+    pass "SKILL.md: Epic一括レビューの守備範囲（未レビュー差分＋全ウェーブ横断整合）が明記されている（#148）" ;;
+  *)
+    fail "SKILL.md: Epic一括レビューの守備範囲（未レビュー差分＋全ウェーブ横断整合）が明記されている（#148）" \
+      "$H148_EPICREVIEW_INTRO" ;;
+esac
+
+# --- Codex版は変更しない（README・wave-review.mdに明記。skills-codex/adapters/codexにwave-reviewを持ち込まない） ---
+if grep -Fq 'wave-review' "${REPO_ROOT}/README.md"; then
+  pass "README.md: wave-review節が追加されている（#148）"
+else
+  fail "README.md: wave-review節が追加されている（#148）" "見つかりません"
+fi
+
+if grep -Fq 'wave-review' "$H148_WAVEREVIEW_REF" && grep -Fq 'Codex' "$H148_WAVEREVIEW_REF"; then
+  pass "wave-review.md: Codex版には実装しない旨が明記されている（#148）"
+else
+  fail "wave-review.md: Codex版には実装しない旨が明記されている（#148）" \
+    "$(cat "$H148_WAVEREVIEW_REF" 2>/dev/null)"
+fi
+
+if grep -rFq 'wave-review' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md" 2>/dev/null; then
+  fail "skills-codex/dev-workflow-run/SKILL.md: wave-reviewを持ち込んでいない（#148）" \
+    "$(grep -n 'wave-review' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md")"
+else
+  pass "skills-codex/dev-workflow-run/SKILL.md: wave-reviewを持ち込んでいない（#148）"
+fi
+
+if grep -Fq 'wave-review' "${REPO_ROOT}/adapters/codex/run-loop.sh" 2>/dev/null; then
+  fail "adapters/codex/run-loop.sh: wave-reviewを持ち込んでいない（#148）" \
+    "$(grep -n 'wave-review' "${REPO_ROOT}/adapters/codex/run-loop.sh")"
+else
+  pass "adapters/codex/run-loop.sh: wave-reviewを持ち込んでいない（#148）"
+fi
+
+# ---------------------------------------------------------------------------
+# Task #149: Epic末レビューを観点別4本の並列起動にし、指摘のマージ・重複排除と
+#            指摘対応の並列化を行う
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #149: Epic末レビューの観点別4本並列起動と指摘対応の並列化 =="
+
+H149_RUN_SKILL="$RUN_SKILL_FLAT"
+H149_REVIEW_REF="${REPO_ROOT}/skills/run/references/review.md"
+H149_INSTRUCTIONS="$CORE_INSTRUCTIONS_FLAT"
+H149_README="${REPO_ROOT}/README.md"
+
+# --- R1: 4観点を同一メッセージで起動する手順になっており、理由が書かれている ---
+H149_R1_SECTION="$(awk '/^### R1: 一括レビューの実行/{f=1} /^### R2以降/{f=0} f' "$H149_RUN_SKILL")"
+
+if [ -z "$H149_R1_SECTION" ]; then
+  fail "skills/run/SKILL.md: 『### R1: 一括レビューの実行』節が見つかる（#149）" "節が空でした"
+else
+  pass "skills/run/SKILL.md: 『### R1: 一括レビューの実行』節が見つかる（#149）"
+fi
+
+case "$H149_R1_SECTION" in
+  *'同一メッセージで4本'*'correctness'*'readability'*'over-engineering'*'security'*)
+    pass "skills/run/SKILL.md: R1が4観点をevaluatorの同一メッセージで起動する旨が明記されている（#149）" ;;
+  *)
+    fail "skills/run/SKILL.md: R1が4観点をevaluatorの同一メッセージで起動する旨が明記されている（#149）" \
+      "$H149_R1_SECTION" ;;
+esac
+
+case "$H149_R1_SECTION" in
+  *'同一メッセージでなければ並行にならない'*)
+    pass "skills/run/SKILL.md: 同一メッセージで起動する理由（並行にならない）が書かれている（#149）" ;;
+  *)
+    fail "skills/run/SKILL.md: 同一メッセージで起動する理由（並行にならない）が書かれている（#149）" \
+      "$H149_R1_SECTION" ;;
+esac
+
+case "$H149_R1_SECTION" in
+  *'観点: correctness'*)
+    pass "skills/run/SKILL.md: R1のプロンプト例に観点行がある（#149）" ;;
+  *)
+    fail "skills/run/SKILL.md: R1のプロンプト例に観点行がある（#149）" "$H149_R1_SECTION" ;;
+esac
+
+# --- 「変更50ファイル超」の3分岐が維持され、観点別並列と両立する形で書かれている ---
+if grep -Fq 'CHANGED_FILES' "$H149_REVIEW_REF" \
+  && grep -Fq '> 50' "$H149_REVIEW_REF" \
+  && grep -Fq 'blast radius' "$H149_REVIEW_REF"; then
+  pass "review.md: 『変更50ファイル超』の3分岐が維持されている（#149）"
+else
+  fail "review.md: 『変更50ファイル超』の3分岐が維持されている（#149）" "3分岐の記述が見つかりません"
+fi
+
+if grep -Fq '4観点すべてに同じように適用する' "$H149_REVIEW_REF" \
+  || grep -Fq '観点別並列は' "$H149_REVIEW_REF"; then
+  pass "review.md: 3分岐と観点別並列が両立する旨が書かれている（#149）"
+else
+  fail "review.md: 3分岐と観点別並列が両立する旨が書かれている（#149）" "記述が見つかりません"
+fi
+
+# --- マージ・重複排除の手順が明文化されている ---
+H149_MERGE_SECTION="$(awk '/^### R1の結果マージ/{f=1} /^### R2: 指摘をissue化/{f=0} f' "$H149_REVIEW_REF")"
+
+if [ -z "$H149_MERGE_SECTION" ]; then
+  fail "review.md: 『### R1の結果マージ』節が見つかる（#149）" "節が空でした"
+else
+  pass "review.md: 『### R1の結果マージ』節が見つかる（#149）"
+fi
+
+case "$H149_MERGE_SECTION" in
+  *'同一 `location`'*'最も高い severity'*)
+    pass "review.md: 同一locationの統合と最高severityの採用が明記されている（#149）" ;;
+  *)
+    fail "review.md: 同一locationの統合と最高severityの採用が明記されている（#149）" "$H149_MERGE_SECTION" ;;
+esac
+
+case "$H149_MERGE_SECTION" in
+  *'由来した観点名'*)
+    pass "review.md: 由来した観点名の併記が明記されている（#149）" ;;
+  *)
+    fail "review.md: 由来した観点名の併記が明記されている（#149）" "$H149_MERGE_SECTION" ;;
+esac
+
+case "$H149_MERGE_SECTION" in
+  *'verdict の合成'*'1本でも'*'REQUEST_CHANGES'*)
+    pass "review.md: verdictの合成（1本でもREQUEST_CHANGESなら全体もREQUEST_CHANGES）が明記されている（#149）" ;;
+  *)
+    fail "review.md: verdictの合成（1本でもREQUEST_CHANGESなら全体もREQUEST_CHANGES）が明記されている（#149）" \
+      "$H149_MERGE_SECTION" ;;
+esac
+
+case "$H149_MERGE_SECTION" in
+  *'reviewed_commit'*'食い違った場合は'*'最も古いもの'*)
+    pass "review.md: reviewed_commit食い違い時は最も古いものを採用する旨が明記されている（#149）" ;;
+  *)
+    fail "review.md: reviewed_commit食い違い時は最も古いものを採用する旨が明記されている（#149）" \
+      "$H149_MERGE_SECTION" ;;
+esac
+
+# --- 1本失敗時に「記録して進む」扱いになっている（runを止めない） ---
+case "$H149_MERGE_SECTION" in
+  *'1本の失敗'*'記録して進む'*'run は止めない'*)
+    pass "review.md: 1本失敗時に『記録して進む』扱いでrunを止めない旨が明記されている（#149）" ;;
+  *)
+    fail "review.md: 1本失敗時に『記録して進む』扱いでrunを止めない旨が明記されている（#149）" \
+      "$H149_MERGE_SECTION" ;;
+esac
+
+# --- review issueに `- Epic:` と `- 前提: なし` を書く規定がある ---
+H149_R2_SECTION="$(awk '/^### R2: 指摘をissue化/{f=1} /^### R3: 指摘対応ループ/{f=0} f' "$H149_REVIEW_REF")"
+
+case "$H149_R2_SECTION" in
+  *'- Epic: #'*'- 前提: なし'*)
+    pass "review.md: review issueテンプレートに『- Epic:』と『- 前提: なし』がある（#149）" ;;
+  *)
+    fail "review.md: review issueテンプレートに『- Epic:』と『- 前提: なし』がある（#149）" \
+      "$H149_R2_SECTION" ;;
+esac
+
+case "$H149_R2_SECTION" in
+  *'plan-waves.sh'*)
+    pass "review.md: plan-waves.shがこの2行を読む旨が明記されている（#149）" ;;
+  *)
+    fail "review.md: plan-waves.shがこの2行を読む旨が明記されている（#149）" "$H149_R2_SECTION" ;;
+esac
+
+case "$H149_R2_SECTION" in
+  *'観点: [focus]'*)
+    pass "review.md: review issueテンプレートに観点（focus）が残る（#149）" ;;
+  *)
+    fail "review.md: review issueテンプレートに観点（focus）が残る（#149）" "$H149_R2_SECTION" ;;
+esac
+
+# --- R3: 通常のウェーブループでの並列処理になっており、最大2巡の打ち切りと
+#     未対応issueのPR本文への明記が維持されている ---
+H149_R3_SECTION="$(awk '/^### R3: 指摘対応ループ/{f=1} /^### R4: 打ち切り条件/{f=0} f' "$H149_REVIEW_REF")"
+
+case "$H149_R3_SECTION" in
+  *'1件ずつ generator に渡すのではなく'*'ウェーブループ'*'並列に'*)
+    pass "review.md: R3が通常のウェーブループでの並列処理になっている（#149）" ;;
+  *)
+    fail "review.md: R3が通常のウェーブループでの並列処理になっている（#149）" "$H149_R3_SECTION" ;;
+esac
+
+H149_R4_SECTION="$(awk '/^### R4: 打ち切り条件/{f=1} /^### レビュー粒度の調整/{f=0} f' "$H149_REVIEW_REF")"
+
+case "$H149_R4_SECTION" in
+  *'最大2巡まで'*)
+    pass "review.md: 最大2巡の打ち切りが維持されている（#149）" ;;
+  *)
+    fail "review.md: 最大2巡の打ち切りが維持されている（#149）" "$H149_R4_SECTION" ;;
+esac
+
+case "$H149_R4_SECTION" in
+  *'オープンのまま残す'*'PR本文の'*'未対応の指摘'*)
+    pass "review.md: 未対応issueをオープンのままPR本文に明記する規定が維持されている（#149）" ;;
+  *)
+    fail "review.md: 未対応issueをオープンのままPR本文に明記する規定が維持されている（#149）" "$H149_R4_SECTION" ;;
+esac
+
+# --- delta-reviewは観点別に分けず1本で行う旨が明記されている ---
+if grep -Fq '観点別に分けず' "$H149_REVIEW_REF" && grep -Fq '1本' "$H149_REVIEW_REF"; then
+  pass "review.md: delta-reviewは観点別に分けず1本で行う旨が明記されている（#149）"
+else
+  fail "review.md: delta-reviewは観点別に分けず1本で行う旨が明記されている（#149）" "記述が見つかりません"
+fi
+
+# --- core/instructions.md: 「レビュー基準」「レビューはEpic単位でまとめて行う」節が
+#     観点別並列の実態に合わせて更新されている ---
+H149_INSTR_REVIEW_SECTION="$(awk '/^### レビューはEpic単位でまとめて行う/{f=1} /^### 機械的ゲートの三段構成/{f=0} f' \
+  "$H149_INSTRUCTIONS")"
+
+case "$H149_INSTR_REVIEW_SECTION" in
+  *'観点'*'correctness'*'readability'*'over-engineering'*'security'*'同一メッセージで並列起動'*)
+    pass "core/instructions.md: レビューはEpic単位でまとめて行う節が観点別並列起動に更新されている（#149）" ;;
+  *)
+    fail "core/instructions.md: レビューはEpic単位でまとめて行う節が観点別並列起動に更新されている（#149）" \
+      "$H149_INSTR_REVIEW_SECTION" ;;
+esac
+
+case "$H149_INSTR_REVIEW_SECTION" in
+  *'Codex は'*'lanes=1'*'単一 evaluator'*)
+    pass "core/instructions.md: CodexはlanesはCodexは単一evaluatorのままである旨が明記されている（#149）" ;;
+  *)
+    fail "core/instructions.md: CodexはlanesはCodexは単一evaluatorのままである旨が明記されている（#149）" \
+      "$H149_INSTR_REVIEW_SECTION" ;;
+esac
+
+# --- Codexは単一evaluatorのままである旨がREADMEに書かれている ---
+H149_README_CODEXDIFF="$(awk '/^### Codex との差/{f=1} /^### `scripts\/plan-waves.sh --print`/{f=0} f' "$H149_README")"
+
+case "$H149_README_CODEXDIFF" in
+  *'単一 evaluator の全観点レビューのまま'*)
+    pass "README.md: Codexとの差にCodexは単一evaluatorのままである旨が書かれている（#149）" ;;
+  *)
+    fail "README.md: Codexとの差にCodexは単一evaluatorのままである旨が書かれている（#149）" \
+      "$H149_README_CODEXDIFF" ;;
+esac
+
+# --- 生成物（agents/*.md・codex-agents/*.toml）にもcore/instructions.mdのレビュー基準節の
+#     更新が反映されている（build.shの再生成漏れを検知する） ---
+for h149_f in agents/planner.md agents/generator.md agents/evaluator.md \
+              codex-agents/planner.toml codex-agents/generator.toml codex-agents/evaluator.toml; do
+  if grep -Fq -- '同一メッセージで並列起動' "${REPO_ROOT}/${h149_f}"; then
+    pass "${h149_f}: core/instructions.mdの観点別並列起動の記述が生成物に反映されている（#149）"
+  else
+    fail "${h149_f}: core/instructions.mdの観点別並列起動の記述が生成物に反映されている（#149）" \
+      "反映されていません"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# Review #163: SKILL.md のモデル記述・evaluator起動回数の上限が、#157（モデル分離）と
+#              #149（観点別並列 + 確度判定 + delta-review）に追随していること
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Review #163: SKILL.mdのモデル記述・evaluator起動回数の上限の整合 =="
+
+H163_SKILL_RAW="${REPO_ROOT}/skills/run/SKILL.md"
+H163_REVIEW_REF="${REPO_ROOT}/skills/run/references/review.md"
+H163_README="${REPO_ROOT}/README.md"
+
+# --- (1) SKILL.mdの「モデル構成の確認」節が、#157（既定sonnet + 確度判定だけ起動時opus上書き）
+#     と食い違う古い記述（generator・evaluatorとも固定）を含んでいない ---
+if grep -Fq 'generator（sonnet）・evaluator（opus）のモデルはエージェント定義側で固定されており' \
+  "$H163_SKILL_RAW"; then
+  fail "skills/run/SKILL.md: #157以前の古いモデル固定記述（generator・evaluator一括固定）が残っていない（#163）" \
+    "古い記述が見つかりました"
+else
+  pass "skills/run/SKILL.md: #157以前の古いモデル固定記述（generator・evaluator一括固定）が残っていない（#163）"
+fi
+
+H163_SKILL_MODEL_SECTION="$(awk '/^### モデル構成の確認/{f=1} /^### Epicブランチ \+ 作業 worktree の準備/{f=0} f' \
+  "$H163_SKILL_RAW")"
+
+case "$H163_SKILL_MODEL_SECTION" in
+  *'generator（sonnet）のモデルはエージェント定義側で固定されており'*'確度判定役として起動する呼び出しだけ'*'model: opus'*'起動時に上書きする'*)
+    pass "skills/run/SKILL.md: モデル構成の確認節がgenerator固定+evaluator確度判定役opus上書きの記述に揃っている（#163）" ;;
+  *)
+    fail "skills/run/SKILL.md: モデル構成の確認節がgenerator固定+evaluator確度判定役opus上書きの記述に揃っている（#163）" \
+      "$H163_SKILL_MODEL_SECTION" ;;
+esac
+
+# --- README.mdの対応箇所（推奨settings.jsonの直後）にも同じ趣旨の記述がある ---
+if grep -Fq 'generator（sonnet）のモデルはエージェント定義側で固定されており' "$H163_README" \
+  && grep -Fq '確度判定役として起動する呼び出しだけ' "$H163_README"; then
+  pass "README.md: モデル構成の記述がSKILL.mdと同じ趣旨（generator固定+evaluator確度判定役opus上書き）になっている（#163）"
+else
+  fail "README.md: モデル構成の記述がSKILL.mdと同じ趣旨（generator固定+evaluator確度判定役opus上書き）になっている（#163）" \
+    "記述が見つかりません"
+fi
+
+# --- (2) evaluator起動回数の上限が「観点別4本＋確度判定1本＋delta-review1本＝最大6回」で
+#     SKILL.md・review.md・core/instructions.md・READMEの4か所すべて一致している ---
+if grep -Fq 'evaluator 起動は最大6回' "$H163_SKILL_RAW"; then
+  pass "skills/run/SKILL.md: evaluator起動の上限が最大6回と明記されている（#163）"
+else
+  fail "skills/run/SKILL.md: evaluator起動の上限が最大6回と明記されている（#163）" \
+    "$(grep -n 'evaluator.*起動は最大' "$H163_SKILL_RAW" || echo '該当行が見つかりません')"
+fi
+
+if grep -Fq 'evaluator起動は最大6回' "$H163_REVIEW_REF"; then
+  pass "skills/run/references/review.md: evaluator起動の上限が最大6回と明記されている（#163）"
+else
+  fail "skills/run/references/review.md: evaluator起動の上限が最大6回と明記されている（#163）" \
+    "$(grep -n 'evaluator起動は最大' "$H163_REVIEW_REF" || echo '該当行が見つかりません')"
+fi
+
+# --- SKILL.md・review.md に、#149以前の古い上限（最大3回・最大5回）が残っていない ---
+for h163_pair in "$H163_SKILL_RAW:skills/run/SKILL.md" "$H163_REVIEW_REF:skills/run/references/review.md"; do
+  h163_file="${h163_pair%%:*}"
+  h163_label="${h163_pair#*:}"
+  if grep -E -q 'evaluator ?起動は最大(3|5)回' "$h163_file"; then
+    fail "${h163_label}: #149以前の古いevaluator起動上限（最大3回・最大5回）が残っていない（#163）" \
+      "$(grep -nE 'evaluator ?起動は最大(3|5)回' "$h163_file")"
+  else
+    pass "${h163_label}: #149以前の古いevaluator起動上限（最大3回・最大5回）が残っていない（#163）"
+  fi
+done
+
+# --- core/instructions.md・READMEも同じ内訳（観点別4本＋確度判定1本＋delta-review1本）を
+#     述べており、SKILL.md・review.mdの「最大6回」と矛盾しない ---
+for h163_doc in "$CORE_INSTRUCTIONS_FLAT:core/instructions.md" "$H163_README:README.md"; do
+  h163_docfile="${h163_doc%%:*}"
+  h163_doclabel="${h163_doc#*:}"
+  h163_docbody="$(cat "$h163_docfile" 2>/dev/null)"
+  case "$h163_docbody" in
+    *'観点別4本'*'確度判定1本'*'delta-review'*'1本'*)
+      pass "${h163_doclabel}: evaluator起動回数の内訳（観点別4本＋確度判定1本＋delta-review1本）が明記されている（#163）" ;;
+    *)
+      fail "${h163_doclabel}: evaluator起動回数の内訳（観点別4本＋確度判定1本＋delta-review1本）が明記されている（#163）" \
+        "内訳の記述が見つかりません" ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Review #162: 確度判定役のopus指定が、Task/Agentツールの起動時パラメータとして渡す手順
+#              になっており、プロンプト本文の1行に留まっていないこと
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Review #162: 確度判定役のopus起動がTask/Agentの起動時パラメータになっている =="
+
+H162_REVIEW_REF="${REPO_ROOT}/skills/run/references/review.md"
+H162_CONFIDENCE_SECTION="$(awk '/^### 確度判定（R1 と R2 の間/{f=1} /^### R2: 指摘をissue化/{f=0} f' \
+  "$H162_REVIEW_REF")"
+
+if [ -z "$H162_CONFIDENCE_SECTION" ]; then
+  fail "review.md: 『### 確度判定』節が見つかる（#162）" "節が空でした"
+else
+  pass "review.md: 『### 確度判定』節が見つかる（#162）"
+fi
+
+# --- プロンプト本文の中の1行（- 起動時モデル指定: model: opus）に留まっていない ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'- 起動時モデル指定: model: opus'*)
+    fail "review.md: 確度判定のopus指定がプロンプト本文の1行に留まっていない（#162）" \
+      "旧来の『- 起動時モデル指定: model: opus』行が残っています" ;;
+  *)
+    pass "review.md: 確度判定のopus指定がプロンプト本文の1行に留まっていない（#162）" ;;
+esac
+
+# --- Task/Agentツールの起動時パラメータとしてmodelを渡す手順が明記されている ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'Task/Agent ツールの起動時パラメータ'*'model: opus'*)
+    pass "review.md: Task/Agentツールの起動時パラメータでmodel: opusを渡す手順が明記されている（#162）" ;;
+  *)
+    fail "review.md: Task/Agentツールの起動時パラメータでmodel: opusを渡す手順が明記されている（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+# --- プロンプト雛形自体にも起動時パラメータの行がある ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'Task/Agent起動パラメータ: model: opus'*)
+    pass "review.md: 確度判定のプロンプト雛形にTask/Agent起動パラメータの行がある（#162）" ;;
+  *)
+    fail "review.md: 確度判定のプロンプト雛形にTask/Agent起動パラメータの行がある（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+# --- 上書きが効いたかを確認できるよう、出力JSONにモデル名を含めさせる、または
+#     record-agent-tokens.shのnoteにモデル名を記録する手順がある ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'model'*'フィールド'*)
+    pass "review.md: 確度判定の出力JSONに実際に動いたモデル名を含めさせる規定がある（#162）" ;;
+  *)
+    fail "review.md: 確度判定の出力JSONに実際に動いたモデル名を含めさせる規定がある（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+case "$H162_CONFIDENCE_SECTION" in
+  *'--note'*'model='*)
+    pass "review.md: record-agent-tokens.shの--noteにモデル名を記録する手順がある（#162）" ;;
+  *)
+    fail "review.md: record-agent-tokens.shの--noteにモデル名を記録する手順がある（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+# --- 起動時モデル上書きが実現できなかった場合の扱い（据え置き＝発見役と同一モデルで
+#     確度判定する旨）がADR-0006の決定Cと同じ「記録して進む」枠で明記されている ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'技術的に実現できなかった場合'*'同一モデル'*'記録して進む'*)
+    pass "review.md: 起動時モデル上書きが実現できなかった場合の据え置き扱いが明記されている（#162）" ;;
+  *)
+    fail "review.md: 起動時モデル上書きが実現できなかった場合の据え置き扱いが明記されている（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+# --- ADR-0006の(b)起動時モデル上書きが確認済みの事実として引用されている ---
+case "$H162_CONFIDENCE_SECTION" in
+  *'ADR-0006'*'確認したとおり'*)
+    pass "review.md: ADR-0006が確認した事実として起動時モデル上書きを引用している（#162）" ;;
+  *)
+    fail "review.md: ADR-0006が確認した事実として起動時モデル上書きを引用している（#162）" \
+      "$H162_CONFIDENCE_SECTION" ;;
+esac
+
+# --- 生成物側（core/roles/evaluator.md由来）は変更していないので、既存の記述と矛盾しない ---
+if grep -Fq '起動時に `model: opus` を明示して上書き' "${REPO_ROOT}/core/roles/evaluator.md"; then
+  pass "core/roles/evaluator.md: 確度判定役は起動時にmodel: opusを明示して上書きする旨が維持されている（#162）"
+else
+  fail "core/roles/evaluator.md: 確度判定役は起動時にmodel: opusを明示して上書きする旨が維持されている（#162）" \
+    "記述が見つかりません"
+fi
+
+# ---------------------------------------------------------------------------
+# Task #153: レーンをウェーブ横断で維持し generator の cold start を除去する
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #153/#152: cross-wave lane reuseの検証結果とその訂正の明記 =="
+
+H153_ADR="${REPO_ROOT}/docs/adr/0004-cross-wave-lane-reuse.md"
+
+if [ -f "$H153_ADR" ]; then
+  pass "docs/adr/0004-cross-wave-lane-reuse.md が新規作成されている（#153）"
+else
+  fail "docs/adr/0004-cross-wave-lane-reuse.md が新規作成されている（#153）" "ファイルが存在しません"
+fi
+
+# --- Task #153当時の誤った結論と、Task #152による訂正の両方がADRに書かれている ---
+H153_ADR_BODY="$(cat "$H153_ADR" 2>/dev/null)"
+case "$H153_ADR_BODY" in
+  *'`SendMessage` ツールが実在する'*)
+    pass "ADR 0004: SendMessageツールが実在するという訂正後の事実が書かれている（#152）" ;;
+  *)
+    fail "ADR 0004: SendMessageツールが実在するという訂正後の事実が書かれている（#152）" \
+      "$H153_ADR_BODY" ;;
+esac
+case "$H153_ADR_BODY" in
+  *'この結論は誤りだった'*)
+    pass "ADR 0004: Task #153の当初結論が誤りだったと明記されている（#152）" ;;
+  *)
+    fail "ADR 0004: Task #153の当初結論が誤りだったと明記されている（#152）" \
+      "$H153_ADR_BODY" ;;
+esac
+case "$H153_ADR_BODY" in
+  *'本 Epic では実際に cross-wave 継続を実装・実地検証してはいない'*)
+    pass "ADR 0004: 機構はあるが本Epicでは未検証である旨が明記されている（#152）" ;;
+  *)
+    fail "ADR 0004: 機構はあるが本Epicでは未検証である旨が明記されている（#152）" \
+      "$H153_ADR_BODY" ;;
+esac
+
+# --- 決定: 本Epicのスコープでは実装しない（見送り）ことが明記されている ---
+case "$H153_ADR_BODY" in
+  *'レーンのウェーブ横断維持は、本 Epic のスコープでは実装しない'*)
+    pass "ADR 0004: 本Epicのスコープでは実装しない（見送り）という決定が明記されている（#152）" ;;
+  *)
+    fail "ADR 0004: 本Epicのスコープでは実装しない（見送り）という決定が明記されている（#152）" \
+      "$H153_ADR_BODY" ;;
+esac
+
+# --- フォールバック用の環境変数を追加しなかった判断と理由がADRにある ---
+case "$H153_ADR_BODY" in
+  *'環境変数は追加しない'*)
+    pass "ADR 0004: フォールバック用環境変数を追加しない判断と理由が書かれている（#153）" ;;
+  *)
+    fail "ADR 0004: フォールバック用環境変数を追加しない判断と理由が書かれている（#153）" \
+      "$H153_ADR_BODY" ;;
+esac
+
+# --- 余ったレーンの扱いが決まっている ---
+case "$H153_ADR_BODY" in
+  *'余ったレーンの扱い'*)
+    pass "ADR 0004: 余ったレーンの扱いが決まっている（#153）" ;;
+  *)
+    fail "ADR 0004: 余ったレーンの扱いが決まっている（#153）" "$H153_ADR_BODY" ;;
+esac
+
+# --- SKILL.md Step 3: バッチ内の動的補充とバッチ間（ウェーブ間）継続の区別が明確 ---
+H153_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$RUN_SKILL_FLAT")"
+case "$H153_RS_STEP3" in
+  *'バッチ内'*'バッチ間'*'Task tool'*)
+    pass "SKILL.md: バッチ内の動的補充とバッチ間（ウェーブ間）継続の区別が明確に書かれている（#153）" ;;
+  *)
+    fail "SKILL.md: バッチ内の動的補充とバッチ間（ウェーブ間）継続の区別が明確に書かれている（#153）" \
+      "$H153_RS_STEP3" ;;
+esac
+
+# --- レーンはウェーブをまたいで維持されない旨とADR参照がSKILL.mdにある ---
+case "$H153_RS_STEP3" in
+  *'レーンはウェーブごとに新規 spawn する現行の方式のまま'*'0004-cross-wave-lane-reuse.md'*)
+    pass "SKILL.md: レーンをウェーブごとに新規spawnする現行方式を維持する旨とADR参照がある（#153）" ;;
+  *)
+    fail "SKILL.md: レーンをウェーブごとに新規spawnする現行方式を維持する旨とADR参照がある（#153）" \
+      "$H153_RS_STEP3" ;;
+esac
+
+# --- core/roles/generator.md にWAVE_BASE追従の書き分け（区別が生じない理由）が明記されている ---
+H153_GEN_ROLE="${REPO_ROOT}/core/roles/generator.md"
+if grep -Fq 'タスク境界／ウェーブ境界という書き分けは生じない' "$H153_GEN_ROLE"; then
+  pass "core/roles/generator.md: WAVE_BASE追従がタスク境界/ウェーブ境界で書き分け不要である理由が明記されている（#153）"
+else
+  fail "core/roles/generator.md: WAVE_BASE追従がタスク境界/ウェーブ境界で書き分け不要である理由が明記されている（#153）" \
+    "$(grep -n 'WAVE_BASE\|境界' "$H153_GEN_ROLE")"
+fi
+
+# --- core/instructions.md「タスク選定順序」項目3に、連続処理が同一ウェーブ内に限られる旨が追記されている ---
+H153_INSTR="${REPO_ROOT}/core/instructions.md"
+H153_INSTR_SEC="$(awk '/^### タスク選定順序/{f=1} /^## ブランチ戦略/{f=0} f' "$H153_INSTR")"
+case "$H153_INSTR_SEC" in
+  *'この連続処理は同一ウェーブ内に限られる'*)
+    pass "core/instructions.md: レーンの連続処理が同一ウェーブ内に限られる旨が明記されている（#153）" ;;
+  *)
+    fail "core/instructions.md: レーンの連続処理が同一ウェーブ内に限られる旨が明記されている（#153）" \
+      "$H153_INSTR_SEC" ;;
+esac
+
+# --- README.md にcross-wave lane reuseの検証結果が明記されている ---
+if grep -Fq 'cross-wave lane reuse' "${REPO_ROOT}/README.md"; then
+  pass "README.md: cross-wave lane reuseの検証結果が明記されている（#153）"
+else
+  fail "README.md: cross-wave lane reuseの検証結果が明記されている（#153）" "見つかりません"
+fi
+
+# --- README.md にTask #153当時の誤った結論とTask #152による訂正の両方が明記されている ---
+if grep -Fq '`SendMessage` ツールが実在し' "${REPO_ROOT}/README.md"; then
+  pass "README.md: SendMessageツールが実在するという訂正後の事実が明記されている（#152）"
+else
+  fail "README.md: SendMessageツールが実在するという訂正後の事実が明記されている（#152）" "見つかりません"
+fi
+
+# --- 生成物（agents/*.md・codex-agents/*.toml）が core/ と一致している（build.sh実行済み） ---
+H153_BUILD_CLAUDE_CHECK="$(bash "${REPO_ROOT}/adapters/claude/build.sh" --check 2>&1)"
+H153_BUILD_CLAUDE_EXIT=$?
+if [ "$H153_BUILD_CLAUDE_EXIT" -eq 0 ]; then
+  pass "adapters/claude/build.sh --check: agents/ が core/ と一致している（#153）"
+else
+  fail "adapters/claude/build.sh --check: agents/ が core/ と一致している（#153）" "$H153_BUILD_CLAUDE_CHECK"
+fi
+
+H153_BUILD_CODEX_CHECK="$(bash "${REPO_ROOT}/adapters/codex/build.sh" --check 2>&1)"
+H153_BUILD_CODEX_EXIT=$?
+if [ "$H153_BUILD_CODEX_EXIT" -eq 0 ]; then
+  pass "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#153）"
+else
+  fail "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#153）" "$H153_BUILD_CODEX_CHECK"
+fi
+
+# ---------------------------------------------------------------------------
+# Task #156: 完了報告を「証跡はファイル、報告は1行」に変えて出力トークンを削る
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== 完了報告の証跡ファイル化・1行化（#156） =="
+
+FORMAT_LANE_RESULT_SCRIPT="${REPO_ROOT}/scripts/format-lane-result.sh"
+
+if [ -x "$FORMAT_LANE_RESULT_SCRIPT" ]; then
+  pass "scripts/format-lane-result.sh: 実行可能ファイルとして存在する（#156）"
+else
+  fail "scripts/format-lane-result.sh: 実行可能ファイルとして存在する（#156）" "見つからない、または実行権限が無い"
+fi
+
+# --- ケース1: 証跡ファイル1件（成功）から1レーン分の断片を組み立てる ---
+H156_EV_A1="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
+cat > "$H156_EV_A1" <<'FIXTURE'
+== dummy test output ==
+ok  	example.com/pkg	0.032s
+---
+task=5
+lane=A
+status=success
+start_epoch=1000
+end_epoch=1480
+start_hm=12:03
+end_hm=12:11
+duration_sec=480
+skips=0
+runner=go
+pattern=none
+FIXTURE
+
+H156_OUT_1="$(bash "$FORMAT_LANE_RESULT_SCRIPT" --lane A --file "$H156_EV_A1")"
+H156_EXIT_1=$?
+assert_exit_code "format-lane-result.sh: 単一の成功タスクは exit 0（#156）" 0 "$H156_EXIT_1"
+assert_eq "format-lane-result.sh: 単一の成功タスクの表示（#156）" "A=#5(12:03-12:11 8m00s)" "$H156_OUT_1"
+
+# --- ケース2: 同一レーンで複数タスク（1件失敗）を連続処理した場合、時刻区間は通しで、
+#     duration_secは合算し、失敗タスクには (失敗) を付記する ---
+H156_EV_A2="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
+cat > "$H156_EV_A2" <<'FIXTURE'
+== dummy test output ==
+---
+task=11
+lane=A
+status=fail
+start_epoch=1481
+end_epoch=1721
+start_hm=12:11
+end_hm=12:16
+duration_sec=240
+skips=unknown
+runner=unknown
+pattern=none
+FIXTURE
+
+H156_OUT_2="$(bash "$FORMAT_LANE_RESULT_SCRIPT" --lane A --file "$H156_EV_A1" --file "$H156_EV_A2")"
+assert_eq "format-lane-result.sh: 連続処理（成功+失敗）の表示（#156）" \
+  "A=#5,#11(失敗)(12:03-12:16 12m00s)" "$H156_OUT_2"
+
+# --- ケース3: start_hm/end_hm を持たない証跡ファイルは時刻区間を省略する ---
+H156_EV_NOHM="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
+cat > "$H156_EV_NOHM" <<'FIXTURE'
+task=20
+lane=C
+status=success
+duration_sec=60
+FIXTURE
+
+assert_eq "format-lane-result.sh: start_hm/end_hm欠落時は時刻区間を省略する（#156）" \
+  "C=#20(1m00s)" "$(bash "$FORMAT_LANE_RESULT_SCRIPT" --lane C --file "$H156_EV_NOHM")"
+
+# --- ケース4: 証跡ファイルが存在しない場合は exit 2 で fail loud（黙って進めない） ---
+bash "$FORMAT_LANE_RESULT_SCRIPT" --lane B --file "${TMPDIR:-/tmp}/dw-test-nonexistent-evidence-156" \
+  >/dev/null 2>/dev/null
+H156_MISSING_EXIT=$?
+assert_exit_code "format-lane-result.sh: 証跡ファイルが無い場合は exit 2（#156）" 2 "$H156_MISSING_EXIT"
+
+# --- ケース5: 必須フィールド（task=/status=/duration_sec=）欠落は exit 2 ---
+H156_EV_BROKEN="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
+cat > "$H156_EV_BROKEN" <<'FIXTURE'
+lane=A
+status=success
+FIXTURE
+bash "$FORMAT_LANE_RESULT_SCRIPT" --lane A --file "$H156_EV_BROKEN" >/dev/null 2>/dev/null
+assert_exit_code "format-lane-result.sh: 必須フィールド欠落は exit 2（#156）" 2 "$?"
+
+# --- ケース6: --lane / --file が無い場合は exit 2（引数エラー） ---
+bash "$FORMAT_LANE_RESULT_SCRIPT" >/dev/null 2>/dev/null
+assert_exit_code "format-lane-result.sh: --lane 省略は exit 2（#156）" 2 "$?"
+bash "$FORMAT_LANE_RESULT_SCRIPT" --lane A >/dev/null 2>/dev/null
+assert_exit_code "format-lane-result.sh: --file 省略は exit 2（#156）" 2 "$?"
+
+# --- core/roles/generator.md: 完了報告がタスク1件につき1行（5項目）になっている ---
+H156_GEN_ROLE="${REPO_ROOT}/core/roles/generator.md"
+H156_GEN_REPORT="$(awk '/^## 完了報告/{f=1} f' "$H156_GEN_ROLE")"
+case "$H156_GEN_REPORT" in
+  *'証跡はファイルに書き出し'*'パスと1行の判定だけを載せる'*)
+    pass "core/roles/generator.md: 完了報告が『証跡はファイル・報告は1行』の方針になっている（#156）" ;;
+  *)
+    fail "core/roles/generator.md: 完了報告が『証跡はファイル・報告は1行』の方針になっている（#156）" \
+      "$H156_GEN_REPORT" ;;
+esac
+
+case "$H156_GEN_REPORT" in
+  *'タスク番号'*'成功・見送り'*'SKIP件数'*'所要秒数'*'証跡ファイルのパス'*)
+    pass "core/roles/generator.md: 報告1行の必須5項目（タスク番号/成功・見送り/SKIP件数/所要秒数/証跡ファイルのパス）が明記されている（#156）" ;;
+  *)
+    fail "core/roles/generator.md: 報告1行の必須5項目が明記されている（#156）" "$H156_GEN_REPORT" ;;
+esac
+
+if grep -Fq 'dw-lane-evidence.XXXXXX' "$H156_GEN_ROLE"; then
+  pass "core/roles/generator.md: 証跡ファイルの命名規則が #145 の dw-lane-* 系列に揃っている（#156）"
+else
+  fail "core/roles/generator.md: 証跡ファイルの命名規則が #145 の dw-lane-* 系列に揃っている（#156）" \
+    "dw-lane-evidence.XXXXXX が見つからない"
+fi
+
+if grep -Fq '${TMPDIR:-/tmp}' "$H156_GEN_ROLE"; then
+  pass "core/roles/generator.md: 証跡ファイルが \${TMPDIR:-/tmp}（リポジトリ外）に置かれる（#156）"
+else
+  fail "core/roles/generator.md: 証跡ファイルが \${TMPDIR:-/tmp}（リポジトリ外）に置かれる（#156）" "見つからない"
+fi
+
+# --- 完了報告の節から「実出力を貼ること」という旧来の要求が消えている ---
+H156_GEN_REPORT_OLD_STRICT="$(printf '%s\n' "$H156_GEN_REPORT" | grep -c '実出力を貼る\|実出力をそのまま報告に貼る' || true)"
+assert_eq "core/roles/generator.md: 完了報告節に『実出力を貼る』という旧来の要求が残っていない（#156）" \
+  "0" "$H156_GEN_REPORT_OLD_STRICT"
+
+# --- skills/run/SKILL.md (+ references) Step 3: 1行報告・証跡ファイル・5項目の要求がある ---
+H156_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$RUN_SKILL_FLAT")"
+case "$H156_RS_STEP3" in
+  *'証跡はファイルに書き出し'*'パスと1行の判定だけを載せる'*)
+    pass "SKILL.md Step 3: レーンプロンプトが『証跡はファイル・報告は1行』の方針を要求している（#156）" ;;
+  *)
+    fail "SKILL.md Step 3: レーンプロンプトが『証跡はファイル・報告は1行』の方針を要求している（#156）" \
+      "$H156_RS_STEP3" ;;
+esac
+
+case "$H156_RS_STEP3" in
+  *'タスク番号'*'成功・見送り'*'SKIP件数'*'所要秒数'*'証跡ファイルのパス'*)
+    pass "SKILL.md Step 3: 報告1行の必須5項目が明記されている（#156）" ;;
+  *)
+    fail "SKILL.md Step 3: 報告1行の必須5項目が明記されている（#156）" "$H156_RS_STEP3" ;;
+esac
+
+if grep -Fq 'dw-lane-evidence.XXXXXX' "${REPO_ROOT}/skills/run/SKILL.md"; then
+  pass "skills/run/SKILL.md: 証跡ファイルの命名規則が #145 の dw-lane-* 系列に揃っている（#156）"
+else
+  fail "skills/run/SKILL.md: 証跡ファイルの命名規則が #145 の dw-lane-* 系列に揃っている（#156）" "見つからない"
+fi
+
+# --- skills/run/references/progress-display.md: レーン結果の組み立てをスクリプトへ切り出した ---
+H156_PROGRESS_DISPLAY="${REPO_ROOT}/skills/run/references/progress-display.md"
+if grep -Fq 'format-lane-result.sh' "$H156_PROGRESS_DISPLAY"; then
+  pass "progress-display.md: レーン結果の組み立てを scripts/format-lane-result.sh へ切り出している（#156）"
+else
+  fail "progress-display.md: レーン結果の組み立てを scripts/format-lane-result.sh へ切り出している（#156）" "見つからない"
+fi
+
+# --- skills-codex/dev-workflow-run/SKILL.md: Codex 版も同じ方針に揃っている ---
+H156_CODEX_SKILL="${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md"
+H156_CODEX_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$H156_CODEX_SKILL")"
+case "$H156_CODEX_STEP3" in
+  *'証跡はファイルに書き出し'*'パスと1行の判定だけを載せる'*)
+    pass "skills-codex SKILL.md Step 3: 『証跡はファイル・報告は1行』の方針を要求している（#156）" ;;
+  *)
+    fail "skills-codex SKILL.md Step 3: 『証跡はファイル・報告は1行』の方針を要求している（#156）" \
+      "$H156_CODEX_STEP3" ;;
+esac
+
+case "$H156_CODEX_STEP3" in
+  *'タスク番号'*'成功・見送り'*'SKIP件数'*'所要秒数'*'証跡ファイルのパス'*)
+    pass "skills-codex SKILL.md Step 3: 報告1行の必須5項目が明記されている（#156）" ;;
+  *)
+    fail "skills-codex SKILL.md Step 3: 報告1行の必須5項目が明記されている（#156）" "$H156_CODEX_STEP3" ;;
+esac
+
+if grep -Fq 'dw-lane-evidence.XXXXXX' "$H156_CODEX_SKILL"; then
+  pass "skills-codex SKILL.md: 証跡ファイルの命名規則が #145 の dw-lane-* 系列に揃っている（#156）"
+else
+  fail "skills-codex SKILL.md: 証跡ファイルの命名規則が #145 の dw-lane-* 系列に揃っている（#156）" "見つからない"
+fi
+
+# --- 生成物（agents/*.md・codex-agents/*.toml）が core/ と一致している（build.sh実行済み） ---
+H156_BUILD_CLAUDE_CHECK="$(bash "${REPO_ROOT}/adapters/claude/build.sh" --check 2>&1)"
+H156_BUILD_CLAUDE_EXIT=$?
+if [ "$H156_BUILD_CLAUDE_EXIT" -eq 0 ]; then
+  pass "adapters/claude/build.sh --check: agents/ が core/ と一致している（#156）"
+else
+  fail "adapters/claude/build.sh --check: agents/ が core/ と一致している（#156）" "$H156_BUILD_CLAUDE_CHECK"
+fi
+
+H156_BUILD_CODEX_CHECK="$(bash "${REPO_ROOT}/adapters/codex/build.sh" --check 2>&1)"
+H156_BUILD_CODEX_EXIT=$?
+if [ "$H156_BUILD_CODEX_EXIT" -eq 0 ]; then
+  pass "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#156）"
+else
+  fail "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#156）" "$H156_BUILD_CODEX_CHECK"
+fi
+
+# ---------------------------------------------------------------------------
+# Task #155: PostToolUse フックで型/lint エラーを即時差し戻す（scripts/edit-check.sh）
+#
+# marker-root.sh の解決は DEV_WORKFLOW_MARKER_ROOT で明示指定し、実リポジトリの
+# .claude/.dev-workflow-edit-check を汚さない一時ディレクトリへ隔離する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== 編集時チェック（PostToolUse フック・#155） =="
+
+EDIT_CHECK_SCRIPT="${REPO_ROOT}/scripts/edit-check.sh"
+H155_MARKER_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/dw-edit-check-marker.XXXXXX")"
+H155_WORK="$(mktemp -d "${TMPDIR:-/tmp}/dw-edit-check-work.XXXXXX")"
+printf 'package main\n' > "${H155_WORK}/sample.go"
+printf 'const x = 1;\n' > "${H155_WORK}/sample.ts"
+
+edit_check_write() {
+  # edit_check_write <spec>
+  printf '%s\n' "$1" | DEV_WORKFLOW_MARKER_ROOT="$H155_MARKER_ROOT" bash "$EDIT_CHECK_SCRIPT" --write >/dev/null 2>&1
+}
+edit_check_clear() {
+  DEV_WORKFLOW_MARKER_ROOT="$H155_MARKER_ROOT" bash "$EDIT_CHECK_SCRIPT" --clear >/dev/null 2>&1
+}
+edit_check_run_hook() {
+  # edit_check_run_hook <file> [追加の環境変数 VAR=val ...]
+  local file="$1"; shift
+  printf '{"tool_input":{"file_path":"%s"}}' "$file" \
+    | env DEV_WORKFLOW_MARKER_ROOT="$H155_MARKER_ROOT" "$@" bash "$EDIT_CHECK_SCRIPT"
+}
+
+# --- ケース1: 節が無い（マーカーファイル未設定）場合は何もしない（exit 0・即座に返る） ---
+edit_check_clear
+H155_OUT_NOSPEC="$(edit_check_run_hook "${H155_WORK}/sample.go" 2>&1)"
+H155_EXIT_NOSPEC=$?
+assert_exit_code "edit-check.sh: 節が無ければ exit 0（既存Epicの挙動を変えない）" 0 "$H155_EXIT_NOSPEC"
+assert_eq "edit-check.sh: 節が無ければ標準出力・標準エラーとも空" "" "$H155_OUT_NOSPEC"
+
+# --- ケース2: --write でマーカーファイルへ原子的に書き込み、--clear で消える ---
+edit_check_write '*.go gofmt -l {file}'
+if [ -f "${H155_MARKER_ROOT}/.claude/.dev-workflow-edit-check" ]; then
+  pass "edit-check.sh --write: マーカーファイルが作られる"
+else
+  fail "edit-check.sh --write: マーカーファイルが作られる" "見つからない: ${H155_MARKER_ROOT}/.claude/.dev-workflow-edit-check"
+fi
+
+H155_MARKER_CONTENT="$(cat "${H155_MARKER_ROOT}/.claude/.dev-workflow-edit-check" 2>/dev/null)"
+assert_eq "edit-check.sh --write: 書き込んだ仕様がそのまま読める" "*.go gofmt -l {file}" "$H155_MARKER_CONTENT"
+
+edit_check_clear
+if [ -f "${H155_MARKER_ROOT}/.claude/.dev-workflow-edit-check" ]; then
+  fail "edit-check.sh --clear: マーカーファイルが消える（前回Epicの残留防止）" "まだ存在する"
+else
+  pass "edit-check.sh --clear: マーカーファイルが消える（前回Epicの残留防止）"
+fi
+
+# --- ケース3: globに一致し、コマンドが成功（0終了）すれば exit 0（違反なし） ---
+edit_check_write '*.go true'
+H155_EXIT_OK=$(edit_check_run_hook "${H155_WORK}/sample.go" >/dev/null 2>&1; echo $?)
+assert_exit_code "edit-check.sh: チェックが0終了ならexit 0（違反なし）" 0 "$H155_EXIT_OK"
+
+# --- ケース4: globに一致し、コマンドが非0終了（違反）なら Claude 契約で exit 2 + stderr ---
+edit_check_write '*.go echo VIOLATION-MARKER >&2; false'
+H155_STDERR_VIOLATION="$(edit_check_run_hook "${H155_WORK}/sample.go" 2>&1 1>/dev/null)"
+H155_EXIT_VIOLATION=$(edit_check_run_hook "${H155_WORK}/sample.go" >/dev/null 2>&1; echo $?)
+assert_exit_code "edit-check.sh: 違反検出時はClaude契約でexit 2" 2 "$H155_EXIT_VIOLATION"
+case "$H155_STDERR_VIOLATION" in
+  *"sample.go"*"VIOLATION-MARKER"*)
+    pass "edit-check.sh: 違反メッセージにコマンド出力と対象ファイルが含まれる" ;;
+  *)
+    fail "edit-check.sh: 違反メッセージにコマンド出力と対象ファイルが含まれる" "$H155_STDERR_VIOLATION" ;;
+esac
+
+# --- ケース5: DEV_WORKFLOW_HOOK_VENDOR=codex では exit 0 + stdout の continue:false JSON ---
+H155_STDOUT_CODEX="$(edit_check_run_hook "${H155_WORK}/sample.go" DEV_WORKFLOW_HOOK_VENDOR=codex 2>/dev/null)"
+H155_EXIT_CODEX=$(edit_check_run_hook "${H155_WORK}/sample.go" DEV_WORKFLOW_HOOK_VENDOR=codex >/dev/null 2>&1; echo $?)
+assert_exit_code "edit-check.sh: Codex契約はexit 0（JSONで通知）" 0 "$H155_EXIT_CODEX"
+case "$H155_STDOUT_CODEX" in
+  *'"continue":false'*'VIOLATION-MARKER'*)
+    pass "edit-check.sh: Codex契約のJSONにcontinue:falseと違反内容が含まれる" ;;
+  *)
+    fail "edit-check.sh: Codex契約のJSONにcontinue:falseと違反内容が含まれる" "$H155_STDOUT_CODEX" ;;
+esac
+
+# --- ケース6: DEV_WORKFLOW_HOOK_VENDOR=exit-code では exit 1 + stderr（pre-commit想定） ---
+H155_EXIT_PRECOMMIT=$(edit_check_run_hook "${H155_WORK}/sample.go" DEV_WORKFLOW_HOOK_VENDOR=exit-code >/dev/null 2>&1; echo $?)
+assert_exit_code "edit-check.sh: exit-code契約（pre-commit）はexit 1" 1 "$H155_EXIT_PRECOMMIT"
+
+# --- ケース7: コマンド不在はフック自体のエラーとしてブロックしない（exit 0） ---
+edit_check_write '*.go dw-edit-check-nonexistent-command-xyz {file}'
+H155_EXIT_NOTFOUND=$(edit_check_run_hook "${H155_WORK}/sample.go" >/dev/null 2>&1; echo $?)
+assert_exit_code "edit-check.sh: コマンド不在はブロックしない（exit 0）" 0 "$H155_EXIT_NOTFOUND"
+
+# --- ケース8: タイムアウトはフック自体のエラーとしてブロックしない（exit 0） ---
+edit_check_write '*.go sleep 5'
+H155_EXIT_TIMEOUT=$(edit_check_run_hook "${H155_WORK}/sample.go" DEV_WORKFLOW_EDIT_CHECK_TIMEOUT=1 >/dev/null 2>&1; echo $?)
+assert_exit_code "edit-check.sh: タイムアウトはブロックしない（exit 0）" 0 "$H155_EXIT_TIMEOUT"
+
+# --- ケース9: 一致するglob行が無ければ何もしない（他ファイル種別のチェックコマンドは走らない） ---
+edit_check_write '*.go echo SHOULD-NOT-RUN >&2; false'
+H155_EXIT_NOMATCH=$(edit_check_run_hook "${H155_WORK}/sample.ts" >/dev/null 2>&1; echo $?)
+assert_exit_code "edit-check.sh: 一致するglobが無ければexit 0（他ファイル種別には影響しない）" 0 "$H155_EXIT_NOMATCH"
+
+# --- ケース10: DEV_WORKFLOW_EDIT_CHECK 環境変数はマーカーファイルより優先する ---
+edit_check_write '*.go true'
+H155_EXIT_ENV_OVERRIDE=$(printf '{"tool_input":{"file_path":"%s"}}' "${H155_WORK}/sample.go" \
+  | DEV_WORKFLOW_MARKER_ROOT="$H155_MARKER_ROOT" DEV_WORKFLOW_EDIT_CHECK='*.go false' bash "$EDIT_CHECK_SCRIPT" \
+  >/dev/null 2>&1; echo $?)
+assert_exit_code "edit-check.sh: DEV_WORKFLOW_EDIT_CHECK環境変数がマーカーファイルより優先する" 2 "$H155_EXIT_ENV_OVERRIDE"
+
+# --- ケース11: 即座に成功するチェックはタイムアウト秒数未満で返る（#158の回帰検出） ---
+#
+# run_with_timeout の監視用サブシェル ( sleep "$secs"; kill ... ) が、成功パスでも
+# 標準出力をコマンド置換のパイプに残したまま孤児化し、EOF待ちで常にタイムアウト秒数ぶん
+# ブロックしていたバグ（レビュー#158）。従来のケース3（終了コードのみ検証）はこの遅延を
+# 検出できなかったため、所要時間そのものを assert する。DEV_WORKFLOW_EDIT_CHECK_TIMEOUT=10
+# を指定し、経過が3秒未満（十分に10秒を下回る）であることを確認する。
+edit_check_write '*.go true'
+H158_START="$(date +%s)"
+edit_check_run_hook "${H155_WORK}/sample.go" DEV_WORKFLOW_EDIT_CHECK_TIMEOUT=10 >/dev/null 2>&1
+H158_END="$(date +%s)"
+H158_ELAPSED=$((H158_END - H158_START))
+if [ "$H158_ELAPSED" -lt 3 ]; then
+  pass "edit-check.sh: 即座に成功するチェックはタイムアウト秒数（10秒）未満で返る（実測${H158_ELAPSED}秒・#158）"
+else
+  fail "edit-check.sh: 即座に成功するチェックはタイムアウト秒数（10秒）未満で返る（実測${H158_ELAPSED}秒・#158）" \
+    "監視用サブシェルがパイプの書き込み端を保持し続けタイムアウト秒数ぶんブロックしていないか確認すること"
+fi
+
+edit_check_clear
+
+# --- ケース12: ヘッダコメントの仕様例に gofmt -l {file} 単体（終了コード常に0のアンチパターン）が
+#     残っていない（#168。#165でcore/roles/planner.md・README.mdは差し替え済みだったが、
+#     仕様書式の一次資料であるこのヘッダだけ取りこぼしていた） ---
+H168_BARE_GOFMT="$(grep -Fn 'gofmt -l {file}' "${EDIT_CHECK_SCRIPT}" | grep -v 'test -z')"
+if [ -n "$H168_BARE_GOFMT" ]; then
+  fail "edit-check.sh: ヘッダの仕様例に終了コード常に0のgofmt -l {file}単体が残っていない（#168）" \
+    "$H168_BARE_GOFMT"
+else
+  pass "edit-check.sh: ヘッダの仕様例に終了コード常に0のgofmt -l {file}単体が残っていない（#168）"
+fi
+
+if grep -Fq 'test -z "$(gofmt -l {file})"' "${EDIT_CHECK_SCRIPT}"; then
+  pass "edit-check.sh: ヘッダの仕様例が終了コードで違反を表現する形（test -z \"\$(gofmt -l {file})\"）になっている（#168）"
+else
+  fail "edit-check.sh: ヘッダの仕様例が終了コードで違反を表現する形（test -z \"\$(gofmt -l {file})\"）になっている（#168）" \
+    "$(sed -n '25,40p' "${EDIT_CHECK_SCRIPT}")"
+fi
+
+# --- hooks.json: PostToolUse(Write|Edit|MultiEdit) に edit-check.sh が結線され、
+#     既存のcheck-readability.shと共存し、タイムアウトが設定されている ---
+HJ_POSTTOOLUSE_WEM="$(_hj_extract_section "$HJ_HOOKS_JSON" "PostToolUse")"
+if printf '%s' "$HJ_POSTTOOLUSE_WEM" | grep -Fq '"matcher": "Write|Edit|MultiEdit"' \
+  && printf '%s' "$HJ_POSTTOOLUSE_WEM" | grep -Fq 'bash \"${CLAUDE_PLUGIN_ROOT}/scripts/edit-check.sh\"' \
+  && printf '%s' "$HJ_POSTTOOLUSE_WEM" | grep -Fq 'bash \"${CLAUDE_PLUGIN_ROOT}/scripts/check-readability.sh\"'; then
+  pass "hooks.json: PostToolUse(Write|Edit|MultiEdit)にedit-check.shが結線され、check-readability.shと共存している（#155）"
+else
+  fail "hooks.json: PostToolUse(Write|Edit|MultiEdit)にedit-check.shが結線され、check-readability.shと共存している（#155）" \
+    "$HJ_POSTTOOLUSE_WEM"
+fi
+
+if printf '%s' "$HJ_POSTTOOLUSE_WEM" | grep -A2 'edit-check.sh' | grep -Eq '"timeout": [0-9]+'; then
+  pass "hooks.json: edit-check.shにtimeoutが設定されている（#155）"
+else
+  fail "hooks.json: edit-check.shにtimeoutが設定されている（#155）" "$HJ_POSTTOOLUSE_WEM"
+fi
+
+# --- hooks.codex.json: 同様にedit-check.shが結線され、タイムアウトが設定されている ---
+HJ_CODEX_POSTTOOLUSE_WEM="$(_hj_extract_section "$HJ_HOOKS_CODEX_JSON" "PostToolUse")"
+if printf '%s' "$HJ_CODEX_POSTTOOLUSE_WEM" | grep -Fq '"matcher": "Write|Edit|MultiEdit|apply_patch"' \
+  && printf '%s' "$HJ_CODEX_POSTTOOLUSE_WEM" | grep -Fq 'bash \"${CLAUDE_PLUGIN_ROOT}/scripts/edit-check.sh\"'; then
+  pass "hooks.codex.json: PostToolUse(Write|Edit|MultiEdit|apply_patch)にedit-check.shが結線されている（#155）"
+else
+  fail "hooks.codex.json: PostToolUse(Write|Edit|MultiEdit|apply_patch)にedit-check.shが結線されている（#155）" \
+    "$HJ_CODEX_POSTTOOLUSE_WEM"
+fi
+
+if printf '%s' "$HJ_CODEX_POSTTOOLUSE_WEM" | grep -A2 'edit-check.sh' | grep -Eq '"timeout": [0-9]+'; then
+  pass "hooks.codex.json: edit-check.shにtimeoutが設定されている（#155）"
+else
+  fail "hooks.codex.json: edit-check.shにtimeoutが設定されている（#155）" "$HJ_CODEX_POSTTOOLUSE_WEM"
+fi
+
+# --- core/instructions.md（+ core/references/）: 4つの任意節と編集時チェック節の説明がある ---
+if grep -Fq '4つの任意節' "${REPO_ROOT}/core/instructions.md"; then
+  pass "core/instructions.md: 任意節が4つ（編集時チェックを含む）に更新されている（#155）"
+else
+  fail "core/instructions.md: 任意節が4つ（編集時チェックを含む）に更新されている（#155）" "見つからない"
+fi
+
+if grep -Fq '## 編集時チェック' "$CORE_INSTRUCTIONS_FLAT"; then
+  pass "core/instructions.md（+references）: 編集時チェック節の説明がある（#155）"
+else
+  fail "core/instructions.md（+references）: 編集時チェック節の説明がある（#155）" "見つからない"
+fi
+
+# --- README.md: 編集時チェック節の説明がある ---
+if grep -Fq '## 編集時チェック' "${REPO_ROOT}/README.md" && grep -Fq 'edit-check.sh' "${REPO_ROOT}/README.md"; then
+  pass "README.md: Epicの『## 編集時チェック』節の説明がある（#155）"
+else
+  fail "README.md: Epicの『## 編集時チェック』節の説明がある（#155）" "見つからない"
+fi
+
+# --- core/roles/planner.md: 編集時チェック節を書くかどうかの判断が明記されている ---
+if grep -Fq '編集時チェック（該当する場合のみ）' "${REPO_ROOT}/core/roles/planner.md"; then
+  pass "core/roles/planner.md: 編集時チェック節を書くかどうかの判断が明記されている（#155）"
+else
+  fail "core/roles/planner.md: 編集時チェック節を書くかどうかの判断が明記されている（#155）" "見つからない"
+fi
+
+# --- ADR 0005 が存在し、ホスト側実行の判断根拠が書かれている ---
+H155_ADR="${REPO_ROOT}/docs/adr/0005-edit-time-check-hook.md"
+if [ -f "$H155_ADR" ]; then
+  pass "docs/adr/0005-edit-time-check-hook.md: 存在する（#155）"
+else
+  fail "docs/adr/0005-edit-time-check-hook.md: 存在する（#155）" "見つからない"
+fi
+
+if grep -Fq 'ホスト側' "$H155_ADR" 2>/dev/null && grep -Fq 'コンテナ経由' "$H155_ADR" 2>/dev/null; then
+  pass "ADR 0005: ホスト側実行かコンテナ経由かの判断が明記されている（#155）"
+else
+  fail "ADR 0005: ホスト側実行かコンテナ経由かの判断が明記されている（#155）" "見つからない"
+fi
+
+# --- skills/run/SKILL.md: 「Epic 本文の任意節を取り込む」ブロックに編集時チェックが追加されている ---
+if grep -Fq "EDIT_CHECK=" "${REPO_ROOT}/skills/run/SKILL.md" \
+  && grep -Fq 'edit-check.sh" --write' "${REPO_ROOT}/skills/run/SKILL.md" \
+  && grep -Fq 'edit-check.sh" --clear' "${REPO_ROOT}/skills/run/SKILL.md"; then
+  pass "skills/run/SKILL.md: Epic本文の任意節取り込みブロックにedit-check.shの--write/--clearがある（#155）"
+else
+  fail "skills/run/SKILL.md: Epic本文の任意節取り込みブロックにedit-check.shの--write/--clearがある（#155）" \
+    "見つからない"
+fi
+
+# --- skills-codex/dev-workflow-run/SKILL.md: 同様にedit-check.shの結線がある ---
+if grep -Fq 'edit-check.sh" --write' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md" \
+  && grep -Fq 'edit-check.sh" --clear' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md"; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: edit-check.shの--write/--clearが結線されている（#155）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: edit-check.shの--write/--clearが結線されている（#155）" \
+    "見つからない"
+fi
+
+# --- 生成物（agents/*.md・codex-agents/*.toml）が core/ と一致している（build.sh実行済み） ---
+H155_BUILD_CLAUDE_CHECK="$(bash "${REPO_ROOT}/adapters/claude/build.sh" --check 2>&1)"
+H155_BUILD_CLAUDE_EXIT=$?
+if [ "$H155_BUILD_CLAUDE_EXIT" -eq 0 ]; then
+  pass "adapters/claude/build.sh --check: agents/ が core/ と一致している（#155）"
+else
+  fail "adapters/claude/build.sh --check: agents/ が core/ と一致している（#155）" "$H155_BUILD_CLAUDE_CHECK"
+fi
+
+H155_BUILD_CODEX_CHECK="$(bash "${REPO_ROOT}/adapters/codex/build.sh" --check 2>&1)"
+H155_BUILD_CODEX_EXIT=$?
+if [ "$H155_BUILD_CODEX_EXIT" -eq 0 ]; then
+  pass "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#155）"
+else
+  fail "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#155）" "$H155_BUILD_CODEX_CHECK"
+fi
+
+# ---------------------------------------------------------------------------
+# Task #152: 全系統の整合を取り、ADR 索引と生成物・全テストを最終確認する
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Task #152: ADR索引と、スコープ外項目に変更が入っていないことの確認 =="
+
+# --- docs/adr/README.md が存在し、6件のADRを全て索引している ---
+H152_ADR_INDEX="${REPO_ROOT}/docs/adr/README.md"
+if [ -f "$H152_ADR_INDEX" ]; then
+  pass "docs/adr/README.md が新規作成されている（#152）"
+else
+  fail "docs/adr/README.md が新規作成されている（#152）" "ファイルが存在しません"
+fi
+
+H152_ADR_INDEX_BODY="$(cat "$H152_ADR_INDEX" 2>/dev/null)"
+for h152_adr_file in \
+  "0001-integration-gate-at-epic-end.md" \
+  "0002-sandbox-overhead-reduction.md" \
+  "0003-parallel-review-by-focus.md" \
+  "0004-cross-wave-lane-reuse.md" \
+  "0005-edit-time-check-hook.md" \
+  "0006-evaluator-model-split.md"; do
+  if printf '%s\n' "$H152_ADR_INDEX_BODY" | grep -Fq "$h152_adr_file"; then
+    pass "docs/adr/README.md: ${h152_adr_file} を索引している（#152）"
+  else
+    fail "docs/adr/README.md: ${h152_adr_file} を索引している（#152）" "見つかりません"
+  fi
+done
+
+# --- docs/adr/README.md の冒頭に「ADRは設計判断の記録、使い方はREADMEに書く」旨の明示がある ---
+case "$H152_ADR_INDEX_BODY" in
+  *'ADR は設計判断の記録であり、使い方の説明は README に書く'*)
+    pass "docs/adr/README.md: 冒頭にADRの役割の明示がある（#152）" ;;
+  *)
+    fail "docs/adr/README.md: 冒頭にADRの役割の明示がある（#152）" "$H152_ADR_INDEX_BODY" ;;
+esac
+
+# --- README.md から2軸（直列区間とプロンプト量の削減／推論ターン数と出力トークン量の削減）が読み取れる ---
+case "$(cat "${REPO_ROOT}/README.md")" in
+  *'直列区間とプロンプト量の削減'*'推論ターン数と出力トークン量の削減'*)
+    pass "README.md: Epic #143 の2軸（直列区間・プロンプト量／推論ターン数・出力トークン量）が明記されている（#152）" ;;
+  *)
+    fail "README.md: Epic #143 の2軸（直列区間・プロンプト量／推論ターン数・出力トークン量）が明記されている（#152）" \
+      "見つかりません" ;;
+esac
+
+# --- 「機械的ゲートの二段構成」という古い呼称（#144で三段構成へ改称後の残存）が消えている ---
+for h152_f2 in "skills/run/SKILL.md" "core/roles/generator.md" "core/instructions.md" "README.md"; do
+  if grep -Fq '機械的ゲートの二段構成' "${REPO_ROOT}/${h152_f2}"; then
+    fail "${h152_f2}: 『機械的ゲートの二段構成』という古い呼称が残っていない（三段構成への統一・#152）" \
+      "$(grep -n '機械的ゲートの二段構成' "${REPO_ROOT}/${h152_f2}")"
+  else
+    pass "${h152_f2}: 『機械的ゲートの二段構成』という古い呼称が残っていない（三段構成への統一・#152）"
+  fi
+done
+
+# --- README.md: wave-reviewが「evaluator側の契約が用意されているだけ」という
+#     Task #147時点の古い記述のまま残っていない（#148/#149で実際に呼び出しが結線された） ---
+if grep -Fq '現時点では evaluator 側の契約' "${REPO_ROOT}/README.md"; then
+  fail "README.md: wave-reviewの呼び出しが既に結線されている旨に更新されている（#152）" \
+    "$(grep -n '現時点では evaluator 側の契約' "${REPO_ROOT}/README.md")"
+else
+  pass "README.md: wave-reviewの呼び出しが既に結線されている旨に更新されている（#152）"
+fi
+if grep -Fq '呼び出しは Step 3（レーン起動と同一メッセージ）で行う' "${REPO_ROOT}/README.md"; then
+  pass "README.md: wave-reviewの実際の呼び出しタイミング（Step 3・レーン起動と同一メッセージ）が明記されている（#152）"
+else
+  fail "README.md: wave-reviewの実際の呼び出しタイミング（Step 3・レーン起動と同一メッセージ）が明記されている（#152）" \
+    "見つかりません"
+fi
+
+# --- README.md: Epic本文の任意節（4種）が1か所の一覧にまとまっている ---
+H152_EPIC_SECTIONS="$(awk '/^### Epic 本文の任意節（一覧）/{f=1} /^### Epic の `## 準備コマンド`/{f=0} f' "${REPO_ROOT}/README.md")"
+case "$H152_EPIC_SECTIONS" in
+  *'## 準備コマンド'*'## 共有ディレクトリ'*'## SKIPパターン'*'## 編集時チェック'*)
+    pass "README.md: Epic本文の任意節4種が1か所の一覧にまとまっている（#152）" ;;
+  *)
+    fail "README.md: Epic本文の任意節4種が1か所の一覧にまとまっている（#152）" "$H152_EPIC_SECTIONS" ;;
+esac
+
+# --- README.md に「ウェーブごとに全テストを走らせる」旨の記述が残っていない ---
+if grep -Fq 'ウェーブごとに全テストを走らせる' "${REPO_ROOT}/README.md"; then
+  fail "README.md: 『ウェーブごとに全テストを走らせる』旨の記述が残っていない（完了条件・#152）" \
+    "$(grep -n 'ウェーブごとに全テストを走らせる' "${REPO_ROOT}/README.md")"
+else
+  pass "README.md: 『ウェーブごとに全テストを走らせる』旨の記述が残っていない（完了条件・#152）"
+fi
+
+# --- D. スコープ外と宣言した項目に変更が入っていないことの確認 ---
+
+# --- sandbox-exec.sh の CLI契約（--epic/--warm/--down/--ls/--reset-cache/--rebuild/--print-plan）が維持されている ---
+H152_SANDBOX="${REPO_ROOT}/scripts/sandbox-exec.sh"
+H152_SANDBOX_MISSING=""
+for h152_flag in "--epic" "--warm" "--down" "--ls" "--reset-cache" "--rebuild" "--print-plan"; do
+  if ! grep -Fq -- "$h152_flag" "$H152_SANDBOX"; then
+    H152_SANDBOX_MISSING="${H152_SANDBOX_MISSING} ${h152_flag}"
+  fi
+done
+if [ -z "$H152_SANDBOX_MISSING" ]; then
+  pass "scripts/sandbox-exec.sh: CLI契約（--epic/--warm/--down/--ls/--reset-cache/--rebuild/--print-plan）が維持されている（#152）"
+else
+  fail "scripts/sandbox-exec.sh: CLI契約（--epic/--warm/--down/--ls/--reset-cache/--rebuild/--print-plan）が維持されている（#152）" \
+    "欠落:${H152_SANDBOX_MISSING}"
+fi
+
+# --- --lanes の既定値が3のままである ---
+if grep -Fq '既定は **3**' "${REPO_ROOT}/README.md"; then
+  pass "README.md: --lanes の既定値が3のままである（#152）"
+else
+  fail "README.md: --lanes の既定値が3のままである（#152）" "見つかりません"
+fi
+
+# --- merge-lane.sh のmerge-base検証があり、cherry-pickによる載せ替えを行っていない ---
+H152_MERGE_LANE="${REPO_ROOT}/scripts/merge-lane.sh"
+if grep -Fq 'merge-base' "$H152_MERGE_LANE" && grep -Fq 'cherry-pick による載せ替えは行わない' "$H152_MERGE_LANE"; then
+  pass "scripts/merge-lane.sh: merge-base検証があり、cherry-pickによる載せ替えを行わない旨が明記されている（#152）"
+else
+  fail "scripts/merge-lane.sh: merge-base検証があり、cherry-pickによる載せ替えを行わない旨が明記されている（#152）" \
+    "$(grep -n 'merge-base\|cherry-pick' "$H152_MERGE_LANE")"
+fi
+
+# --- Epicブランチへのforce push禁止がcore/instructions.mdに残っている ---
+if grep -Fq 'force push は行わない' "${REPO_ROOT}/core/instructions.md"; then
+  pass "core/instructions.md: Epicブランチへのforce push禁止が残っている（#152）"
+else
+  fail "core/instructions.md: Epicブランチへのforce push禁止が残っている（#152）" "見つかりません"
+fi
+
+# --- 生成物（agents/*.md・codex-agents/*.toml）が core/ と一致している（build.sh実行済み） ---
+H152_BUILD_CLAUDE_CHECK="$(bash "${REPO_ROOT}/adapters/claude/build.sh" --check 2>&1)"
+H152_BUILD_CLAUDE_EXIT=$?
+if [ "$H152_BUILD_CLAUDE_EXIT" -eq 0 ]; then
+  pass "adapters/claude/build.sh --check: agents/ が core/ と一致している（#152）"
+else
+  fail "adapters/claude/build.sh --check: agents/ が core/ と一致している（#152）" "$H152_BUILD_CLAUDE_CHECK"
+fi
+
+H152_BUILD_CODEX_CHECK="$(bash "${REPO_ROOT}/adapters/codex/build.sh" --check 2>&1)"
+H152_BUILD_CODEX_EXIT=$?
+if [ "$H152_BUILD_CODEX_EXIT" -eq 0 ]; then
+  pass "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#152）"
+else
+  fail "adapters/codex/build.sh --check: codex-agents/ が core/ と一致している（#152）" "$H152_BUILD_CODEX_CHECK"
+fi
+
+# --- タスク見送り時の作業ツリー復旧が git reset --hard HEAD のまま残っていない（#161, #169） ---
+# skills/run/SKILL.md は #161 の当初ループに含まれておらず、実際にここで取りこぼしが発生した
+# （コミット c6f6969 で後追い修正。#169）。以降の回帰を検出できるよう対象に加える。
+for H161_FILE in "core/roles/generator.md" "README.md" "skills/run/SKILL.md" \
+  "skills-codex/dev-workflow-run/SKILL.md" "agents/generator.md" "codex-agents/generator.toml"; do
+  case "$H161_FILE" in
+    skills/run/SKILL.md) H161_PATH="$RUN_SKILL_FLAT" ;;
+    *)                   H161_PATH="${REPO_ROOT}/${H161_FILE}" ;;
+  esac
+  if grep -Fq 'git reset --hard HEAD' "$H161_PATH"; then
+    fail "${H161_FILE}: 見送り時の作業ツリー復旧に git reset --hard HEAD が残っていない（#161）" \
+      "$(grep -n 'git reset --hard HEAD' "$H161_PATH")"
+  else
+    pass "${H161_FILE}: 見送り時の作業ツリー復旧に git reset --hard HEAD が残っていない（#161）"
+  fi
+done
+
+# --- タスク見送り時の作業ツリー復旧が非破壊手順（git restore + git clean -nd）に置き換わっている（#161, #169） ---
+# -- :/ が付いていることも要求する（#167: pathspec省略はcwd相対になり、サブディレクトリから
+# 実行するとリポジトリ他所の変更・未追跡ファイルが戻らない／報告されないまま
+# 「残留なし」という誤った証跡が残るため）
+# skills/run/SKILL.md も対象に加える（#169。実際に取りこぼしが起きたのはこのファイル）
+for H161_FILE in "core/roles/generator.md" "README.md" "skills/run/SKILL.md" \
+  "skills-codex/dev-workflow-run/SKILL.md"; do
+  case "$H161_FILE" in
+    skills/run/SKILL.md) H161_PATH="$RUN_SKILL_FLAT" ;;
+    *)                   H161_PATH="${REPO_ROOT}/${H161_FILE}" ;;
+  esac
+  if grep -Fq 'git restore --source=HEAD --staged --worktree -- :/' "$H161_PATH" \
+    && grep -Fq 'git clean -nd -- :/' "$H161_PATH"; then
+    pass "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd -- :/ に置き換わっている（#161, #167）"
+  else
+    fail "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd -- :/ に置き換わっている（#161, #167）" \
+      "$(grep -n 'git restore\|git clean' "$H161_PATH")"
+  fi
+done
+
+# --- run-loop.sh: set -o pipefail（またはset -uo pipefail）が設定されている（回帰防止 #37, #166） ---
+if grep -Eq '^set -[a-zA-Z]*o pipefail\b|^set -o pipefail\b' "${REPO_ROOT}/adapters/codex/run-loop.sh"; then
+  pass "run-loop.sh: set -o pipefail（またはset -uo pipefail）が設定されている（#166）"
+else
+  fail "run-loop.sh: set -o pipefail（またはset -uo pipefail）が設定されている（#166）" \
+    "$(grep -n '^set ' "${REPO_ROOT}/adapters/codex/run-loop.sh")"
+fi
+
+# --- run-loop.sh: epic_gate()本体がテスト実行の失敗で早期returnする形になっている（静的検証・#166） ---
+RL166_EPIC_GATE_BODY_STATIC="$(sed -n '/^epic_gate() {/,/^}/p' "${REPO_ROOT}/adapters/codex/run-loop.sh")"
+RL166_EPIC_GATE_ONELINE_STATIC="$(printf '%s' "$RL166_EPIC_GATE_BODY_STATIC" | tr '\n' ' ')"
+case "$RL166_EPIC_GATE_ONELINE_STATIC" in
+  *'if ! ('*') 2>&1 | tee'*'then'*'return 1'*)
+    pass "run-loop.sh: epic_gate()がテスト実行の失敗（パイプライン終端ステータス）で早期returnする形になっている（#166）" ;;
+  *)
+    fail "run-loop.sh: epic_gate()がテスト実行の失敗（パイプライン終端ステータス）で早期returnする形になっている（#166）" \
+      "$RL166_EPIC_GATE_BODY_STATIC" ;;
+esac
+
+# --- run-loop.sh: epic_gate()の合否判定がset -o pipefailに依存していることを動的に確認する（#166） ---
+# Review #37: mechanical_gate()がテストを走らせず可読性ガードだけ実行していた回帰。#144でepic_gate()に
+# 分割された際、「テスト失敗がゲート失敗になること（AND判定）」の検証だけが移植されずに消えていた。
+# epic_gate()は `if ! ( ... ) 2>&1 | tee "$log"; then return 1; fi` というパイプライン終端ステータス
+# （tee）に依存する形であり、set -o pipefailが外れると無言で通過してしまう。
+RL166_SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-epicgate.XXXXXX")"
+mkdir -p "${RL166_SCRATCH}/scripts"
+
+cat > "${RL166_SCRATCH}/scripts/sandbox-exec.sh" <<'FAKE_SANDBOX_EXEC_166'
+#!/bin/bash
+echo "fake sandbox-exec.sh: simulated test failure"
+exit 1
+FAKE_SANDBOX_EXEC_166
+chmod +x "${RL166_SCRATCH}/scripts/sandbox-exec.sh"
+
+cat > "${RL166_SCRATCH}/scripts/count-skips.sh" <<'FAKE_COUNT_SKIPS_166'
+#!/bin/bash
+echo "skips=0"
+exit 0
+FAKE_COUNT_SKIPS_166
+chmod +x "${RL166_SCRATCH}/scripts/count-skips.sh"
+
+cat > "${RL166_SCRATCH}/scripts/check-readability.sh" <<'FAKE_CHECK_READABILITY_166'
+#!/bin/bash
+exit 0
+FAKE_CHECK_READABILITY_166
+chmod +x "${RL166_SCRATCH}/scripts/check-readability.sh"
+
+RL166_EPIC_WT="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-epicwt.XXXXXX")"
+RL166_EPIC_GATE_FN_BODY="$(sed -n '/^epic_gate() {/,/^}/p' "${REPO_ROOT}/adapters/codex/run-loop.sh")"
+
+# (a) set -o pipefail が有効（本番と同じ）: テスト失敗（fakeなsandbox-exec.shのexit 1）を検知して
+#     epic_gate()が非0を返すこと
+RL166_WITH_PIPEFAIL_EXIT="$(
+  set -o pipefail
+  eval "$RL166_EPIC_GATE_FN_BODY"
+  DRY_RUN=0
+  PLUGIN_ROOT_DIR="$RL166_SCRATCH"
+  EPIC_WT="$RL166_EPIC_WT"
+  EPIC_NUM="test"
+  EPIC_BRANCH="test"
+  TEST_CMD="true"
+  SKIP_PATTERN=""
+  epic_gate >/dev/null 2>&1
+  echo $?
+)"
+
+if [ "$RL166_WITH_PIPEFAIL_EXIT" != "0" ]; then
+  pass "run-loop.sh: set -o pipefail有効時、epic_gate()はテスト失敗を検知して非0を返す（動的検証・回帰防止 #37, #166）"
+else
+  fail "run-loop.sh: set -o pipefail有効時、epic_gate()はテスト失敗を検知して非0を返す（動的検証・回帰防止 #37, #166）" \
+    "exit=${RL166_WITH_PIPEFAIL_EXIT}"
+fi
+
+# (b) set -o pipefail が無効: 同じテスト失敗をepic_gate()が検知できず0を返してしまうことを実際に
+#     確認する（＝合否判定がset -o pipefailに完全依存していることの証拠。#166が指摘した回帰リスクの再現）
+RL166_WITHOUT_PIPEFAIL_EXIT="$(
+  set +o pipefail
+  eval "$RL166_EPIC_GATE_FN_BODY"
+  DRY_RUN=0
+  PLUGIN_ROOT_DIR="$RL166_SCRATCH"
+  EPIC_WT="$RL166_EPIC_WT"
+  EPIC_NUM="test"
+  EPIC_BRANCH="test"
+  TEST_CMD="true"
+  SKIP_PATTERN=""
+  epic_gate >/dev/null 2>&1
+  echo $?
+)"
+
+if [ "$RL166_WITHOUT_PIPEFAIL_EXIT" = "0" ]; then
+  pass "run-loop.sh: set -o pipefail無効時にepic_gate()がテスト失敗を無言で見逃すことを再現できる（pipefail依存の証拠・#166）"
+else
+  fail "run-loop.sh: set -o pipefail無効時にepic_gate()がテスト失敗を無言で見逃すことを再現できる（pipefail依存の証拠・#166）" \
+    "exit=${RL166_WITHOUT_PIPEFAIL_EXIT}（0が期待値。0以外はepic_gate()の抽出・スタブ化が想定と異なる）"
+fi
 
 # ---------------------------------------------------------------------------
 # 結果集計
