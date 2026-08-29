@@ -69,8 +69,8 @@ run は1レーンに**複数のタスクを割り当てることがある**（`#
   （run はタスク単位で issue をクローズし、レビューはコミット単位で差分を読む）
 - **1件のタスクに失敗しても、レーン全体を投げ出さない。** 失敗したタスクは
   `git restore --source=HEAD --staged --worktree -- :/` で追跡ファイルをHEADの状態へ戻し、
-  `git status --short -- :/`（削除はしない）で残る未追跡ファイルを報告してから見送り、
-  **次のタスクへ進む。**（`git reset --hard` / `git clean` は手順0のベース合わせと同じ理由で
+  `git status --short --untracked-files=all -- :/`（削除はしない）で残る未追跡ファイルを
+  報告してから見送り、**次のタスクへ進む。**（`git reset --hard` / `git clean` は手順0のベース合わせと同じ理由で
   `permissions.deny` にブロックされうるため、ここでも使わない。詳細は下記「見送り時の
   作業ツリー復旧に `git reset --hard` / `git clean` を使わない理由」を参照）
   見送ったタスク番号と失敗理由は完了報告に必ず残す（run が次ウェーブへ持ち越す）
@@ -171,6 +171,13 @@ BASE_EVIDENCE_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
 `-- :/` を付けて初めて等価になる（`git status` 自体は pathspec 省略時もリポジトリ全域が
 対象だが、明示のために揃えて付ける）。
 
+**`--untracked-files=all`（`-uall`）も必ず付ける。** `git status` は `status.showUntrackedFiles`
+設定の影響を受け、この設定が `no` になっていると `--short` の出力は常に空になり、未追跡
+ファイルが実際に残っていても「残留なし」という誤った証跡が残る（`git config
+status.showUntrackedFiles no` の環境で実測確認済み）。`--untracked-files=all` を付けると
+この設定を明示的に上書きでき、ディレクトリ畳み込みも解けてファイル単位で列挙されるため
+証跡としても強くなる。
+
 ```bash
 # 追跡ファイルをHEADの状態へ戻す（ステージ済み・未ステージの変更を両方戻す。破壊的ではない。
 # -- :/ でリポジトリ全域を対象にする。cwd 相対にしない）
@@ -178,8 +185,10 @@ BASE_EVIDENCE_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
   git restore --source=HEAD --staged --worktree -- :/; } | tee -a "$EVIDENCE_FILE"
 
 # 残る未追跡ファイルを報告する（git clean は使わない。git restore 後の git status に残る
-# 行は全て未追跡ファイルであり、この一覧表示自体は何も削除しない）
-{ echo '$ git status --short -- :/'; git status --short -- :/; } | tee -a "$EVIDENCE_FILE"
+# 行は全て未追跡ファイルであり、この一覧表示自体は何も削除しない。--untracked-files=all で
+# status.showUntrackedFiles=no のようなローカル設定を上書きする）
+{ echo '$ git status --short --untracked-files=all -- :/'; \
+  git status --short --untracked-files=all -- :/; } | tee -a "$EVIDENCE_FILE"
 ```
 
 `git status --short` は削除を行わず一覧を表示するだけであり、報告された未追跡ファイルは
@@ -589,7 +598,8 @@ Task #[番号]: 見送り skips=[件数|unknown|n/a] duration_sec=[秒数] evide
 ```
 
 - `見送り` の場合、`git restore --source=HEAD --staged --worktree -- :/` で追跡ファイルを
-  HEADの状態へ戻し、`git status --short -- :/`（削除はしない）で残る未追跡ファイルを報告したことと、
+  HEADの状態へ戻し、`git status --short --untracked-files=all -- :/`（削除はしない）で残る
+  未追跡ファイルを報告したことと、
   その実出力も `$EVIDENCE_FILE` に追記してから報告する（チャットへ実出力を貼り直さない。
   `git reset --hard` / `git clean` を使わない理由は「0. 渡されたベースにHEADを合わせる」節を参照）
 - 変更ファイル一覧・対象範囲・Epic本文を参照した場合の不足情報・作らなかったもの（ラダー判定）
