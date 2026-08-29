@@ -691,6 +691,12 @@ gh issue create --label "task,review" --title "Review: <title>" --body "$(cat <<
 ## 修正方針
 <fix>
 
+## 対応時の指示（#197）
+この修正が守ろうとしている性質を1文で書くこと。そのうえで、その性質がリポジトリ全体で
+成り立つことを検査するテストを書けないか検討すること。書けるなら、個別ケースの回帰テスト
+ではなくそちらを書く（書けないと判断した場合はその判断でよい。あらゆる修正に全体走査
+テストを義務付けるものではない）。
+
 ## 由来
 - Epic: #<epic番号>
 - 起因タスク: <task_ref>
@@ -700,6 +706,12 @@ BODY
 ```
 
 `reviewed_commit` は次の delta-review の起点になるので必ず控える。
+
+review issueは通常タスクと同じ Step 2〜6 で generator が対応するため、この指示は
+このスキルの手順書だけでなくissue本文にも埋め込んでいる（詳細・背景は
+`skills/run/references/review.md`「指摘対応時に『性質』を言語化させる（#197）」を参照。
+evaluator側の対応する確認観点は `core/references/review-checklist-correctness.md`
+「修正の妥当性」）。
 
 ### R3: 指摘対応
 
