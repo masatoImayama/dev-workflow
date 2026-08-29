@@ -11839,6 +11839,88 @@ assert_eq "ネストしたエントリ: linked 後、共有元のファイルが
   "$(cat "${SPD_NEST_LANE}/packages/app/node_modules/marker.txt" 2>/dev/null || echo "READ_FAILED")"
 
 # ---------------------------------------------------------------------------
+# share-prepared-dirs.sh: 実体確認失敗（dangling symlink）時に symlink を撤去してから
+# link-failed とする（Review #118）
+#
+# `ln -s` はターゲットが存在しなくても成功するため、target の計算が誤っている場合
+# （--dir に連続スラッシュを含む文字列を渡すと、実際のネスト深さとスラッシュ数
+# ベースの up-prefix 計算がずれる。OSはパス解決時に連続スラッシュを1つに畳み込む
+# ため、実際のネスト深さは1段（app/node_modules）だが up-prefix はスラッシュ文字数
+# 2段分を前置してしまい、symlink のターゲットが1段余分に上へずれて存在しない
+# パスを指す）、symlink 作成自体は成功するが辿った実体はディレクトリではない
+# （dangling symlink）。#115 時点の実装はこの dangling symlink を <dir> に残した
+# まま link-failed を報告していたため、(1) 同一実行内で --run-prep を使うと <dir>
+# が dangling symlink に占有されたまま install が失敗する（#116 の解除対象は
+# kind=linked のみ）、(2) 再実行すると判定式 `[ -e "$d" ] || [ -L "$d" ]` が
+# dangling symlink でも真になり exists と誤判定され、フォールバックが働かないまま
+# done が書かれる、という2つの不具合が生じていた（#118）。本テストは、dangling
+# symlink になる状況を意図的に作り出し、link-failed が報告されること・レーン側に
+# symlink が残らないこと・再実行しても exists に化けず link-failed が再現すること・
+# --run-prep での install が dangling symlink に妨げられず成功することを確認する。
+# 既存のフィクスチャ（SPD_SCRIPT / spd_make_stub / spd_run）を再利用する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== share-prepared-dirs.sh: dangling symlink 時に撤去してから link-failed とする（Review #118） =="
+
+SPD118D_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-118d-source.XXXXXX")"
+SPD118D_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-118d-lane.XXXXXX")"
+SPD118D_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-118d-calllog.XXXXXX")"
+SPD118D_STUB="$(spd_make_stub "$SPD118D_CALL_LOG")"
+
+mkdir -p "${SPD118D_SOURCE}/app/node_modules"
+printf 'dangling-marker\n' > "${SPD118D_SOURCE}/app/node_modules/marker.txt"
+mkdir -p "${SPD118D_LANE}/app"
+
+SPD118D_OUT1="$(spd_run "$SPD118D_LANE" "$SPD118D_STUB" --source "$SPD118D_SOURCE" \
+  --dir "app//node_modules")"
+SPD118D_EXIT1=$?
+assert_exit_code "dangling symlink: 1回目の実行は exit 0（#118）" 0 "$SPD118D_EXIT1"
+
+case "$SPD118D_OUT1" in
+  *"skip"*"app//node_modules"*"reason"*"link-failed"*)
+    pass "dangling symlink: 実体確認に失敗すると skip reason link-failed（#118）" ;;
+  *)
+    fail "dangling symlink: 実体確認に失敗すると skip reason link-failed（#118）" "output=[${SPD118D_OUT1}]" ;;
+esac
+
+# 本題1: 撤去されているので symlink（dangling含む）はレーン側に一切残らない
+assert_eq "dangling symlink: link-failed 後、レーン側に symlink が残らない（#118）" \
+  "no" "$([ -L "${SPD118D_LANE}/app/node_modules" ] && echo yes || echo no)"
+assert_eq "dangling symlink: link-failed 後、レーン側に何も存在しない（#118）" \
+  "no" "$([ -e "${SPD118D_LANE}/app/node_modules" ] && echo yes || echo no)"
+
+# 本題2: 再実行しても撤去済みのため exists に化けず、同じ link-failed が再現する
+#     （#118 の失敗モード2: 撤去しないと `[ -e ] || [ -L ]` が dangling でも真になり
+#     exists と誤判定され、prep=skip でフォールバックが働かなくなる）
+SPD118D_OUT2="$(spd_run "$SPD118D_LANE" "$SPD118D_STUB" --source "$SPD118D_SOURCE" \
+  --dir "app//node_modules")"
+case "$SPD118D_OUT2" in
+  *"skip"*"app//node_modules"*"reason"*"link-failed"*)
+    pass "dangling symlink: 再実行しても exists に化けず link-failed が再現する（#118）" ;;
+  *)
+    fail "dangling symlink: 再実行しても exists に化けず link-failed が再現する（#118）" "output=[${SPD118D_OUT2}]" ;;
+esac
+case "$SPD118D_OUT2" in
+  *"prep=run"*)
+    pass "dangling symlink: 再実行後も prep=run のまま（フォールバックが働く）（#118）" ;;
+  *)
+    fail "dangling symlink: 再実行後も prep=run のまま（フォールバックが働く）（#118）" "output=[${SPD118D_OUT2}]" ;;
+esac
+
+# 本題3: 同一実行内で --run-prep を使っても <dir> が dangling symlink に占有されず、
+#     install コマンドが正常に <dir> を作成できる（#118 の失敗モード1）
+SPD118D_PREP_CMD='mkdir -p app/node_modules && printf installed-ok > app/node_modules/installed.txt'
+SPD118D_OUT3="$(spd_run "$SPD118D_LANE" "$SPD118D_STUB" --source "$SPD118D_SOURCE" \
+  --dir "app//node_modules" --run-prep "$SPD118D_PREP_CMD")"
+SPD118D_EXIT3=$?
+assert_exit_code "dangling symlink: --run-prep 併用でも exit 0（占有が解消され install が成功する）（#118）" \
+  0 "$SPD118D_EXIT3"
+assert_eq "dangling symlink: --run-prep のコマンドが <dir> を実体ディレクトリとして作成できる（#118）" \
+  "installed-ok" \
+  "$(cat "${SPD118D_LANE}/app/node_modules/installed.txt" 2>/dev/null || echo "READ_FAILED")"
+
+# ---------------------------------------------------------------------------
 # share-prepared-dirs.sh: 混在ケース（linked 1件 + no-source 1件）+ --run-prep で
 # 共有元が書き換えられない（Review #116）
 #

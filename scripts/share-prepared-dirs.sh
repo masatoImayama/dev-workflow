@@ -80,6 +80,13 @@
 #      （`ln -s` はターゲットが存在しなくても成功するため、作成成功だけでは
 #      dangling symlink を linked と誤報告しうる。#115）。成功なら linked、
 #      作成失敗または実体確認に失敗した場合は                -> link-failed
+#      （実体確認に失敗した場合は、link-failed を印字する前に自分が作成した symlink を
+#      `unlink` で撤去してから link-failed とする。撤去しないと dangling symlink が
+#      <dir> を占有したまま残り、(a) 同一実行内で --run-prep を使うとその dangling
+#      symlink に <dir> が占有されたまま install が走り失敗する（#116 の解除対象は
+#      kind=linked のみ）、(b) 再実行すると判定順序2の `[ -e "$d" ] || [ -L "$d" ]` が
+#      dangling symlink でも真になり exists と誤判定され、フォールバックの install が
+#      走らないまま done が書かれる、という2つの不具合が生じる。#118）
 #
 # フィンガープリントの比較は素のファイル読み取りだけで済むためホスト側で行う
 # （フィンガープリント未指定のエントリは検査しない）。
@@ -443,6 +450,9 @@ if [ "${#CANDIDATE_DIR[@]}" -gt 0 ]; then
       CONTAINER_SCRIPT+='  if ln -s "$t" "$d" 2>/dev/null && [ -d "$d" ]; then'$'\n'
       CONTAINER_SCRIPT+='    printf "linked\t%s\t%s\n" "$d" "$t"'$'\n'
       CONTAINER_SCRIPT+='  else'$'\n'
+      # 実体確認に失敗した場合、作成してしまった symlink（dangling）を残さない（#118）。
+      # ln -s 自体が失敗していた場合は $d は存在しないため unlink は無害に失敗するだけ。
+      CONTAINER_SCRIPT+='    unlink "$d" 2>/dev/null'$'\n'
       CONTAINER_SCRIPT+='    printf "linkfailed\t%s\n" "$d"'$'\n'
       CONTAINER_SCRIPT+='  fi'$'\n'
     fi
