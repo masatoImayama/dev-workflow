@@ -14252,6 +14252,391 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# scripts/feedback-ledger.sh（フィードバック台帳の記録・集計・redact・還流先解決）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== scripts/feedback-ledger.sh（台帳の記録・集計・redact） =="
+
+FL_SCRIPT="${REPO_ROOT}/scripts/feedback-ledger.sh"
+FL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-ledger.XXXXXX")"
+
+fl() {
+  # fl <引数...>  台帳ディレクトリを一時領域へ固定して feedback-ledger.sh を実行する
+  DEV_WORKFLOW_FEEDBACK_DIR="$FL_DIR" bash "$FL_SCRIPT" "$@"
+}
+
+# --- 記録と件数 ---
+
+fl record --scope harness --category gate --key gate-flaky --severity high --epic 143 \
+  --summary "統合ゲートが誤検知する" --evidence "run.log:gate" >/dev/null 2>&1
+FL_RC1=$?
+assert_exit_code "record: 正常な引数で記録できる" 0 "$FL_RC1"
+
+fl record --scope harness --category gate --key gate-flaky --severity medium --epic 144 \
+  --summary "統合ゲートが誤検知する（2回目）" >/dev/null 2>&1
+fl record --scope project --category docs --key project-test-cmd \
+  --summary "テストは make test で回す" >/dev/null 2>&1
+
+FL_COUNT_OUT="$(fl count --key gate-flaky)"
+assert_eq "count: 同一キーの件数を数える" "count=2" "$(printf '%s\n' "$FL_COUNT_OUT" | head -1)"
+assert_eq "count: 既定の昇格閾値は3" "threshold=3" "$(printf '%s\n' "$FL_COUNT_OUT" | tail -1)"
+
+assert_eq "count: 未記録のキーは0件（エラーにしない）" \
+  "count=0" "$(fl count --key never-seen | head -1)"
+
+# --- 空フィールドの列ずれ（回帰防止） ---
+#
+# タブは IFS の「空白」扱いなので、`IFS=$'\t' read` は連続タブを1つに畳む。
+# --epic と --evidence を省いた記録を空文字のまま書くと、読み出し時に summary が
+# epic の位置に入って列が1つずれる。record 側で `-` を埋めることで防いでいる。
+
+fl record --scope project --category other --key no-optional-fields \
+  --summary "省略時でも列がずれない" >/dev/null 2>&1
+
+FL_SHIFT_ROW="$(fl list --key no-optional-fields | head -1)"
+assert_eq "list: --epic 省略時は epic 列が - になる（列ずれ回帰防止）" \
+  "-" "$(printf '%s\n' "$FL_SHIFT_ROW" | cut -f6)"
+assert_eq "list: --epic/--evidence 省略時も summary が正しい列に入る（列ずれ回帰防止）" \
+  "省略時でも列がずれない" "$(printf '%s\n' "$FL_SHIFT_ROW" | cut -f7)"
+assert_eq "list: --evidence 省略時は evidence 列が - になる（列ずれ回帰防止）" \
+  "-" "$(printf '%s\n' "$FL_SHIFT_ROW" | cut -f8)"
+
+# --- ready（昇格閾値の判定） ---
+
+assert_eq "ready: 閾値未満のキーは出力されない" "" "$(fl ready)"
+
+fl record --scope harness --category gate --key gate-flaky --severity low \
+  --summary "統合ゲートが誤検知する（3回目）" >/dev/null 2>&1
+
+FL_READY_ROW="$(fl ready | head -1)"
+assert_eq "ready: 閾値に達したキーを出力する" "gate-flaky" "$(printf '%s\n' "$FL_READY_ROW" | cut -f1)"
+assert_eq "ready: 観測回数を出力する" "3" "$(printf '%s\n' "$FL_READY_ROW" | cut -f2)"
+assert_eq "ready: 深刻度は観測の中で最も重いものを採る" "high" "$(printf '%s\n' "$FL_READY_ROW" | cut -f5)"
+
+assert_eq "ready: --scope で絞り込める（project 側は閾値未満）" "" "$(fl ready --scope project)"
+assert_eq "ready: --threshold で閾値を下げられる" \
+  "project-test-cmd" "$(fl ready --scope project --threshold 1 | head -1 | cut -f1)"
+
+# --- 引数エラー ---
+
+fl record --scope bogus --category gate --key k --summary s >/dev/null 2>&1
+assert_exit_code "record: 不正な --scope は exit 2" 2 "$?"
+
+fl record --scope harness --category "Bad Cat" --key k --summary s >/dev/null 2>&1
+assert_exit_code "record: スラッグでない --category は exit 2" 2 "$?"
+
+fl record --scope harness --category gate --key "Bad_Key" --summary s >/dev/null 2>&1
+assert_exit_code "record: スラッグでない --key は exit 2" 2 "$?"
+
+fl record --scope harness --category gate --key k --severity urgent --summary s >/dev/null 2>&1
+assert_exit_code "record: 不正な --severity は exit 2" 2 "$?"
+
+fl record --scope harness --category gate --key k >/dev/null 2>&1
+assert_exit_code "record: --summary 欠落は exit 2" 2 "$?"
+
+fl unknown-subcommand >/dev/null 2>&1
+assert_exit_code "不明なサブコマンドは exit 2" 2 "$?"
+
+fl render-upstream --key never-seen >/dev/null 2>&1
+assert_exit_code "render-upstream: 観測の無いキーは exit 1" 1 "$?"
+
+# --- render-upstream（還流レポートの本文） ---
+
+FL_RENDER="$(fl render-upstream --key gate-flaky)"
+
+case "$FL_RENDER" in
+  *"観測回数: 3 回"*) pass "render-upstream: 観測回数を本文に含む" ;;
+  *) fail "render-upstream: 観測回数を本文に含む" "$FL_RENDER" ;;
+esac
+
+case "$FL_RENDER" in
+  *'`gate-flaky`'*) pass "render-upstream: キーを本文に含む（重複issueの検索に使う）" ;;
+  *) fail "render-upstream: キーを本文に含む（重複issueの検索に使う）" "$FL_RENDER" ;;
+esac
+
+case "$FL_RENDER" in
+  *"| 143 |"*) pass "render-upstream: 観測ログの表に Epic 番号が入る" ;;
+  *) fail "render-upstream: 観測ログの表に Epic 番号が入る" "$FL_RENDER" ;;
+esac
+
+# --- redact（機械的な伏字化） ---
+
+fl_redact() {
+  # fl_redact <入力文字列>  HOME とユーザー名を固定して redact を適用する
+  printf '%s\n' "$1" | HOME="/home/tester" USER="tester" \
+    DEV_WORKFLOW_FEEDBACK_DIR="$FL_DIR" bash "$FL_SCRIPT" redact
+}
+
+assert_eq "redact: GitHub の Personal Access Token を伏せる" \
+  "token=<secret>" "$(fl_redact 'token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ01')"
+assert_eq "redact: github_pat 形式のトークンを伏せる" \
+  "token=<secret>" "$(fl_redact 'token=github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ')"
+assert_eq "redact: Slack のトークンを伏せる" \
+  "token=<secret>" "$(fl_redact 'token=xoxb-1234567890-abcdefghij')"
+assert_eq "redact: Slack の Webhook URL を伏せる" \
+  "url=<slack-webhook>" "$(fl_redact 'url=https://hooks.slack.com/services/T000/B000/XXXXXXXX')"
+assert_eq "redact: メールアドレスを伏せる" \
+  "to=<email>" "$(fl_redact 'to=foo.bar+baz@example.co.jp')"
+assert_eq "redact: POSIX のホームディレクトリを伏せる" \
+  "p=<home>/work" "$(fl_redact 'p=/home/alice/work')"
+assert_eq "redact: macOS のホームディレクトリを伏せる" \
+  "p=<home>/work" "$(fl_redact 'p=/Users/alice/work')"
+assert_eq "redact: Git Bash 形式（/c/Users/...）のホームディレクトリを伏せる" \
+  "p=<home>/work" "$(fl_redact 'p=/c/Users/alice/work')"
+assert_eq "redact: Windows 形式（C:/Users/...）のホームディレクトリを伏せる" \
+  "p=<home>/work" "$(fl_redact 'p=C:/Users/alice/work')"
+assert_eq "redact: \$HOME に一致する文字列を伏せる" \
+  "p=<home>/x" "$(fl_redact 'p=/home/tester/x')"
+assert_eq "redact: ユーザー名を伏せる" \
+  "user=<user>" "$(fl_redact 'user=tester')"
+
+# 駆動先が dev-workflow 自身のときにリポジトリ名まで伏せると、還流レポートが読めなくなる。
+FL_SELF_REDACT="$(printf 'plugin=dev-workflow\n' | (cd "$REPO_ROOT" && bash "$FL_SCRIPT" redact))"
+assert_eq "redact: リポジトリ名が dev-workflow のときは伏せない（還流レポートが読めなくなるため）" \
+  "plugin=dev-workflow" "$FL_SELF_REDACT"
+
+# --- upstream-repo（還流先の解決） ---
+
+assert_eq "upstream-repo: マニフェストの repository から owner/repo を解決する" \
+  "masatoImayama/dev-workflow" "$(bash "$FL_SCRIPT" upstream-repo)"
+
+assert_eq "upstream-repo: 環境変数で上書きできる（fork・社内ミラー向け）" \
+  "acme/dev-workflow-fork" \
+  "$(DEV_WORKFLOW_UPSTREAM_REPO="acme/dev-workflow-fork" bash "$FL_SCRIPT" upstream-repo)"
+
+# --- 台帳の置き場所（ハーネス非注入原則の回帰防止） ---
+#
+# 台帳を駆動先リポジトリの中に作ってしまうと、業務リポジトリのコミット候補に
+# ハーネス由来のファイルが混ざる（README「ハーネス非注入原則」）。
+
+FL_HOME_REPO="$(make_temp_repo)"
+FL_FAKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-fbhome.XXXXXX")"
+FL_PATH_OUT="$(
+  cd "$FL_HOME_REPO" || exit 1
+  DEV_WORKFLOW_FEEDBACK_HOME="${FL_FAKE_HOME}/feedback" bash "$FL_SCRIPT" path
+)"
+assert_eq "path: 台帳は HOME 配下の規約パスに置く（駆動先リポジトリに書き込まない）" \
+  "${FL_FAKE_HOME}/feedback/$(basename "$FL_HOME_REPO")" "$FL_PATH_OUT"
+
+case "$FL_PATH_OUT" in
+  "${FL_HOME_REPO}"*)
+    fail "path: 台帳のパスが駆動先リポジトリの外にある（ハーネス非注入原則）" "$FL_PATH_OUT" ;;
+  *)
+    pass "path: 台帳のパスが駆動先リポジトリの外にある（ハーネス非注入原則）" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# scripts/collect-feedback-signals.sh（実行ログの所在と一次集計）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== scripts/collect-feedback-signals.sh（実行ログの所在と一次集計） =="
+
+CFS_SCRIPT="${REPO_ROOT}/scripts/collect-feedback-signals.sh"
+
+bash "$CFS_SCRIPT" --since abc >/dev/null 2>&1
+assert_exit_code "--since が数値でなければ exit 2" 2 "$?"
+
+bash "$CFS_SCRIPT" --epic abc >/dev/null 2>&1
+assert_exit_code "--epic が数値でなければ exit 2" 2 "$?"
+
+bash "$CFS_SCRIPT" --since >/dev/null 2>&1
+assert_exit_code "--since の値が無ければ exit 2" 2 "$?"
+
+bash "$CFS_SCRIPT" --unknown-flag >/dev/null 2>&1
+assert_exit_code "不明な引数は exit 2" 2 "$?"
+
+# 一時リポジトリを組み立て、状態ファイルと transcript を仕込んで一次集計を検証する
+CFS_REPO="$(make_temp_repo)"
+CFS_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-cfs-home.XXXXXX")"
+CFS_PROJECTS="${CFS_HOME}/projects"
+mkdir -p "${CFS_REPO}/.claude" "$CFS_PROJECTS"
+
+printf 'epic=epic99\nwave=3\nbudget_sec=5400\n' > "${CFS_REPO}/.claude/.dev-workflow-run-state"
+printf '%s\tpre\tBash\n' "$(date +%s)" > "${CFS_REPO}/.claude/.dev-workflow-heartbeat"
+{
+  printf '2026-08-04 15:20:48\ttick\tnow=1\n'
+  printf '2026-08-04 15:20:57\tstall\tcount=1\n'
+  printf '2026-08-04 15:21:57\tstall\tcount=2\n'
+  printf '2026-08-04 15:22:57\tescalate\tlevel=1\n'
+  printf '2026-08-04 15:23:57\tinhibit\tos=windows\n'
+} > "${CFS_REPO}/.claude/.dev-workflow-watchdog.log"
+{
+  printf '1785936271\t99\tgenerator\ttask-impl\t1000\t-\n'
+  printf '1785936272\t99\tgenerator\ttask-impl\t3000\t-\n'
+  printf '1785936273\t98\tevaluator\tepic-review\t5000\t-\n'
+} > "${CFS_REPO}/.claude/agent-tokens.tsv"
+
+# transcript は「英数字以外をハイフンに潰した絶対パス」がディレクトリ名になる
+CFS_SLUG="$(printf '%s' "$CFS_REPO" | sed 's/[^A-Za-z0-9]/-/g')"
+mkdir -p "${CFS_PROJECTS}/${CFS_SLUG}"
+printf '{"a":1}\n{"a":2}\n' > "${CFS_PROJECTS}/${CFS_SLUG}/session-a.jsonl"
+printf '{"a":1}\n' > "${CFS_PROJECTS}/${CFS_SLUG}/session-b.jsonl"
+
+CFS_OUT="$(
+  cd "$CFS_REPO" || exit 1
+  DEV_WORKFLOW_MARKER_ROOT="$CFS_REPO" \
+  CLAUDE_PROJECTS_DIR="$CFS_PROJECTS" \
+  DEV_WORKFLOW_FEEDBACK_DIR="${CFS_HOME}/ledger" \
+  bash "$CFS_SCRIPT" --since 3650
+)"
+
+assert_eq "run-state を読み出す（中断した run の epic）" \
+  "epic99" "$(plan_value runstate.epic "$CFS_OUT")"
+assert_eq "run-state が無い場合と区別できるよう available を出す" \
+  "1" "$(plan_value runstate.available "$CFS_OUT")"
+assert_eq "watchdog: stall の件数を数える" \
+  "2" "$(plan_value watchdog.stall_count "$CFS_OUT")"
+assert_eq "watchdog: escalate の件数を数える" \
+  "1" "$(plan_value watchdog.escalate_count "$CFS_OUT")"
+assert_eq "watchdog: abort が無ければ0（無いことを明示する）" \
+  "0" "$(plan_value watchdog.abort_count "$CFS_OUT")"
+assert_eq "tokens: レコード件数を数える" \
+  "3" "$(plan_value tokens.records "$CFS_OUT")"
+assert_eq "tokens: role:mode ごとに件数・合計・平均を出す" \
+  "count:2,sum:4000,avg:2000" "$(plan_value "tokens.by.generator:task-impl" "$CFS_OUT")"
+assert_eq "transcripts: セッションログのディレクトリを解決する" \
+  "${CFS_PROJECTS}/${CFS_SLUG}" "$(plan_value transcripts.dir "$CFS_OUT")"
+assert_eq "transcripts: 期間内のログを列挙する" \
+  "2" "$(plan_value transcripts.listed "$CFS_OUT")"
+assert_eq "transcripts: 打ち切っていないことを明示する" \
+  "0" "$(plan_value transcripts.truncated "$CFS_OUT")"
+assert_eq "repo: 駆動先が dev-workflow 自身かどうかを判定する" \
+  "0" "$(plan_value repo.is_dev_workflow "$CFS_OUT")"
+
+# --epic で絞ると、そのEpicのレコードだけが集計対象になる
+CFS_OUT_EPIC="$(
+  cd "$CFS_REPO" || exit 1
+  DEV_WORKFLOW_MARKER_ROOT="$CFS_REPO" \
+  CLAUDE_PROJECTS_DIR="$CFS_PROJECTS" \
+  DEV_WORKFLOW_FEEDBACK_DIR="${CFS_HOME}/ledger" \
+  bash "$CFS_SCRIPT" --since 3650 --epic 99
+)"
+assert_eq "tokens: --epic で集計対象を絞れる" \
+  "2" "$(plan_value tokens.records "$CFS_OUT_EPIC")"
+
+# 上限で打ち切ったことを黙って隠さない（「全部見た」と読める出力を作らない）
+CFS_OUT_TRUNC="$(
+  cd "$CFS_REPO" || exit 1
+  DEV_WORKFLOW_MARKER_ROOT="$CFS_REPO" \
+  CLAUDE_PROJECTS_DIR="$CFS_PROJECTS" \
+  DEV_WORKFLOW_FEEDBACK_DIR="${CFS_HOME}/ledger" \
+  bash "$CFS_SCRIPT" --since 3650 --max-transcripts 1
+)"
+assert_eq "transcripts: 上限で打ち切ったら truncated=1 を出す" \
+  "1" "$(plan_value transcripts.truncated "$CFS_OUT_TRUNC")"
+assert_eq "transcripts: 上限で打ち切ったら listed は上限値になる" \
+  "1" "$(plan_value transcripts.listed "$CFS_OUT_TRUNC")"
+
+# 状態ファイルが1つも無い環境でも落ちず、available=0 で「無い」ことを明示する
+CFS_EMPTY_REPO="$(make_temp_repo)"
+CFS_OUT_EMPTY="$(
+  cd "$CFS_EMPTY_REPO" || exit 1
+  DEV_WORKFLOW_MARKER_ROOT="$CFS_EMPTY_REPO" \
+  CLAUDE_PROJECTS_DIR="${CFS_HOME}/nonexistent" \
+  DEV_WORKFLOW_FEEDBACK_DIR="${CFS_HOME}/ledger-empty" \
+  bash "$CFS_SCRIPT" --since 7
+)"
+CFS_EMPTY_RC=$?
+assert_exit_code "状態ファイルが無くても exit 0（分析側で判断させる）" 0 "$CFS_EMPTY_RC"
+assert_eq "状態ファイルが無いことを available=0 で明示する（黙って省略しない）" \
+  "0" "$(plan_value runstate.available "$CFS_OUT_EMPTY")"
+assert_eq "transcript が無いことを available=0 で明示する" \
+  "0" "$(plan_value transcripts.available "$CFS_OUT_EMPTY")"
+
+# ---------------------------------------------------------------------------
+# skills/feedback/SKILL.md（修正範囲と承認ゲートの回帰防止）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== skills/feedback/SKILL.md（修正範囲と承認ゲート） =="
+
+FB_SKILL="${REPO_ROOT}/skills/feedback/SKILL.md"
+FB_SCOPE_REF="${REPO_ROOT}/skills/feedback/references/scope.md"
+FB_UPSTREAM_REF="${REPO_ROOT}/skills/feedback/references/upstream.md"
+
+for f in "$FB_SKILL" "$FB_SCOPE_REF" "$FB_UPSTREAM_REF"; do
+  if [ -f "$f" ]; then
+    pass "存在する: ${f#"${REPO_ROOT}/"}"
+  else
+    fail "存在する: ${f#"${REPO_ROOT}/"}" "ファイルが見つかりません"
+  fi
+done
+
+# SKILL.md 本体 + references を平坦化したビューで内容の有無を問う（run スキルと同じ作法）
+FB_FLAT="$(mktemp "${TMPDIR:-/tmp}/dw-feedback-skill-flat.XXXXXX")"
+cat "$FB_SKILL" > "$FB_FLAT"
+for _fbref in "${REPO_ROOT}"/skills/feedback/references/*.md; do
+  [ -f "$_fbref" ] || continue
+  printf '\n' >> "$FB_FLAT"
+  cat "$_fbref" >> "$FB_FLAT"
+done
+unset _fbref
+FB_FLAT_TEXT="$(cat "$FB_FLAT")"
+
+# プラグイン本体を利用者環境で書き換えると、更新で失われ他の利用者にも届かない。
+# 「還流させる」経路が壊れていないことを記述レベルで固定する。
+case "$FB_FLAT_TEXT" in
+  *'${CLAUDE_PLUGIN_ROOT}'*)
+    pass "feedback: プラグイン本体（CLAUDE_PLUGIN_ROOT 配下）への言及がある" ;;
+  *)
+    fail "feedback: プラグイン本体（CLAUDE_PLUGIN_ROOT 配下）への言及がある" "" ;;
+esac
+
+case "$FB_FLAT_TEXT" in
+  *"書き換えてはならない"*)
+    pass "feedback: 書き換えてはならない対象を明示している（修正範囲の限定）" ;;
+  *)
+    fail "feedback: 書き換えてはならない対象を明示している（修正範囲の限定）" "" ;;
+esac
+
+case "$FB_FLAT_TEXT" in
+  *"ハーネス非注入原則"*)
+    pass "feedback: ハーネス非注入原則に言及している（駆動先へ書き込まない）" ;;
+  *)
+    fail "feedback: ハーネス非注入原則に言及している（駆動先へ書き込まない）" "" ;;
+esac
+
+case "$FB_FLAT_TEXT" in
+  *"承認なしに投稿しない"*)
+    pass "feedback: 承認なしに issue を投稿しないと明記している" ;;
+  *)
+    fail "feedback: 承認なしに issue を投稿しないと明記している" "" ;;
+esac
+
+case "$FB_FLAT_TEXT" in
+  *"repo.is_dev_workflow"*)
+    pass "feedback: 駆動先が dev-workflow 自身のときの例外を扱っている" ;;
+  *)
+    fail "feedback: 駆動先が dev-workflow 自身のときの例外を扱っている" "" ;;
+esac
+
+case "$FB_FLAT_TEXT" in
+  *"upstream-repo"*)
+    pass "feedback: 還流先をマニフェストから解決する手順がある（fork 配布でも動く）" ;;
+  *)
+    fail "feedback: 還流先をマニフェストから解決する手順がある（fork 配布でも動く）" "" ;;
+esac
+
+case "$FB_FLAT_TEXT" in
+  *"投稿しなかったことを"*)
+    pass "feedback: 投稿できなかった場合を成功と報告しないと明記している" ;;
+  *)
+    fail "feedback: 投稿できなかった場合を成功と報告しないと明記している" "" ;;
+esac
+
+# 昇格閾値: 1回きりの観測で恒久ルールを書かない仕組みが記述と実装の両方にあること
+case "$FB_FLAT_TEXT" in
+  *"閾値"*)
+    pass "feedback: 昇格閾値の考え方を記述している" ;;
+  *)
+    fail "feedback: 昇格閾値の考え方を記述している" "" ;;
+esac
+
+rm -f "$FB_FLAT"
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 

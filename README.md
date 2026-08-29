@@ -189,6 +189,14 @@ services:
 /dev-workflow:epic notifications
 ```
 
+### フィードバック
+
+```
+/dev-workflow:feedback
+```
+→ 実行ログを分析し、プロジェクト固有の改善は承認を得て反映、ハーネス起因の指摘は
+dev-workflow へ還流する（詳細は「[フィードバックループ](#フィードバックループ)」）
+
 ## 3エージェント
 
 | エージェント | 役割 | モデル | 特徴 |
@@ -1238,6 +1246,10 @@ DEV_WORKFLOW_COMPOSE_WORKDIR=/workspace      # composeモードでのコンテ�
 READABILITY_STDIN_TIMEOUT=5                  # 可読性ガードが引数なし・非tty時にstdinを待つ上限秒数
 DEV_WORKFLOW_SANDBOX_EXEC=path/to/sandbox-exec.sh  # share-prepared-dirs.shが使うsandbox-exec.shのパス
                                                     # （既定: share-prepared-dirs.shと同じディレクトリ。テストでスタブに差し替える口）
+DEV_WORKFLOW_FEEDBACK_HOME=path              # フィードバック台帳の親ディレクトリ（既定: ~/.claude/dev-workflow/feedback）
+DEV_WORKFLOW_FEEDBACK_DIR=path               # 台帳ディレクトリを直接上書きする（テスト用）
+DEV_WORKFLOW_FEEDBACK_THRESHOLD=3            # 反映・還流を提案するまでの再現回数（昇格閾値）
+DEV_WORKFLOW_UPSTREAM_REPO=owner/repo        # 還流先（既定: プラグインのマニフェストの repository）
 ```
 
 ## Slack通知
@@ -1390,6 +1402,69 @@ DEV_WORKFLOW_WATCHDOG_IDLE_SEC=900       # 無活動しきい値（秒、既定1
 DEV_WORKFLOW_WATCHDOG_ESCALATE_SEC=1800  # エスカレーション再通知間隔（秒、既定30分・最大3回）
 DEV_WORKFLOW_NO_SLEEP_INHIBIT=1          # スリープ抑止を完全に無効化する
 ```
+
+## フィードバックループ
+
+`/dev-workflow:feedback` は、ハーネスが残した実行ログを読んで**次の実行が今回より良くなる差分**を取り出すスキル。任意のタイミングで手動起動する（フックによる自動起動はしない）。
+
+### 何を見るか
+
+`scripts/collect-feedback-signals.sh` が探索と一次集計を担い、スキル側には「読むべきファイルと数字」だけを渡す。**探索を自然言語の指示に任せると毎回違う場所を見て違う結論が出る**ため、見る対象を固定している。
+
+| 対象 | 何が分かるか |
+|---|---|
+| `.claude/.dev-workflow-run-state` | 中断した run の epic / wave / 経過時間 |
+| `.claude/.dev-workflow-heartbeat` | 最終の生存信号 |
+| `.claude/.dev-workflow-watchdog.log` | stall / escalate / abort の回数 |
+| `.claude/agent-tokens.tsv` | role 別トークン消費（コスト劣化の一次証拠） |
+| `~/.claude/projects/<slug>/*.jsonl` | セッション transcript（訂正・やり直し・中断の実物） |
+
+transcript の中身はスクリプトでは読まない（会話本文の解釈は `grep` で拾える性質のものではない）。**パスと更新時刻と行数だけを返し、読むのは分析側の仕事**とする。列挙は上限で打ち切られたら `transcripts.truncated=1` を出す。**黙って打ち切って「全部見た」と読める出力を作らない。**
+
+### 昇格閾値
+
+観測は即座に反映しない。`scripts/feedback-ledger.sh` の台帳に記録し、**同じキーが閾値回数（既定3回）再現して初めて**反映・還流を提案する。
+
+```bash
+bash scripts/feedback-ledger.sh list          # 観測の一覧
+bash scripts/feedback-ledger.sh ready         # 閾値に達したキー
+bash scripts/feedback-ledger.sh path          # 台帳の置き場所
+```
+
+1回きりの事故で恒久ルールを書いたり issue を立てたりすると、**誤検知がそのまま定着する**。閾値は `DEV_WORKFLOW_FEEDBACK_THRESHOLD` で変更できる。
+
+台帳は `~/.claude/dev-workflow/feedback/<repo>/` に置く。サンドボックス定義の規約パスと同じ流儀で、**駆動先の業務リポジトリには一切書き込まない**（上記「ハーネス非注入原則」）。
+
+### 修正範囲の限定
+
+**レビューと修正の対象は、実行中のプロジェクト固有の範囲に限定される。**
+
+| 対象 | 可否 |
+|---|---|
+| 台帳配下（`learnings.md` 等） | 常に可 |
+| プロジェクトの `CLAUDE.md` / `.claude/settings.local.json` / ドキュメント | **ユーザーが個別に承認した場合のみ** |
+| 駆動先の `.gitignore` | 不可 |
+| プラグイン本体（`${CLAUDE_PLUGIN_ROOT}` 配下） | 不可。**還流させる** |
+
+プラグインを利用者環境で書き換えると、更新で失われるうえ他の利用者にも届かない。だからハーネス起因の問題はその場で直さず、配布元へ戻す。
+
+唯一の例外は、駆動先が dev-workflow リポジトリ自身のとき（`repo.is_dev_workflow=1`）。このときプラグイン本体＝プロジェクトのソースなので通常の修正対象として扱い、還流は行わない。
+
+### 配布先からの還流
+
+`scope=harness` かつ閾値に達したキーは、redact 済みの issue 本文に組み立てられる。
+
+```bash
+bash scripts/feedback-ledger.sh upstream-repo            # 還流先の owner/repo
+bash scripts/feedback-ledger.sh render-upstream --key <slug>   # 本文（redact済み）
+```
+
+- 還流先は**プラグインのマニフェストの `repository` から引く**ため、fork して配布された環境ではその fork が還流先になる。社内ミラーへ送りたい場合は `DEV_WORKFLOW_UPSTREAM_REPO=owner/repo` を設定する
+- 機械的 redact（HOME・ユーザー名・リポジトリ名・メールアドレス・GitHub / Slack / API のトークン様文字列・Windows と POSIX のホームパス）は**最後の網であって唯一の防御線ではない**。社名・未公開仕様・コード片が残っていないかは人間が確認する
+- **本文全文をユーザーに提示し、承認を得てからでなければ投稿しない。** `gh` 未認証や不承認のときは本文を台帳配下へ保存し、投稿しなかったことを成功と報告しない
+- 同じキーの issue が既にある場合は新規作成せず既存 issue へコメントする（本文にキーが埋まっているので `gh issue list --search` で拾える）
+
+還流した issue は `/dev-workflow:plan` → `/dev-workflow:run` で処理される。**ハーネスの改善をハーネス自身で回すのがこのループの外周**にあたる。
 
 ## プロジェクト固有のカスタマイズ
 
