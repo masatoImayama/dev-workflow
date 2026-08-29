@@ -948,7 +948,9 @@ bash "${CLAUDE_PLUGIN_ROOT}/adapters/common/install-git-hooks.sh" --uninstall .
 
 ### 誤検知対策
 
-- **許可リスト:** lock ファイル、`__snapshots__`、`fixtures`/`testdata`、`node_modules`/`vendor`、`*.min.*`、`*.svg`、`*.generated.*`、gitignore 済みファイル等は自動で除外
+- **許可リスト:** lock ファイル、`__snapshots__`、`fixtures`/`testdata`、`node_modules`/`vendor`、`*.min.*`、`*.svg`、`*.generated.*`、**`generated/`・`__generated__/`（ディレクトリ名）**、gitignore 済みファイル等は自動で除外
+  - `generated/` 配下の除外は、`graphql-codegen` の client preset のように**1ファイルへ集約された生成物**（例: `frontend/src/generated/graphql.ts`）が極端に長い1行として出力され、ミニファイ/難読化コードと誤検知される問題への対処（#141）。ディレクトリ名は `generated` / `__generated__` に限定し、**`gen/` のような一般的すぎる短縮名は含めない**。「gen」は codegen 出力の慣用名でもあるが単なる一般語でもあり、これを許可すると「ディレクトリ名を gen にするだけで検査を回避できる」経路になってしまう。生成物かどうか確証が持てない場合は許可リストを狭く保ち、検査を効かせたままにする（安全側に倒す）
+  - この誤検知は `readability-guard:allow` コメントでは解消できない。生成物は再生成のたびに書き換わるためコメントが消え、「codegen再実行で差分が出ないこと」を完了条件に持つワークフローではその確認を必ず壊してしまう
 - **エスケープハッチ:** どうしてもエンコード済みデータが必要な場合、ファイル内に `readability-guard:allow <理由>` と書くと当該ファイルを除外。**人間可読な正当化をソースに残させる**ことで抑止の理念と整合させる
 
 ### 調整（環境変数）

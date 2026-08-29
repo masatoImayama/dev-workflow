@@ -15915,6 +15915,112 @@ assert_eq "#185: コピー先の内容がソースと一致する（末端ファ
   "x" "$(cat "${SPD185_LANE}/packages/pkg9/node_modules/pkg10/src/lib/internal/file.txt" 2>/dev/null)"
 
 # ---------------------------------------------------------------------------
+# check-readability.sh: generated/ ディレクトリ配下の codegen 生成物を
+# 誤検知しない（回帰防止 #141）
+#
+# `frontend/src/generated/graphql.ts`（graphql-codegen の client preset 相当）を
+# 模した fixture: GraphQL ドキュメントの AST を1行のJSONとして出力する codegen
+# ツールの実出力形状を再現し、issue #141 で報告された「極端に長い行」の誤検知
+# （ミニファイ/難読化コードとして誤判定される）を回帰テストとして固定する。
+#
+# 併せて同一テストブロックで次の2点も担保する（Epic #174「#141の修正で、本物の
+# ミニファイ/難読化コードの検出を弱めないこと」「判定できなかったときに安全側へ
+# 倒れるかを設計すること」への対応）:
+#   - `generated/` / `__generated__/` は許可されるが、同じ内容でも許可リストの
+#     外（generated/以外の通常ディレクトリ）や、一般的すぎるため意図的に許可
+#     リストへ加えなかった `gen/`（issue #141 の提案の一部を採用しなかった判断
+#     の回帰確認）は引き続き検出される
+#   - 本物のミニファイ/難読化コード（generated/の外）は許可リスト追加後も
+#     引き続き検出される（検出力を弱めていないことの担保）
+# ---------------------------------------------------------------------------
+
+echo "== check-readability.sh: generated/ ディレクトリの誤検知回帰（#141） =="
+
+RG141_TMP_REPO="$(make_temp_repo)"
+
+# codegen が出力する「1行に集約されたJSONドキュメント」を模したペイロード
+# （graphql-codegen の client preset は GraphQL AST をこの形で1行出力する。
+# issue #141 の実測では最長行 6115文字）
+RG141_LONGLINE_PAYLOAD="$(head -c 6200 /dev/zero | tr '\0' 'x')"
+
+RG141_GENERATED_DIR="frontend/src/generated"
+RG141_GENERATED_FILE="${RG141_GENERATED_DIR}/graphql.ts"
+RG141_DUNDER_DIR="frontend/src/__generated__"
+RG141_DUNDER_FILE="${RG141_DUNDER_DIR}/graphql.ts"
+RG141_PLAIN_DIR="frontend/src/api"
+RG141_PLAIN_FILE="${RG141_PLAIN_DIR}/graphql.ts"
+RG141_GEN_DIR="frontend/src/gen"
+RG141_GEN_FILE="${RG141_GEN_DIR}/graphql.ts"
+
+(
+  cd "$RG141_TMP_REPO" || exit 1
+  mkdir -p "$RG141_GENERATED_DIR" "$RG141_DUNDER_DIR" "$RG141_PLAIN_DIR" "$RG141_GEN_DIR"
+  printf 'export const documents = {"%s": Doc};\n' "$RG141_LONGLINE_PAYLOAD" > "$RG141_GENERATED_FILE"
+  printf 'export const documents = {"%s": Doc};\n' "$RG141_LONGLINE_PAYLOAD" > "$RG141_DUNDER_FILE"
+  printf 'export const documents = {"%s": Doc};\n' "$RG141_LONGLINE_PAYLOAD" > "$RG141_PLAIN_FILE"
+  printf 'export const documents = {"%s": Doc};\n' "$RG141_LONGLINE_PAYLOAD" > "$RG141_GEN_FILE"
+) >/dev/null 2>&1
+
+# --- generated/ 配下（frontend/src/generated/graphql.ts 相当）は誤検知しない ---
+RG141_GENERATED_EXIT=0
+(
+  cd "$RG141_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG141_GENERATED_FILE" >/dev/null 2>&1
+)
+RG141_GENERATED_EXIT=$?
+assert_exit_code "generated/配下のcodegen生成物（長い1行）は誤検知しない（#141）" 0 "$RG141_GENERATED_EXIT"
+
+# --- __generated__/ 配下も同様に誤検知しない ---
+RG141_DUNDER_EXIT=0
+(
+  cd "$RG141_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG141_DUNDER_FILE" >/dev/null 2>&1
+)
+RG141_DUNDER_EXIT=$?
+assert_exit_code "__generated__/配下のcodegen生成物（長い1行）は誤検知しない（#141）" 0 "$RG141_DUNDER_EXIT"
+
+# --- 同じ内容でもgenerated/の外なら引き続き検出される（検出力は弱めていない） ---
+RG141_PLAIN_EXIT=0
+(
+  cd "$RG141_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG141_PLAIN_FILE" >/dev/null 2>&1
+)
+RG141_PLAIN_EXIT=$?
+assert_exit_code "generated/の外にある同一内容の長い1行は引き続き検出される（検出力の維持）" 2 "$RG141_PLAIN_EXIT"
+
+# --- gen/（一般語で判定できない）配下は意図的に許可リストへ加えていないため引き続き検出される ---
+RG141_GEN_EXIT=0
+(
+  cd "$RG141_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG141_GEN_FILE" >/dev/null 2>&1
+)
+RG141_GEN_EXIT=$?
+assert_exit_code "gen/（一般語で判定できない）配下は許可リストに加えず引き続き検出される（安全側に倒す設計）" 2 "$RG141_GEN_EXIT"
+
+# --- 本物のミニファイ/難読化コード（generated/の外）も引き続き検出される ---
+RG141_MINIFIED_FILE="frontend/src/app/bundle.js"
+(
+  cd "$RG141_TMP_REPO" || exit 1
+  mkdir -p "$(dirname "$RG141_MINIFIED_FILE")"
+  {
+    i=0
+    while [ "$i" -lt 400 ]; do
+      printf 'var v%d=function(a,b){return a+b};' "$i"
+      i=$((i + 1))
+    done
+    printf '\n'
+  } > "$RG141_MINIFIED_FILE"
+) >/dev/null 2>&1
+
+RG141_MINIFIED_EXIT=0
+(
+  cd "$RG141_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG141_MINIFIED_FILE" >/dev/null 2>&1
+)
+RG141_MINIFIED_EXIT=$?
+assert_exit_code "本物のミニファイコード（generated/の外）は許可リスト追加後も引き続き検出される" 2 "$RG141_MINIFIED_EXIT"
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
