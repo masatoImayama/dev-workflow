@@ -14,6 +14,7 @@
 | [0004](0004-cross-wave-lane-reuse.md) | レーンのウェーブ横断維持（cross-wave lane reuse）は見送る（未実装のまま） | ウェーブをまたいでレーン（generator）を継続させる機構（`SendMessage`）自体は存在するが、本 Epic のスコープでは実装・実地検証していないため、現状は毎ウェーブ新規 spawn する方式を維持する。Task #153 時点の「手段が存在しない」という結論は誤りであり、Task #152 で訂正した | 承認済み・見送り（Task #153、Task #152 で記述を訂正） |
 | [0005](0005-edit-time-check-hook.md) | 編集時チェック（PostToolUse フック） | generator の編集直後にホスト側で型/lint の軽量チェックを行い、`sandbox-exec.sh` 経由のビルド/テスト往復の一部を削減する | 採用（Task #155） |
 | [0006](0006-evaluator-model-split.md) | evaluator を「発見は sonnet、確度判定は opus」に変える | 観点別レビューの発見役を sonnet で並列に回し、拾った指摘の確度判定だけを opus に寄せることで、レビューの直列区間のコストを下げる | 承認済み（Task #157） |
+| [0007](0007-share-prepared-dirs-copy-fallback.md) | symlink 失敗時のコピー・フォールバック（Windows バインドマウント環境） | Windows + Docker Desktop 環境での `ln -s` 失敗（issue #139）そのものは再現できなかったため symlink 方式は据え置き、`link-failed` になったエントリに限り実体コピー（`cp -a`。ハードリンクは不採用）を追加で試みる防御を入れる | 承認済み（Task #139） |
 
 ## 命名・運用ルール
 

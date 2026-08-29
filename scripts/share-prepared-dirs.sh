@@ -11,7 +11,8 @@
 # 判定を散文で generator に委ねると取りこぼすため、本スクリプトに固定する。
 #
 # 本スクリプトは共有モード（既定モード）・`--detach`（#110）・ロック兼完了マーカーと
-# `--run-prep`（#111）を実装する。
+# `--run-prep`（#111）を実装する。symlink 作成が失敗した場合の実体コピー・フォールバック
+# （#139）については後述の「コピー・フォールバックについて」を参照。
 #
 # --detach は共有モードの逆操作である。依存マニフェスト（package.json / yarn.lock 等）を
 # 変更するタスクは、install 前に共有リンクを解除しないと symlink 越しに共有元と他レーンの
@@ -54,11 +55,13 @@
 #
 # 出力（1行1件・タブ区切り・機械可読。最後に必ず prep= 行を1行出す）:
 #   linked	<dir>	<symlinkのターゲット（レーンからの相対パス）>
+#   copied	<dir>                                            （#139。後述のコピー・フォールバック）
 #   skip	<dir>	reason	<no-source|exists|fingerprint-mismatch|link-failed>
 #   prep=<skip|run>
 #
-# 全エントリが linked または exists なら prep=skip、1つでもそれ以外があれば prep=run。
-# --dry-run でも linked 行を出すが実際には作らない
+# 全エントリが linked・copied・exists のいずれかなら prep=skip、1つでもそれ以外があれば
+# prep=run。--dry-run でも linked 行を出すが実際には作らない（copied はコピー・フォールバック
+# 自体を --dry-run では実行しないため出ない）
 # （scripts/cleanup-lane-worktrees.sh の removed 行が「削除予定」を表す既存慣習に合わせる）。
 #
 # 出力（--detach。1行1件・タブ区切り。prep= 行は出さない。エントリは <dir> のみ使い、
@@ -86,7 +89,51 @@
 #      symlink に <dir> が占有されたまま install が走り失敗する（#116 の解除対象は
 #      kind=linked のみ）、(b) 再実行すると判定順序2の `[ -e "$d" ] || [ -L "$d" ]` が
 #      dangling symlink でも真になり exists と誤判定され、フォールバックの install が
-#      走らないまま done が書かれる、という2つの不具合が生じる。#118）
+#      走らないまま done が書かれる、という2つの不具合が生じる。#118）。link-failed に
+#      なった場合は続けて下記の「コピー・フォールバックについて」を試み、成功すれば
+#      結果は copied に置き換わる（#139）
+#
+# コピー・フォールバックについて（#139）:
+#
+# Windows + Docker Desktop のバインドマウント環境では、コンテナ内からの `ln -s` が
+# `Operation not permitted` になり symlink 方式そのものが成立しないと報告されている
+# （issue #139）。設計にあたり実際に確認できたことと、確認できなかったことを分けて記す
+# （推測で実装しないため。詳細は docs/adr/0007-share-prepared-dirs-copy-fallback.md）。
+#
+#   - 確認できたこと: 本リポジトリのサンドボックス（dockerfile モード、Windows の
+#     バインドマウント上に `docker run -v` でマウント）では、コンテナ内から
+#     バインドマウント配下への `ln -s` は成功した。また `cp -a` / `cp -r` による
+#     実体コピーも成功することを確認した（コピー先とコピー元の inode 番号が異なることまで
+#     確認し、独立したファイルであることを検証済み）
+#   - 確認できなかったこと: issue #139 の元の再現環境（compose モード・実際の
+#     Node.js/yarn プロジェクト）そのものは用意できず、`ln -s` が実際に失敗する状態
+#     そのものは再現できていない。そのため本フォールバックが issue #139 の実環境で
+#     効果があるかどうかは未検証である
+#
+# 上記の理由により symlink 方式自体は変更せず、引き続き第一選択のままにする（Windows 以外の
+# 既存動作を変えない）。symlink 作成が link-failed になったエントリに限り、実体コピー
+# （`cp -a`。失敗時は `cp -r` にフォールバック）を1回だけ追加で試みる。
+#
+# ハードリンク（`cp -al` 等）は意図的に使わない。ハードリンクは共有元と同一 inode を指すため、
+# 後続の `--run-prep`（yarn install 等）がコピー先へ書き込むと共有元（Epic 専用 worktree）を
+# 書き換えてしまう。これは Review #116 で symlink 方式に対して対策済みの問題（インストール
+# コマンドが共有元を破壊する）と同種だが、ハードリンクにはその対策（`--run-prep` 前の
+# unlink）が効かない（unlink はシンボリックリンクの解除であり、ハードリンクされた実体
+# ディレクトリには使えない）。よって実体を完全に独立させるコピーのみを使う。
+#
+# コピー先の書き込み条件（触れてよいことが明確な場合に限る）:
+#   - 対象 <dir> が存在しない            -> 一時名にコピーしてから mv で確定させる
+#                                          （cp が失敗しても実名 <dir> には何も現れない。
+#                                          「空の実体ディレクトリが残らない」ことに対応）
+#   - 対象 <dir> が「空の」実体ディレクトリ -> その場に内容を展開する。Windows で `ln -s` の
+#     失敗時に空ディレクトリが副作用として残るという報告（issue #139。「.bin と node_modules
+#     だけを含む空サブディレクトリ」）への対応。このケース自体は再現できていないが、対応しても
+#     空でなければ何もしない・触れないため、既存動作を壊さず防御的に組み込む
+#   - symlink・非空の実体・その他何かが既にある -> 触れない（link-failed のまま。安全ルールに
+#     従い削除は行わない）
+#
+# symlink が確認できる環境（Linux/macOS 等。`ln -s` が通常成功する）では link-failed が
+# そもそも発生しないため、この経路は実行されない（既存動作を変えない）。
 #
 # フィンガープリントの比較は素のファイル読み取りだけで済むためホスト側で行う
 # （フィンガープリント未指定のエントリは検査しない）。
@@ -492,18 +539,109 @@ if [ "${#CANDIDATE_DIR[@]}" -gt 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 出力
+# コピー・フォールバック（#139）。
+#
+# Windows + Docker Desktop のバインドマウント環境では、コンテナ内からの `ln -s` が
+# 権限エラーで失敗する場合があると報告されている（issue #139。Docker Desktop の
+# ファイル共有バックエンドの制約）。この経路自体は本リポジトリのサンドボックス
+# （dockerfile モード・Alpine/BusyBox、Windows バインドマウント）では実際に確認できた
+# 限り再現しなかった（`ln -s` は成功した）。**issue #139 の元の再現環境（compose モード・
+# 実プロジェクト）そのものは用意できず、`ln -s` が失敗する状態そのものは再現できていない。**
+# そのため symlink 方式自体は変更せず、依然として第一選択のままにする。
+#
+# 一方で「symlink が失敗した場合に、何もできず prep=run のまま人手を待つしかない」状態は
+# 環境非依存に改善できる。symlink 作成が link-failed になったエントリに限り、
+# 実体コピー（`cp -a`。ハードリンクはしない。理由は冒頭コメント「コピー・フォールバックに
+# ついて」を参照）を1回だけ追加で試みる。
+#
+# 生成先は次のいずれかの状態でのみ書き込む（触れてよいことが明確な場合に限る）:
+#   - 対象 <dir> が存在しない          -> 一時名にコピーしてから mv で確定させる
+#                                        （cp が失敗しても実名 <dir> には何も現れない）
+#   - 対象 <dir> が「空の」実体ディレクトリ -> その場にコピーする（内容を直接展開する）。
+#     Windows 環境で `ln -s` の失敗時に空ディレクトリが副作用として残るという報告
+#     （issue #139）に対応するため。このケースは再現・実証できていないが、対応しても
+#     既存動作を壊さない（空でなければ何もしない・触れない）ため、防御的に組み込む
+#   - symlink・非空の実体・その他何か既にある -> 触れない（link-failed のまま）
+#
+# symlink が確認できる環境（Linux/macOS 等。`ln -s` が通常成功する）では link-failed が
+# 発生しないため、この経路は一切実行されない（既存動作を変えない）。
+# ---------------------------------------------------------------------------
+
+if [ "$DRY_RUN" -eq 0 ]; then
+  COPY_CANDIDATE_ORIG_IDX=()
+  COPY_CANDIDATE_DIR=()
+  COPY_CANDIDATE_SRC=()
+
+  for idx in "${!ENTRY_DIRS[@]}"; do
+    if [ "${RESULT_KIND[$idx]:-}" = "link-failed" ]; then
+      COPY_CANDIDATE_ORIG_IDX+=("$idx")
+      COPY_CANDIDATE_DIR+=("${ENTRY_DIRS[$idx]}")
+      COPY_CANDIDATE_SRC+=("${SOURCE}/${ENTRY_DIRS[$idx]}")
+    fi
+  done
+
+  if [ "${#COPY_CANDIDATE_DIR[@]}" -gt 0 ]; then
+    COPY_SCRIPT="set -u"$'\n'
+    # shellcheck disable=SC2016  # 単一引用符は意図的。$d/$s はコンテナ側で実行される
+    # ミニスクリプトの文字列としてそのまま埋め込む。
+    for i in "${!COPY_CANDIDATE_DIR[@]}"; do
+      d="${COPY_CANDIDATE_DIR[$i]}"
+      s="${COPY_CANDIDATE_SRC[$i]}"
+      COPY_SCRIPT+="d=$(printf '%q' "$d")"$'\n'
+      COPY_SCRIPT+="s=$(printf '%q' "$s")"$'\n'
+      COPY_SCRIPT+='tmp="${d}.dwtmp$$"'$'\n'
+      COPY_SCRIPT+='if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then'$'\n'
+      COPY_SCRIPT+='  printf "copyfailed\t%s\n" "$d"'$'\n'
+      COPY_SCRIPT+='elif [ -d "$d" ]; then'$'\n'
+      COPY_SCRIPT+='  if [ -n "$(ls -A "$d" 2>/dev/null)" ]; then'$'\n'
+      COPY_SCRIPT+='    printf "copyfailed\t%s\n" "$d"'$'\n'
+      COPY_SCRIPT+='  elif cp -a "$s/." "$d/" 2>/dev/null || cp -r "$s/." "$d/" 2>/dev/null; then'$'\n'
+      COPY_SCRIPT+='    printf "copied\t%s\n" "$d"'$'\n'
+      COPY_SCRIPT+='  else'$'\n'
+      COPY_SCRIPT+='    printf "copyfailed\t%s\n" "$d"'$'\n'
+      COPY_SCRIPT+='  fi'$'\n'
+      COPY_SCRIPT+='elif { cp -a "$s" "$tmp" 2>/dev/null || cp -r "$s" "$tmp" 2>/dev/null; } && [ -d "$tmp" ]; then'$'\n'
+      COPY_SCRIPT+='  if mv -T "$tmp" "$d" 2>/dev/null && [ -d "$d" ]; then'$'\n'
+      COPY_SCRIPT+='    printf "copied\t%s\n" "$d"'$'\n'
+      COPY_SCRIPT+='  else'$'\n'
+      COPY_SCRIPT+='    printf "copyfailed\t%s\n" "$d"'$'\n'
+      COPY_SCRIPT+='  fi'$'\n'
+      COPY_SCRIPT+='else'$'\n'
+      COPY_SCRIPT+='  printf "copyfailed\t%s\n" "$d"'$'\n'
+      COPY_SCRIPT+='fi'$'\n'
+    done
+
+    COPY_SANDBOX_ARGS=()
+    [ -n "$EPIC" ] && COPY_SANDBOX_ARGS+=(--epic "$EPIC")
+    COPY_OUTPUT="$(bash "$SANDBOX_EXEC" "${COPY_SANDBOX_ARGS[@]}" "$COPY_SCRIPT")"
+
+    copy_i=0
+    while IFS=$'\t' read -r ckind _cdir; do
+      [ -z "$ckind" ] && continue
+      [ "$copy_i" -lt "${#COPY_CANDIDATE_ORIG_IDX[@]}" ] || break
+      corig_idx="${COPY_CANDIDATE_ORIG_IDX[$copy_i]}"
+      [ "$ckind" = "copied" ] && RESULT_KIND[corig_idx]="copied"
+      copy_i=$((copy_i + 1))
+    done <<< "$COPY_OUTPUT"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 出力（linked / copied / skip の3種）
 # ---------------------------------------------------------------------------
 
 PREP="skip"
 for idx in "${!ENTRY_DIRS[@]}"; do
   kind="${RESULT_KIND[$idx]:-link-failed}"
-  if [ "$kind" = "linked" ]; then
-    printf 'linked\t%s\t%s\n' "${ENTRY_DIRS[$idx]}" "${RESULT_TARGET[$idx]:-}"
-  else
-    printf 'skip\t%s\treason\t%s\n' "${ENTRY_DIRS[$idx]}" "$kind"
-    [ "$kind" = "exists" ] || PREP="run"
-  fi
+  case "$kind" in
+    linked)
+      printf 'linked\t%s\t%s\n' "${ENTRY_DIRS[$idx]}" "${RESULT_TARGET[$idx]:-}" ;;
+    copied)
+      printf 'copied\t%s\n' "${ENTRY_DIRS[$idx]}" ;;
+    *)
+      printf 'skip\t%s\treason\t%s\n' "${ENTRY_DIRS[$idx]}" "$kind"
+      [ "$kind" = "exists" ] || PREP="run" ;;
+  esac
 done
 
 # ---------------------------------------------------------------------------
@@ -541,6 +679,16 @@ if [ -n "$RUN_PREP" ] && [ "$PREP" = "run" ] && [ "$DRY_RUN" -eq 0 ]; then
 fi
 
 printf 'prep=%s\n' "$PREP"
+
+# prep=run のまま何のコマンドも実行されずに exit 0 で終わると、呼び出し側が
+# prep= 行を見落とした場合に「レーンへ node_modules 等が一切用意されないまま
+# 実装へ進む」という無言の状態になる（issue #139 の実害）。symlink・copy いずれの
+# フォールバックも尽きて prep=run のまま残り、かつ --run-prep も渡されていない
+# （＝何も実行されない）場合は、それを stderr に明示する。exit コードは変えない
+# （既存の呼び出し側との互換性を保つ。判断は prep= 行を見て呼び出し側が行う）。
+if [ "$PREP" = "run" ] && [ -z "$RUN_PREP" ] && [ "$DRY_RUN" -eq 0 ]; then
+  echo "WARNING: prep=run のまま --run-prep が指定されていないため、共有できなかったエントリの準備コマンドは実行されていません。レーンは準備成果が無い状態のまま進みます（#139）。" >&2
+fi
 
 if [ "$RUN_PREP_RAN" -eq 1 ] && [ "$RUN_PREP_EXIT" -ne 0 ]; then
   echo "ERROR: --run-prep のコマンドが失敗しました（exit ${RUN_PREP_EXIT}）" >&2

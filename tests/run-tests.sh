@@ -11863,10 +11863,40 @@ assert_eq "ネストしたエントリ: linked 後、共有元のファイルが
 echo ""
 echo "== share-prepared-dirs.sh: dangling symlink 時に撤去してから link-failed とする（Review #118） =="
 
+# Task #139 のコピー・フォールバックは link-failed になった全エントリに対して
+# 実体コピー（cp -a / cp -r）を試みる。本テストの共有元は実在し中身も入っているため、
+# コピー・フォールバックを素通しにすると copied になって link-failed を検証できなくなる
+# （#118 が検証したいのは symlink 経路の撤去・再現性であり、コピー経路の成否ではない）。
+# そのため本テスト専用に「必ず失敗する偽 cp」を PATH へ割り込ませ、コピー・フォールバックの
+# 有無に関わらず link-failed が保たれることを確認する。
+SPD118D_FAKEBIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-118d-fakebin.XXXXXX")"
+cat > "${SPD118D_FAKEBIN}/cp" <<'EOF'
+#!/bin/sh
+# テスト専用の偽 cp。#139 のコピー・フォールバックを無効化し、#118 の
+# symlink 撤去・再現性の検証に影響しないようにするため、必ず exit 1 する。
+exit 1
+EOF
+chmod +x "${SPD118D_FAKEBIN}/cp"
+
+spd118d_make_stub() {
+  # spd118d_make_stub <call_log>  PATH に偽 cp を割り込ませてから sh -c する
+  local call_log="$1" stub
+  stub="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-118d-stub.XXXXXX")"
+  {
+    echo '#!/bin/bash'
+    echo 'set -u'
+    printf 'echo 1 >> %q\n' "$call_log"
+    printf 'PATH=%q:"$PATH"\n' "$SPD118D_FAKEBIN"
+    echo 'cmd="${@: -1}"'
+    echo 'sh -c "$cmd"'
+  } > "$stub"
+  printf '%s' "$stub"
+}
+
 SPD118D_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-118d-source.XXXXXX")"
 SPD118D_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-118d-lane.XXXXXX")"
 SPD118D_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-118d-calllog.XXXXXX")"
-SPD118D_STUB="$(spd_make_stub "$SPD118D_CALL_LOG")"
+SPD118D_STUB="$(spd118d_make_stub "$SPD118D_CALL_LOG")"
 
 mkdir -p "${SPD118D_SOURCE}/app/node_modules"
 printf 'dangling-marker\n' > "${SPD118D_SOURCE}/app/node_modules/marker.txt"
@@ -14787,6 +14817,198 @@ case "$FB_FLAT_TEXT" in
 esac
 
 rm -f "$FB_FLAT"
+
+# ---------------------------------------------------------------------------
+# share-prepared-dirs.sh: symlink 失敗時のコピー・フォールバック（Task #139）
+#
+# `ln -s` を人為的に失敗させるため、DEV_WORKFLOW_SANDBOX_EXEC のスタブから呼ばれる
+# `sh -c "$cmd"` の PATH に「必ず exit 1 するだけの偽 ln」を割り込ませる。実際の
+# Docker には触れず、Windows + Docker Desktop のバインドマウントで報告されている
+# `ln -s: Operation not permitted`（issue #139）を model 化したものであり、
+# その環境自体を再現するものではない（コメントで明記）。
+# ---------------------------------------------------------------------------
+
+echo "== share-prepared-dirs.sh: symlink失敗時のコピー・フォールバック（#139） =="
+
+# 偽binディレクトリを3種用意する。DEV_WORKFLOW_SANDBOX_EXEC のスタブから呼ばれる
+# `sh -c "$cmd"` の PATH に割り込ませ、Windows + Docker Desktop のバインドマウントで
+# 報告されている `ln -s: Operation not permitted`（issue #139）を model 化する。
+# 実際の Docker には触れず、その環境自体を再現するものではない。
+#   1. SPD139_FAKEBIN      : 何も作らず exit 1（単純な権限エラーを模す）
+#   2. SPD139_FAKEBIN_EMPTY: 対象を「空ディレクトリ」として作ってから exit 1
+#                            （issue #139 が報告する「空の実体ディレクトリが副作用として
+#                            残る」を model 化）
+#   3. SPD139_FAKEBIN_NONEMPTY: 対象を「空でない」ディレクトリとして作ってから exit 1
+#                               （中身のあるものには触れないことの防御を検証するため）
+SPD139_FAKEBIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd139-fakebin.XXXXXX")"
+cat > "${SPD139_FAKEBIN}/ln" <<'EOF'
+#!/bin/sh
+# テスト専用の偽 ln。symlink 作成が失敗する環境（issue #139）を模擬するため、
+# 何も作らず必ず exit 1 する。
+exit 1
+EOF
+chmod +x "${SPD139_FAKEBIN}/ln"
+
+SPD139_FAKEBIN_EMPTY="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd139-fakebin-empty.XXXXXX")"
+cat > "${SPD139_FAKEBIN_EMPTY}/ln" <<'EOF'
+#!/bin/sh
+# テスト専用の偽 ln。対象（第3引数）を空ディレクトリとして作った直後に失敗する
+# Docker Desktop バインドマウントの挙動（issue #139の報告）を模擬する。
+mkdir -p "$3" 2>/dev/null
+exit 1
+EOF
+chmod +x "${SPD139_FAKEBIN_EMPTY}/ln"
+
+SPD139_FAKEBIN_NONEMPTY="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd139-fakebin-nonempty.XXXXXX")"
+cat > "${SPD139_FAKEBIN_NONEMPTY}/ln" <<'EOF'
+#!/bin/sh
+# テスト専用の偽 ln。対象（第3引数）を「空でない」ディレクトリとして作った直後に失敗する。
+mkdir -p "$3" 2>/dev/null
+echo stray > "$3/stray-leftover.txt" 2>/dev/null
+exit 1
+EOF
+chmod +x "${SPD139_FAKEBIN_NONEMPTY}/ln"
+
+spd139_make_stub() {
+  # spd139_make_stub <call_log> <fakebin_dir>  PATH に偽binを割り込ませてから sh -c する
+  local call_log="$1" fakebin="$2" stub
+  stub="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd139-stub.XXXXXX")"
+  {
+    echo '#!/bin/bash'
+    echo 'set -u'
+    printf 'echo 1 >> %q\n' "$call_log"
+    printf 'PATH=%q:"$PATH"\n' "$fakebin"
+    echo 'cmd="${@: -1}"'
+    echo 'sh -c "$cmd"'
+  } > "$stub"
+  printf '%s' "$stub"
+}
+
+SPD139_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd139-calllog.XXXXXX")"
+SPD139_STUB="$(spd139_make_stub "$SPD139_CALL_LOG" "$SPD139_FAKEBIN")"
+SPD139_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd139-source.XXXXXX")"
+SPD139_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd139-lane.XXXXXX")"
+
+mkdir -p "${SPD139_SOURCE}/node_modules/.bin"
+printf 'pkg-content\n' > "${SPD139_SOURCE}/node_modules/some-pkg.js"
+
+# --- ケース1: 対象が存在しない場合、symlink失敗→コピーで実体が作られ copied になる ---
+SPD139_OUT1="$(spd_run "$SPD139_LANE" "$SPD139_STUB" --source "$SPD139_SOURCE" --dir "node_modules")"
+SPD139_EXIT1=$?
+assert_exit_code "#139 ケース1: symlink失敗でもコピーで成功すれば exit 0" 0 "$SPD139_EXIT1"
+
+case "$SPD139_OUT1" in
+  *"copied"*"node_modules"*)
+    pass "#139 ケース1: symlink失敗時にコピー・フォールバックで copied が出る" ;;
+  *)
+    fail "#139 ケース1: symlink失敗時にコピー・フォールバックで copied が出る" "output=[${SPD139_OUT1}]" ;;
+esac
+case "$SPD139_OUT1" in
+  *"prep=skip"*)
+    pass "#139 ケース1: copied のみのとき prep=skip" ;;
+  *)
+    fail "#139 ケース1: copied のみのとき prep=skip" "output=[${SPD139_OUT1}]" ;;
+esac
+assert_eq "#139 ケース1: コピー先に実ファイルが展開されている（symlinkではない）" \
+  "yes" "$([ -f "${SPD139_LANE}/node_modules/some-pkg.js" ] && [ ! -L "${SPD139_LANE}/node_modules" ] && echo yes || echo no)"
+assert_eq "#139 ケース1: コピー先の内容がソースと一致する" \
+  "yes" "$(cmp -s "${SPD139_SOURCE}/node_modules/some-pkg.js" "${SPD139_LANE}/node_modules/some-pkg.js" && echo yes || echo no)"
+
+# --- ケース2: ln -s 失敗の副作用として「空の」実体ディレクトリが同一呼び出し中に残る場合
+#     （issue #139 の報告を model 化。SPD139_FAKEBIN_EMPTY が mkdir してから exit 1 する）
+#     → プライマリ呼び出しは link-failed のまま、後続のコピー・フォールバックがその場に
+#     内容を展開する（レーン側の <dir> は事前には作らない。副作用として作られる想定） ---
+SPD139_STUB_EMPTY="$(spd139_make_stub "$SPD139_CALL_LOG" "$SPD139_FAKEBIN_EMPTY")"
+SPD139_LANE2="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd139-lane2.XXXXXX")"
+SPD139_OUT2="$(spd_run "$SPD139_LANE2" "$SPD139_STUB_EMPTY" --source "$SPD139_SOURCE" --dir "node_modules")"
+case "$SPD139_OUT2" in
+  *"copied"*"node_modules"*)
+    pass "#139 ケース2: ln -s失敗の副作用で残る空ディレクトリにもコピーで copied になる" ;;
+  *)
+    fail "#139 ケース2: ln -s失敗の副作用で残る空ディレクトリにもコピーで copied になる" "output=[${SPD139_OUT2}]" ;;
+esac
+assert_eq "#139 ケース2: 副作用で残った空ディレクトリに内容が展開される" \
+  "yes" "$([ -f "${SPD139_LANE2}/node_modules/some-pkg.js" ] && echo yes || echo no)"
+
+# --- ケース3: ln -s 失敗の副作用として「空でない」実体ディレクトリが残る場合は触れない
+#     （データ保護。SPD139_FAKEBIN_NONEMPTY が中身入りで mkdir してから exit 1 する） ---
+SPD139_STUB_NONEMPTY="$(spd139_make_stub "$SPD139_CALL_LOG" "$SPD139_FAKEBIN_NONEMPTY")"
+SPD139_LANE3="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd139-lane3.XXXXXX")"
+SPD139_OUT3="$(spd_run "$SPD139_LANE3" "$SPD139_STUB_NONEMPTY" --source "$SPD139_SOURCE" --dir "node_modules")"
+case "$SPD139_OUT3" in
+  *"skip"*"node_modules"*"reason"*"link-failed"*)
+    pass "#139 ケース3: 空でない実体ディレクトリには触れず link-failed のまま" ;;
+  *)
+    fail "#139 ケース3: 空でない実体ディレクトリには触れず link-failed のまま" "output=[${SPD139_OUT3}]" ;;
+esac
+assert_eq "#139 ケース3: 副作用で残った既存ファイルの内容が変更されていない（データ保護）" \
+  "stray" "$(cat "${SPD139_LANE3}/node_modules/stray-leftover.txt" 2>/dev/null)"
+assert_eq "#139 ケース3: ソース由来のファイルは持ち込まれない（触れていない証拠）" \
+  "no" "$([ -e "${SPD139_LANE3}/node_modules/some-pkg.js" ] && echo yes || echo no)"
+
+# --- ケース4: コピーも失敗する場合（共有元が無い）は copied にならず link-failed/no-source
+#     のまま。かつ、コピー失敗時にレーンへ空の実体ディレクトリが残らない ---
+SPD139_LANE4="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd139-lane4.XXXXXX")"
+SPD139_OUT4="$(spd_run "$SPD139_LANE4" "$SPD139_STUB" --source "$SPD139_SOURCE" --dir "no_such_dir_139")"
+case "$SPD139_OUT4" in
+  *"skip"*"no_such_dir_139"*"reason"*"no-source"*)
+    pass "#139 ケース4: 共有元が無いエントリはコピー対象にもならず no-source のまま" ;;
+  *)
+    fail "#139 ケース4: 共有元が無いエントリはコピー対象にもならず no-source のまま" "output=[${SPD139_OUT4}]" ;;
+esac
+assert_eq "#139 ケース4: レーンに空の実体ディレクトリが残らない" \
+  "no" "$([ -e "${SPD139_LANE4}/no_such_dir_139" ] && echo yes || echo no)"
+
+# --- ケース5: --dry-run 時はコピー・フォールバックを一切実行しない（既存の link-failed のまま） ---
+SPD139_LANE5="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd139-lane5.XXXXXX")"
+SPD139_OUT5="$(spd_run "$SPD139_LANE5" "$SPD139_STUB" --source "$SPD139_SOURCE" --dir "node_modules" --dry-run)"
+case "$SPD139_OUT5" in
+  *"copied"*)
+    fail "#139 ケース5: --dry-run ではコピー・フォールバックを実行しない" "output=[${SPD139_OUT5}]" ;;
+  *)
+    pass "#139 ケース5: --dry-run ではコピー・フォールバックを実行しない" ;;
+esac
+assert_eq "#139 ケース5: --dry-run では実体が作られない" \
+  "no" "$([ -e "${SPD139_LANE5}/node_modules" ] && echo yes || echo no)"
+
+# ---------------------------------------------------------------------------
+# share-prepared-dirs.sh: prep=run のまま何も実行されない状態を明示する警告（Task #139）
+#
+# --run-prep を渡さずに prep=run のまま終わる呼び出しは、従来 stdout の prep= 行を
+# 見落とすと「何も起きない」まま静かに exit 0 する（issue #139 の実害）。
+# stderr に明示の警告が出るかを検証する（exit コードは変えないため 0 のまま）。
+# ---------------------------------------------------------------------------
+
+echo "== share-prepared-dirs.sh: prep=run かつ --run-prep 無指定を明示する警告（#139） =="
+
+SPD139_LANE_W1="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd139-lanew1.XXXXXX")"
+SPD139_STDERR_W1="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd139-stderr-w1.XXXXXX")"
+(cd "$SPD139_LANE_W1" || exit 1
+ DEV_WORKFLOW_SANDBOX_EXEC="$SPD_STUB" bash "$SPD_SCRIPT" --source "$SPD139_SOURCE" \
+   --dir "no_such_dir_139_warn" >/dev/null 2>"$SPD139_STDERR_W1")
+SPD139_WARN1_EXIT=$?
+assert_exit_code "#139 警告ケース1: --run-prep 無指定・prep=run でも exit 0 のまま" 0 "$SPD139_WARN1_EXIT"
+case "$(cat "$SPD139_STDERR_W1" 2>/dev/null)" in
+  *"WARNING"*"prep=run"*"--run-prep"*)
+    pass "#139 警告ケース1: --run-prep 無指定・prep=run のとき stderr に明示の警告が出る" ;;
+  *)
+    fail "#139 警告ケース1: --run-prep 無指定・prep=run のとき stderr に明示の警告が出る" \
+      "stderr=[$(cat "$SPD139_STDERR_W1" 2>/dev/null)]" ;;
+esac
+
+# --run-prep を渡した場合は警告が出ない（コマンド自体は実行される。true を渡し成功させる）
+SPD139_LANE_W2="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd139-lanew2.XXXXXX")"
+SPD139_STDERR_W2="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd139-stderr-w2.XXXXXX")"
+(cd "$SPD139_LANE_W2" || exit 1
+ DEV_WORKFLOW_SANDBOX_EXEC="$SPD_STUB" bash "$SPD_SCRIPT" --source "$SPD139_SOURCE" \
+   --dir "no_such_dir_139_warn2" --run-prep "true" >/dev/null 2>"$SPD139_STDERR_W2")
+case "$(cat "$SPD139_STDERR_W2" 2>/dev/null)" in
+  *"WARNING"*"prep=run"*)
+    fail "#139 警告ケース2: --run-prep 指定時は警告が出ない" \
+      "stderr=[$(cat "$SPD139_STDERR_W2" 2>/dev/null)]" ;;
+  *)
+    pass "#139 警告ケース2: --run-prep 指定時は警告が出ない" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 結果集計

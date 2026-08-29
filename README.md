@@ -676,11 +676,20 @@ node_modules  yarn.lock package.json
   が Epic 専用 worktree の成果ディレクトリへの symlink 作成を試みる
 - **節が無ければ何もしない**（共有せず、現行どおり各レーンで準備コマンドをフル実行する。
   既存 Epic に完全後方互換）
-- symlink 作成に失敗した場合（共有元が無い・フィンガープリント不一致等）は、フォールバックとして
-  `## 準備コマンド` 節の内容が実行される
+- symlink 作成に失敗した場合（共有元が無い・フィンガープリント不一致等）、まず実体コピー
+  （`cp -a`。失敗時は `cp -r`）による追加のフォールバックを1回だけ試みる（issue #139。
+  Windows + Docker Desktop のバインドマウント環境でコンテナ内から `ln -s` が失敗する場合が
+  あると報告されている。詳細は `docs/adr/0007-share-prepared-dirs-copy-fallback.md`）。
+  これも失敗すれば、さらなるフォールバックとして `## 準備コマンド` 節の内容が実行される
+- symlink・コピーのいずれも失敗し、かつ `## 準備コマンド` 節も無い（`--run-prep` が渡されない）
+  場合は、レーンが準備成果を一切得られないまま進んでしまう。このとき
+  `share-prepared-dirs.sh` は stderr に明示の `WARNING` を出す（issue #139。終了コードは
+  変わらない）
 - 依存を追加・更新するタスク（`package.json` / lockfile 等を変更するタスク）では、install 系
   コマンドの前に `share-prepared-dirs.sh --detach` で共有リンクを解除してから install する
-  必要がある（generator へは run が指示するが、人間が挙動を追えるようここにも明記する）
+  必要がある（generator へは run が指示するが、人間が挙動を追えるようここにも明記する）。
+  **実体コピーで共有されたエントリは symlink ではなく独立した実体のため、`--detach` の対象
+  外である**（そもそも共有元と inode を共有しておらず、install しても共有元を汚さない）
 
 ### Epic の `## 編集時チェック` 節
 
