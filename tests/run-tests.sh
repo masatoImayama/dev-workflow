@@ -15532,11 +15532,18 @@ case "$SPD182B_OUT" in
     pass "#182 ケースB: 循環シンボリックリンクを含むソースは copied にならない" ;;
 esac
 case "$SPD182B_OUT" in
-  *"skip"*"node_modules"*"reason"*"link-failed"*)
-    pass "#182 ケースB: 循環シンボリックリンクを含むソースは link-failed のまま確定する" ;;
+  *"skip"*"node_modules"*"reason"*"copy-cycle-guard"*)
+    pass "#182/#185 ケースB: 循環シンボリックリンクを含むソースは copy-cycle-guard reason で確定する（他の失敗原因と区別できる。#185）" ;;
   *)
-    fail "#182 ケースB: 循環シンボリックリンクを含むソースは link-failed のまま確定する" \
+    fail "#182/#185 ケースB: 循環シンボリックリンクを含むソースは copy-cycle-guard reason で確定する（他の失敗原因と区別できる。#185）" \
       "output=[${SPD182B_OUT}]" ;;
+esac
+case "$(cat "$SPD182B_STDERR" 2>/dev/null)" in
+  *"WARNING"*"循環検査ガード"*"node_modules"*"#185"*)
+    pass "#185: ガードが発火して -L を試みなかった事実が stderr に診断として出力される" ;;
+  *)
+    fail "#185: ガードが発火して -L を試みなかった事実が stderr に診断として出力される" \
+      "stderr=[$(cat "$SPD182B_STDERR" 2>/dev/null)]" ;;
 esac
 
 # 循環検査が -L 呼び出し自体を止めているため、残骸（<dir>.dwtmp$$。SPD182B_LANE は
@@ -15611,6 +15618,93 @@ case "$SPD_HEADER_183" in
   *)
     fail "#183: 冒頭コメントが root 所有のツリーが残る点に言及している" "見つかりませんでした" ;;
 esac
+
+# ---------------------------------------------------------------------------
+# share-prepared-dirs.sh: 循環検査の深さ CAP 引き上げによる偽陽性の解消（レビュー #185）
+#
+# CAP=20（#182時点）は、循環の**無い**正当な yarn workspaces 直鎖依存（10パッケージ、
+# `packages/pkgN/node_modules/pkgM -> ../../pkgM`）で深さ23〜24に到達し、-L 自体を試みず
+# 誤って copy-failed に倒していた（issue #185 がサンドボックスで実測・再現）。CAP=80への
+# 引き上げにより、この構成では -L が実際に呼ばれ copied になることを確認する。循環
+# （`self -> ../..`）では引き続き発火し -L が一度も呼ばれないことは、上記ケースB（#182/#185）
+# で確認済み。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== share-prepared-dirs.sh: 循環検査の深さ CAP 引き上げによる偽陽性の解消（レビュー #185） =="
+
+SPD185_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd185-source.XXXXXX")"
+SPD185_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd185-lane.XXXXXX")"
+
+# issue #185 が実測した構成をそのまま再現する: 10パッケージの直鎖依存
+# （packages/pkgN/node_modules/pkgM -> ../../pkgM）。循環は一切無い。
+mkdir -p "${SPD185_SOURCE}/packages"
+_i=1
+while [ "$_i" -le 10 ]; do
+  mkdir -p "${SPD185_SOURCE}/packages/pkg${_i}/src/lib/internal"
+  printf 'x\n' > "${SPD185_SOURCE}/packages/pkg${_i}/src/lib/internal/file.txt"
+  _i=$((_i + 1))
+done
+_i=1
+while [ "$_i" -le 9 ]; do
+  _j=$((_i + 1))
+  mkdir -p "${SPD185_SOURCE}/packages/pkg${_i}/node_modules"
+  ln -s "../../pkg${_j}" "${SPD185_SOURCE}/packages/pkg${_i}/node_modules/pkg${_j}"
+  _i=$((_i + 1))
+done
+unset _i _j
+
+# フィクスチャ自体が旧CAP=20を超える深さに到達することを、検証の前提として確認する
+# （前提が崩れていれば、以降のアサーションは「たまたま通っただけ」になってしまう）。
+SPD185_DEPTH20_HIT="$(find -L "$SPD185_SOURCE" -mindepth 20 -maxdepth 20 2>/dev/null | head -n 1)"
+if [ -n "$SPD185_DEPTH20_HIT" ]; then
+  pass "#185: フィクスチャ（10パッケージ直鎖）が旧CAP=20を超える深さに到達する（検証の前提）"
+else
+  fail "#185: フィクスチャ（10パッケージ直鎖）が旧CAP=20を超える深さに到達する（検証の前提）" \
+    "見つかりませんでした"
+fi
+
+# -L 無しは失敗・-L 付きのみ成功する偽 cp（symlink 作成が拒否される環境の模擬）と
+# 組み合わせ、循環では無いのに新CAPでも誤って -L を止めてしまわないことを確認する。
+SPD185_FAKEBIN_LN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd185-fakebin-ln.XXXXXX")"
+cat > "${SPD185_FAKEBIN_LN}/ln" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "${SPD185_FAKEBIN_LN}/ln"
+SPD185_FAKEBIN_CP="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd185-fakebin-cp.XXXXXX")"
+spd182_make_cp_requires_l "$SPD185_FAKEBIN_CP"
+
+SPD185_STUB="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd185-stub.XXXXXX")"
+cat > "$SPD185_STUB" <<EOF
+#!/bin/bash
+set -u
+PATH="${SPD185_FAKEBIN_CP}:${SPD185_FAKEBIN_LN}:\$PATH"
+cmd="\${@: -1}"
+sh -c "\$cmd"
+EOF
+chmod +x "$SPD185_STUB"
+
+SPD185_STDERR="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd185-stderr.XXXXXX")"
+SPD185_OUT="$(spd_run "$SPD185_LANE" "$SPD185_STUB" --source "$SPD185_SOURCE" --dir "packages" 2>"$SPD185_STDERR")"
+
+case "$SPD185_OUT" in
+  *"copied"*"packages"*)
+    pass "#185: 循環の無い正当な10パッケージ直鎖依存では -L が実際に呼ばれ copied になる（偽陽性の解消）" ;;
+  *)
+    fail "#185: 循環の無い正当な10パッケージ直鎖依存では -L が実際に呼ばれ copied になる（偽陽性の解消）" \
+      "output=[${SPD185_OUT}]" ;;
+esac
+case "$SPD185_OUT" in
+  *"copy-cycle-guard"*)
+    fail "#185: 循環の無い正当な直鎖依存で循環検査ガードが誤発火しない" "output=[${SPD185_OUT}]" ;;
+  *)
+    pass "#185: 循環の無い正当な直鎖依存で循環検査ガードが誤発火しない" ;;
+esac
+assert_eq "#185: 誤発火しないので診断WARNINGも出力されない" \
+  "" "$(cat "$SPD185_STDERR" 2>/dev/null)"
+assert_eq "#185: コピー先の内容がソースと一致する（末端ファイルまで正しく展開される）" \
+  "x" "$(cat "${SPD185_LANE}/packages/pkg9/node_modules/pkg10/src/lib/internal/file.txt" 2>/dev/null)"
 
 # ---------------------------------------------------------------------------
 # 結果集計

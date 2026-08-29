@@ -131,21 +131,41 @@
 #   - 確認できたこと（`-L` と循環シンボリックリンク。レビュー #182）: BusyBox の
 #     `cp -aL` / `cp -rL` は循環シンボリックリンク（祖先ディレクトリを指す symlink。
 #     `self -> ../..` 等）を検出せず、実測でディレクトリ125段・パス長約4000字・
-#     実体5バイトのソースに対し652KBを書き出すまで再帰することを確認した。pnpm の
-#     `.pnpm` ストアのような相互 symlink 構成では珍しい状況ではない。この残骸は
+#     実体5バイトのソースに対し652KBを書き出すまで再帰することを確認した。この残骸は
 #     `.git/worktrees/<lane>/` 配下（後述）に置かれるため、深くなりすぎると
 #     `git worktree remove --force` を失敗させうる（安全ルールにより削除もできない）。
 #     そのため `-L` を使う前に、`find -L "<src>" -mindepth <CAP> -maxdepth <CAP>`
-#     （本実装では CAP=20）で深さ <CAP> を超える経路が存在するかを事前検査し
-#     （サンドボックスで実測: 通常の `node_modules` はこの深さに到達しないが、循環が
-#     ある場合は必ず超える。深さ固定の `find` は循環があっても maxdepth で traversal が
-#     打ち切られるため、検査自体が暴走する心配は無い）、該当すれば `-L` によるコピー
-#     自体を試みず copy-failed に倒す（後述の決定）
+#     （本実装では CAP=80。根拠はレビュー #185 対応、下記「確認できたこと（循環検査の
+#     深さ CAP）」参照）で深さ <CAP> を超える経路が存在するかを事前検査し、該当すれば
+#     `-L` によるコピー自体を試みず copy-failed に倒す（後述の決定）。深さ固定の `find`
+#     は循環があっても maxdepth で traversal が打ち切られるため、検査自体が暴走する
+#     心配は無い（サンドボックスで実測済み）
+#   - 確認できたこと（循環検査の深さ CAP。レビュー #185）: CAP=20（レビュー #182時点の
+#     初版）は、循環の**無い**正当な yarn workspaces 直鎖依存（10パッケージ、
+#     `packages/pkgN/node_modules/pkgM -> ../../pkgM`。1ホップで2階層消費）で
+#     深さ23〜24に到達し、`cp -aL` 自体は rc=0 で完走できるにもかかわらずガードが
+#     誤発火することをサンドボックスで実測した。**#182時点の「通常の `node_modules`
+#     はこの深さに到達しない」という記述はこの実測により反証された（下記「確認できな
+#     かったこと」参照）。** さらに同じサンドボックスで、BusyBox `find -L` が ELOOP
+#     により symlink 追跡を打ち切る境界も実測した（`self -> ../..` の純粋な循環に対し、
+#     深さ122までは `-mindepth/-maxdepth` で検出できるが、124以降は検出できなくなる。
+#     `head -n 1` による早期終了があるため検出できる深さでの所要時間は0msで、CAPを
+#     引き上げても循環検出のコストは増えないことも実測済み）。これを踏まえ CAP を80に
+#     引き上げた: 実測した正当なツリーの最大深さ（24）を大きく上回りつつ、循環検出が
+#     効かなくなる境界（122〜124。カーネル側のシンボリックリンク解決回数上限に
+#     起因すると見られる）よりは十分低い水準として選んだ
 #   - 確認できなかったこと: issue #139 の元の再現環境（compose モード・実際の
 #     Node.js/yarn プロジェクト）そのものは用意できず、`ln -s` が実際に失敗する状態
 #     そのものは再現できていない。そのため本フォールバックが issue #139 の実環境で
 #     効果があるかどうかは未検証である（#176 で実環境測定時に `.bin` 配下のリンク
-#     再作成が成功したかを確認項目に追加した）
+#     再作成が成功したかを確認項目に追加した）。同様に、**実際の Node.js/yarn/pnpm
+#     プロジェクトの `node_modules` が通常到達する深さの実測もできていない**
+#     （本サンドボックスに node/npm/yarn は無い。レビュー #186）。CAP=80が実プロジェクト
+#     に対して安全側かどうかは想定にとどまり、#176 のような実環境測定でのみ確認できる。
+#     pnpm の `.pnpm` ストアは依存をパッケージ本体の兄弟に置く構成であり、下向き走査で
+#     循環になるとは限らないため、循環の実例として挙げるのは適切ではない。実際に循環を
+#     再現できたのは上記の `self -> ../..` のような自己参照 symlink、および yarn
+#     workspace 同士が相互に依存し合う構成であり、後者も未実測の想定である
 #
 # コピー元のパスは、コンテナ内でのレーンの作業ディレクトリ（workdir）を起点とした相対
 # パス（symlink ターゲットの計算に使う REL_SOURCE を流用）で渡す。共有元のホスト絶対
@@ -208,11 +228,14 @@
 #          後述）のみを使うため、一時ディレクトリの深さが不意に1段増える余地が無い）
 #       2. まず `-L` を付けない内容形コピー `cp -a "<src>/." "<tmp>/"`（失敗時は
 #          `cp -r "<src>/." "<tmp>/"`）を試みる。これが失敗した場合に限り、
-#          `find -L "<src>" -mindepth <CAP> -maxdepth <CAP>`（CAP=20）で深さ <CAP> を
-#          超える経路の有無を検査し、無い場合のみ `-L` 付きの内容形コピー
-#          `cp -aL "<src>/." "<tmp>/"`（失敗時は `cp -rL "<src>/." "<tmp>/"`）を試みる
-#          （レビュー #182。循環シンボリックリンクがあると判定された場合は `-L` 自体を
-#          試みず、このエントリは copy-failed のまま確定させる）
+#          `find -L "<src>" -mindepth <CAP> -maxdepth <CAP>`（CAP=80。根拠はレビュー #185
+#          対応、`COPY_CYCLE_GUARD_CAP` のコメント参照）で深さ <CAP> を超える経路の有無を
+#          検査し、無い場合のみ `-L` 付きの内容形コピー `cp -aL "<src>/." "<tmp>/"`
+#          （失敗時は `cp -rL "<src>/." "<tmp>/"`）を試みる（レビュー #182）。循環
+#          シンボリックリンクがあると判定された場合（ガード発火）は `-L` 自体を試みず、
+#          このエントリは reason `copy-cycle-guard` で copy-failed のまま確定させ、
+#          その旨を stderr にも1行出す（レビュー #185。他の失敗原因と区別できるように
+#          するため）
 #       3. **確定前に完全性を検証する。** `ls -A` によるソースと一時ディレクトリ直下の
 #          エントリ数が一致する場合に限り「完全」とみなす（#177 が指摘したとおり、rc だけの
 #          判定は部分失敗を成功として通してしまう経路を作りうる。直下エントリ数の比較を
@@ -541,7 +564,7 @@ fi
 # 2: exists, 4: link/link-failed はコンテナ側で決める）。
 # ---------------------------------------------------------------------------
 
-RESULT_KIND=()    # linked|exists|no-source|fingerprint-mismatch|link-failed（ENTRY_DIRSと同じ添字）
+RESULT_KIND=()    # linked|exists|no-source|fingerprint-mismatch|link-failed|copied|copy-cycle-guard（ENTRY_DIRSと同じ添字）
 RESULT_TARGET=()  # linked のときだけ意味を持つ
 
 CANDIDATE_ORIG_IDX=()
@@ -688,6 +711,16 @@ fi
 # その場合に限り残骸のパスを stderr に明示する。
 # ---------------------------------------------------------------------------
 
+# 循環シンボリックリンク事前検査の深さ CAP（レビュー #185。#182 時点では20だったが、
+# 循環の無い正当な yarn workspaces 直鎖依存（10パッケージ、1ホップ2階層消費）で深さ23〜24に
+# 到達することをサンドボックスで実測し、20は偽陽性を生むと判明した。80は (a) その実測値
+# （24）を大きく上回り、現実的な monorepo 構成では正当なツリーが到達しえない水準である一方、
+# (b) BusyBox find が ELOOP により symlink 追跡を打ち切る境界（同一サンドボックスで実測:
+# 深さ122までは検出できるが124以降は検出できなくなる。カーネル側のシンボリックリンク
+# 解決回数上限に起因すると見られる）よりは十分低く、循環検出そのものが効かなくなる事態を
+# 避けている。詳細は docs/adr/0007-share-prepared-dirs-copy-fallback.md 決定F参照。
+COPY_CYCLE_GUARD_CAP=80
+
 if [ "$DRY_RUN" -eq 0 ]; then
   COPY_CANDIDATE_ORIG_IDX=()
   COPY_CANDIDATE_DIR=()
@@ -728,6 +761,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
     else
       COPY_SCRIPT+='tmp_base=""'$'\n'
     fi
+    COPY_SCRIPT+="cap=$(printf '%q' "$COPY_CYCLE_GUARD_CAP")"$'\n'
     # shellcheck disable=SC2016  # 単一引用符は意図的。$d/$s/$tmp 等はコンテナ側で
     # 実行されるミニスクリプトの文字列としてそのまま埋め込む。
     for i in "${!COPY_CANDIDATE_DIR[@]}"; do
@@ -748,20 +782,24 @@ if [ "$DRY_RUN" -eq 0 ]; then
       # 新たにコピー経路へ回るようになった「空の実体ディレクトリ」のケースを含む）は
       # これで完結し、-L には一切触れない。
       COPY_SCRIPT+='    cp_done=0'$'\n'
+      COPY_SCRIPT+='    guard_fired=0'$'\n'
       COPY_SCRIPT+='    if cp -a "$s/." "$tmp/" 2>/dev/null || cp -r "$s/." "$tmp/" 2>/dev/null; then'$'\n'
       COPY_SCRIPT+='      cp_done=1'$'\n'
       COPY_SCRIPT+='    else'$'\n'
       # -L 無しのコピーが失敗した（symlink 作成が拒否される環境等）。-L へ落とす前に、
       # ソース側に循環構造（-L で辿ると際限なく再帰するディレクトリ symlink）が無いか
-      # 事前検査する（#182）。BusyBox の cp -L は循環を検出せず PATH_MAX まで再帰する
-      # ため、深さ20を超える経路が -L 起点で存在する場合は循環（または想定外に深い
-      # ツリー）とみなし、-L 自体を試みず copy-failed に倒す。深さ固定の find -maxdepth
-      # は循環があっても打ち切られるため、この検査自体が無限再帰する心配は無い
-      # （サンドボックスで実測済み）。
-      COPY_SCRIPT+='      if [ -z "$(find -L "$s" -mindepth 20 -maxdepth 20 2>/dev/null | head -n 1)" ]; then'$'\n'
+      # 事前検査する（#182。CAPの根拠は#185・COPY_CYCLE_GUARD_CAPのコメント参照）。
+      # BusyBox の cp -L は循環を検出せず ELOOP に達するまで再帰するため、深さ $cap を
+      # 超える経路が -L 起点で存在する場合は循環（または想定外に深いツリー）とみなし、
+      # -L 自体を試みず copy-failed に倒す（guard_fired=1 として区別する。#185）。
+      # 深さ固定の find -maxdepth は循環があっても打ち切られるため、この検査自体が
+      # 無限再帰する心配は無い（サンドボックスで実測済み）。
+      COPY_SCRIPT+='      if [ -z "$(find -L "$s" -mindepth "$cap" -maxdepth "$cap" 2>/dev/null | head -n 1)" ]; then'$'\n'
       COPY_SCRIPT+='        if cp -aL "$s/." "$tmp/" 2>/dev/null || cp -rL "$s/." "$tmp/" 2>/dev/null; then'$'\n'
       COPY_SCRIPT+='          cp_done=1'$'\n'
       COPY_SCRIPT+='        fi'$'\n'
+      COPY_SCRIPT+='      else'$'\n'
+      COPY_SCRIPT+='        guard_fired=1'$'\n'
       COPY_SCRIPT+='      fi'$'\n'
       COPY_SCRIPT+='    fi'$'\n'
       COPY_SCRIPT+='    if [ "$cp_done" -eq 1 ]; then'$'\n'
@@ -771,6 +809,8 @@ if [ "$DRY_RUN" -eq 0 ]; then
       COPY_SCRIPT+='      else'$'\n'
       COPY_SCRIPT+='        printf "copyfailed\t%s\t%s\n" "$d" "$tmp"'$'\n'
       COPY_SCRIPT+='      fi'$'\n'
+      COPY_SCRIPT+='    elif [ "$guard_fired" -eq 1 ]; then'$'\n'
+      COPY_SCRIPT+='      printf "copyfailedguard\t%s\t%s\n" "$d" "$tmp"'$'\n'
       COPY_SCRIPT+='    else'$'\n'
       COPY_SCRIPT+='      printf "copyfailed\t%s\t%s\n" "$d" "$tmp"'$'\n'
       COPY_SCRIPT+='    fi'$'\n'
@@ -792,10 +832,18 @@ if [ "$DRY_RUN" -eq 0 ]; then
       corig_idx="${COPY_CANDIDATE_ORIG_IDX[$copy_i]}"
       if [ "$ckind" = "copied" ]; then
         RESULT_KIND[corig_idx]="copied"
-      elif [ -n "$cresidue" ] && [ -z "$COPY_TMP_BASE" ]; then
-        # git-dir 配下に置けなかった場合（#179）に限り、レーンの作業ツリーに
-        # 残った一時ディレクトリのパスを人間が消せるよう明示する。
-        COPY_RESIDUE_PATHS+=("${cdir}: ${cresidue}")
+      else
+        if [ "$ckind" = "copyfailedguard" ]; then
+          # 循環検査ガードが発火し -L 自体を試みなかったケース（#185）。他の失敗
+          # 原因（cp の一般的な失敗・件数不一致等）と区別できる専用の reason にする。
+          RESULT_KIND[corig_idx]="copy-cycle-guard"
+          echo "WARNING: 循環検査ガードが発火したため ${cdir} への -L コピーを試みませんでした（深さ${COPY_CYCLE_GUARD_CAP}を超える経路を検出。循環シンボリックリンクの可能性があります。#185）" >&2
+        fi
+        if [ -n "$cresidue" ] && [ -z "$COPY_TMP_BASE" ]; then
+          # git-dir 配下に置けなかった場合（#179）に限り、レーンの作業ツリーに
+          # 残った一時ディレクトリのパスを人間が消せるよう明示する。
+          COPY_RESIDUE_PATHS+=("${cdir}: ${cresidue}")
+        fi
       fi
       copy_i=$((copy_i + 1))
     done <<< "$COPY_OUTPUT"
