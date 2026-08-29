@@ -611,8 +611,9 @@ Epic issue 本文にこの節があれば、run がその内容を Epic 開始�
 「SKIP されたテストがあれば件数と内容を報告に含めること」という自然言語の依頼は、`tail` で目視して `--- SKIP` が見えなかったことをもって「SKIP 0件」と誤報告する事故を招いた（依存物が未配置だとテストは無言で `SKIP` され `ok` と表示されるため）。レーン内ゲート（generator）・統合ゲート（run）のどちらも、この自己申告ではなく `count-skips.sh` で機械的に数える。
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" [--file <テスト出力のログ>] [--pattern <ERE>]
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" [--file <テスト出力のログ>] [--pattern <ERE>] [--runner <go|jest|pytest>]
 <テスト出力> | bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --help
 ```
 
 出力（1行1項目・機械可読、この順で必ず3行）:
@@ -623,17 +624,20 @@ runner=<go|pytest|jest|custom|unknown>
 pattern=<実際に使ったERE または none>
 ```
 
-終了コードは `0`=数えられた `1`=数えられなかった（`skips=unknown`。fail loud） `2`=引数エラー。
+終了コードは `0`=数えられた `1`=数えられなかった（`skips=unknown`。fail loud） `2`=引数エラー。`--help` は使い方を表示して `0` で終了する。
 
 判定順序（上から最初に一致したものを使う）:
 
 1. `--pattern` または環境変数 `DEV_WORKFLOW_SKIP_PATTERN` があれば `runner=custom` としてそのEREに一致する行数を数える（最優先）
-2. Go と判定できる（`^--- (PASS|FAIL|SKIP)` または `^(ok|FAIL|PASS)` を含む）→ `^--- SKIP` の一致行数
-3. jest と判定できる（`^Tests:` を含む）→ `Tests:` 行の `<N> skipped` の N
+2. `--runner <go|jest|pytest>` が指定されていれば、自動判定を行わずそのランナーの抽出ロジックを強制する（誤検出時に呼び出し側から矯正する手段。#142）
+3. jest と判定できる（`^Test Suites:` / `^Tests:` / `^Snapshots:` のいずれかを含む）→ `Tests:` 行の `<N> skipped` の N
 4. pytest と判定できる（`test session starts` を含む）→ サマリ行の最後の `<N> skipped` の N
-5. どれにも当てはまらない → `skips=unknown` / `runner=unknown` / exit 1
+5. Go と判定できる（`^--- (PASS|FAIL|SKIP)` または `^(ok|FAIL|PASS)` を含む）→ `^--- SKIP` の一致行数
+6. どれにも当てはまらない → `skips=unknown` / `runner=unknown` / exit 1
 
-built-in ランナー（go/jest/pytest）と異なる出力形式のプロジェクトでは既定で `skips=unknown` になる。この場合に必ず「0件」として扱ってはならない（下記「Epic の `## SKIPパターン` 節」で `DEV_WORKFLOW_SKIP_PATTERN` を設定する）。
+jest はテストファイルごとに `PASS <file>` / `FAIL <file>` という行を出力し、これがGo判定の `^(ok|FAIL|PASS)` と字面衝突する。そのため jest 判定をGo判定より先に行う（#142。以前は逆順だったため、jestのログが `runner=go` に誤判定され、実際にはSKIPがあっても `skips=0`（exit 0）という最も危険な誤りが返っていた）。
+
+built-in ランナー（go/jest/pytest）と異なる出力形式のプロジェクトでは既定で `skips=unknown` になる。この場合に必ず「0件」として扱ってはならない（下記「Epic の `## SKIPパターン` 節」で `DEV_WORKFLOW_SKIP_PATTERN` を設定するか、誤検出であれば `--runner` で矯正する）。
 
 ### Epic の `## SKIPパターン` 節
 

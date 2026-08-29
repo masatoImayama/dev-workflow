@@ -8773,6 +8773,72 @@ CS_BOTHIN_OUTPUT="$(printf 'Tests:       0 skipped, 5 passed, 5 total\n' | bash 
 assert_eq "--fileと標準入力の併存: --fileを優先（go形式のskips=2のまま）" "2" "$(cs_field skips "$CS_BOTHIN_OUTPUT")"
 assert_eq "--fileと標準入力の併存: runnerもgoのまま" "go" "$(cs_field runner "$CS_BOTHIN_OUTPUT")"
 
+# --- ケース12（回帰・issue #142）: jest の `PASS <file>` / `FAIL <file>` 行が
+#     Go判定の `^(ok|FAIL|PASS)` と字面衝突し、runner=go・skips=0（実際は1件）に
+#     誤検出されていた事象を、issue本文のログ断片をfixtureにして固定する。
+#     「skips=unknown」ではなく「skips=0（誤り）」として観測される点が最も危険だった。 ---
+CS_JEST_MISDETECT_INPUT="$(cat <<'JEST_LOG_142'
+yarn run v1.22.19
+$ jest
+PASS src/components/Foo.test.tsx
+FAIL src/components/Bar.test.tsx
+  ● Bar renders correctly
+
+    expect(received).toBe(expected)
+
+Test Suites: 5 failed, 69 passed, 74 total
+Tests:       13 failed, 1 skipped, 899 passed, 913 total
+Snapshots:   0 total
+Time:        12.345s
+JEST_LOG_142
+)"
+CS_JEST_MISDETECT_OUTPUT="$(printf '%s\n' "$CS_JEST_MISDETECT_INPUT" | bash "$COUNT_SKIPS_SCRIPT")"
+CS_JEST_MISDETECT_EXIT=$?
+assert_eq "回帰(#142): PASS/FAIL行を含むjestログでもrunner=jest（goに誤検出しない）" \
+  "jest" "$(cs_field runner "$CS_JEST_MISDETECT_OUTPUT")"
+assert_eq "回帰(#142): PASS/FAIL行を含むjestログでskips=1（0件に誤検出しない）" \
+  "1" "$(cs_field skips "$CS_JEST_MISDETECT_OUTPUT")"
+assert_exit_code "回帰(#142): exit 0（正しく数えられた）" 0 "$CS_JEST_MISDETECT_EXIT"
+
+# --- ケース13: --runner jest で自動判定を上書きし、あいまいなログでも強制的にjestとして数える ---
+CS_RUNNER_FORCE_OUTPUT="$(printf '%s\n' "$CS_JEST_MISDETECT_INPUT" | bash "$COUNT_SKIPS_SCRIPT" --runner jest)"
+CS_RUNNER_FORCE_EXIT=$?
+assert_eq "--runner jest: runner=jestを強制する" "jest" "$(cs_field runner "$CS_RUNNER_FORCE_OUTPUT")"
+assert_eq "--runner jest: skips=1" "1" "$(cs_field skips "$CS_RUNNER_FORCE_OUTPUT")"
+assert_exit_code "--runner jest: exit 0" 0 "$CS_RUNNER_FORCE_EXIT"
+
+# --- ケース14: --runner go / --runner pytest も同様に自動判定を上書きする ---
+CS_RUNNER_GO_OUTPUT="$(printf -- '--- SKIP: T1 (0.00s)\n--- SKIP: T2 (0.00s)\nok  \tpkg\t0.01s\n' | bash "$COUNT_SKIPS_SCRIPT" --runner go)"
+assert_eq "--runner go: skips=2 / runner=go" "go" "$(cs_field runner "$CS_RUNNER_GO_OUTPUT")"
+assert_eq "--runner go: skips=2" "2" "$(cs_field skips "$CS_RUNNER_GO_OUTPUT")"
+
+CS_RUNNER_PYTEST_OUTPUT="$(printf -- '========== test session starts ==========\n1 passed, 2 skipped in 0.01s\n' | bash "$COUNT_SKIPS_SCRIPT" --runner pytest)"
+assert_eq "--runner pytest: skips=2 / runner=pytest" "pytest" "$(cs_field runner "$CS_RUNNER_PYTEST_OUTPUT")"
+assert_eq "--runner pytest: skips=2" "2" "$(cs_field skips "$CS_RUNNER_PYTEST_OUTPUT")"
+
+# --- ケース15: --pattern と --runner が両方指定された場合、--pattern を優先する ---
+CS_RUNNER_AND_PATTERN_OUTPUT="$(printf 'skip - foo\nskip - bar\n' | bash "$COUNT_SKIPS_SCRIPT" --runner go --pattern '^skip - ')"
+assert_eq "--runnerと--patternの併存: --patternを優先しrunner=custom" "custom" "$(cs_field runner "$CS_RUNNER_AND_PATTERN_OUTPUT")"
+assert_eq "--runnerと--patternの併存: skips=2" "2" "$(cs_field skips "$CS_RUNNER_AND_PATTERN_OUTPUT")"
+
+# --- ケース16: --runner に未知の値を渡すと引数エラー（exit 2） ---
+bash "$COUNT_SKIPS_SCRIPT" --runner rspec >/dev/null 2>&1
+assert_exit_code "--runner に未知の値でexit 2" 2 "$?"
+
+bash "$COUNT_SKIPS_SCRIPT" --runner >/dev/null 2>&1
+assert_exit_code "--runner に値なしでexit 2" 2 "$?"
+
+# --- ケース17: --help は使い方を表示してexit 0（引数エラーにしない） ---
+CS_HELP_OUTPUT="$(bash "$COUNT_SKIPS_SCRIPT" --help)"
+CS_HELP_EXIT=$?
+assert_exit_code "--help: exit 0" 0 "$CS_HELP_EXIT"
+case "$CS_HELP_OUTPUT" in
+  *'使い方'*'--runner'*)
+    pass "--help: 使い方に--runnerの説明が含まれる（#142）" ;;
+  *)
+    fail "--help: 使い方に--runnerの説明が含まれる（#142）" "$CS_HELP_OUTPUT" ;;
+esac
+
 # ---------------------------------------------------------------------------
 # cleanup-lane-worktrees.sh（取り込み済みレーンworktreeの片付け・Task #93）
 #
@@ -9767,6 +9833,15 @@ case "$H97_README_CS" in
     pass "README.md: count-skips.sh節に出力・判定順序・DEV_WORKFLOW_SKIP_PATTERNが書かれている（#97）" ;;
   *)
     fail "README.md: count-skips.sh節に出力・判定順序・DEV_WORKFLOW_SKIP_PATTERNが書かれている（#97）" \
+      "$H97_README_CS" ;;
+esac
+
+# --- README.md: --runner オプションとjest優先判定（誤検出対策）が書かれている（#142） ---
+case "$H97_README_CS" in
+  *'--runner'*'jest と判定できる'*'Go と判定できる'*)
+    pass "README.md: count-skips.sh節に--runnerオプションとjest優先の判定順序が書かれている（#142）" ;;
+  *)
+    fail "README.md: count-skips.sh節に--runnerオプションとjest優先の判定順序が書かれている（#142）" \
       "$H97_README_CS" ;;
 esac
 
