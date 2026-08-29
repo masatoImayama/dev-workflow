@@ -8910,6 +8910,64 @@ case "$CS_HELP_OUTPUT" in
     fail "--help: 使い方に--runnerの説明が含まれる（#142）" "$CS_HELP_OUTPUT" ;;
 esac
 
+# --- ケース18（回帰・issue #187）: jest判定は `Test Suites:` / `Tests:` / `Snapshots:` の
+#     いずれかで決まるが、件数抽出は `Tests:` 行にしか依存できない。`Test Suites:` だけの
+#     ログでは `Tests:` 行が存在せず、以前は `COUNT="${COUNT:-0}"` が抽出失敗を0件に潰し
+#     `skips=0 / exit 0`（#142と同種の「判定できないのに0件と答える」誤り）を返していた。
+#     修正後は skips=unknown / exit 1 になることを固定する ---
+CS_JEST_NOTESTS_INPUT="$(printf -- 'PASS a.test.ts\nTest Suites: 1 passed, 1 total\n')"
+CS_JEST_NOTESTS_OUTPUT="$(printf '%s\n' "$CS_JEST_NOTESTS_INPUT" | bash "$COUNT_SKIPS_SCRIPT")"
+CS_JEST_NOTESTS_EXIT=$?
+assert_eq "回帰(#187): Test Suites:だけのjestログはskips=unknown（0件と誤報告しない）" \
+  "unknown" "$(cs_field skips "$CS_JEST_NOTESTS_OUTPUT")"
+assert_eq "回帰(#187): Test Suites:だけのjestログでもrunner=jest（判定自体は維持）" \
+  "jest" "$(cs_field runner "$CS_JEST_NOTESTS_OUTPUT")"
+assert_exit_code "回帰(#187): exit 1（fail loud）" 1 "$CS_JEST_NOTESTS_EXIT"
+
+# --- ケース19（回帰・issue #187）: `Snapshots:` だけのログも同様にskips=unknownになる ---
+CS_JEST_SNAPONLY_OUTPUT="$(printf 'Snapshots: 0 total\n' | bash "$COUNT_SKIPS_SCRIPT")"
+CS_JEST_SNAPONLY_EXIT=$?
+assert_eq "回帰(#187): Snapshots:だけのjestログはskips=unknown" \
+  "unknown" "$(cs_field skips "$CS_JEST_SNAPONLY_OUTPUT")"
+assert_exit_code "回帰(#187): Snapshots:だけのjestログはexit 1" 1 "$CS_JEST_SNAPONLY_EXIT"
+
+# --- ケース20（issue #187）: --runner jest を強制指定してもTests:行が無ければ
+#     同様にunknownへ倒れる（--runner分岐と自動判定分岐で抽出ロジックを共用しているため） ---
+CS_RUNNERJEST_NOTESTS_OUTPUT="$(printf 'Test Suites: 1 passed, 1 total\n' | bash "$COUNT_SKIPS_SCRIPT" --runner jest)"
+CS_RUNNERJEST_NOTESTS_EXIT=$?
+assert_eq "issue #187: --runner jestでもTests:行が無ければskips=unknown" \
+  "unknown" "$(cs_field skips "$CS_RUNNERJEST_NOTESTS_OUTPUT")"
+assert_exit_code "issue #187: --runner jestでもTests:行が無ければexit 1" 1 "$CS_RUNNERJEST_NOTESTS_EXIT"
+
+# --- ケース21（issue #187）: jestでTests:行はあるがskip 0件（`skipped`という語が出ない）は
+#     正当な0件として扱う（unknownと混同しない） ---
+CS_JEST_ZERO_OUTPUT="$(printf 'Tests:       0 skipped, 5 passed, 5 total\n' | bash "$COUNT_SKIPS_SCRIPT")"
+CS_JEST_ZERO_EXIT=$?
+assert_eq "issue #187: jestでTests:行があればskipped無しでも正当な0件" \
+  "0" "$(cs_field skips "$CS_JEST_ZERO_OUTPUT")"
+assert_exit_code "issue #187: jestの正当な0件はexit 0のまま" 0 "$CS_JEST_ZERO_EXIT"
+
+# --- ケース22（issue #187）: pytest側の ${COUNT:-0} も同様に見直す。
+#     `test session starts` はあるが最終サマリ行（` in <秒>s`）が無い（出力が途中で切れた等）
+#     ログは、以前はskips=0（誤り）になっていた。修正後はskips=unknownへ倒す ---
+CS_PYTEST_NOSUMMARY_INPUT="$(printf -- '========== test session starts ==========\ncollecting ...\n')"
+CS_PYTEST_NOSUMMARY_OUTPUT="$(printf '%s\n' "$CS_PYTEST_NOSUMMARY_INPUT" | bash "$COUNT_SKIPS_SCRIPT")"
+CS_PYTEST_NOSUMMARY_EXIT=$?
+assert_eq "issue #187: サマリ行の無いpytestログはskips=unknown（0件と誤報告しない）" \
+  "unknown" "$(cs_field skips "$CS_PYTEST_NOSUMMARY_OUTPUT")"
+assert_eq "issue #187: サマリ行の無いpytestログでもrunner=pytest（判定自体は維持）" \
+  "pytest" "$(cs_field runner "$CS_PYTEST_NOSUMMARY_OUTPUT")"
+assert_exit_code "issue #187: サマリ行の無いpytestログはexit 1（fail loud）" 1 "$CS_PYTEST_NOSUMMARY_EXIT"
+
+# --- ケース23（issue #187）: pytestでサマリ行はあるがskip 0件（`skipped`という語が出ない）は
+#     正当な0件として扱う ---
+CS_PYTEST_ZERO_INPUT="$(printf -- '========== test session starts ==========\n5 passed in 0.01s\n')"
+CS_PYTEST_ZERO_OUTPUT="$(printf '%s\n' "$CS_PYTEST_ZERO_INPUT" | bash "$COUNT_SKIPS_SCRIPT")"
+CS_PYTEST_ZERO_EXIT=$?
+assert_eq "issue #187: pytestでサマリ行があればskipped無しでも正当な0件" \
+  "0" "$(cs_field skips "$CS_PYTEST_ZERO_OUTPUT")"
+assert_exit_code "issue #187: pytestの正当な0件はexit 0のまま" 0 "$CS_PYTEST_ZERO_EXIT"
+
 # ---------------------------------------------------------------------------
 # cleanup-lane-worktrees.sh（取り込み済みレーンworktreeの片付け・Task #93）
 #

@@ -57,6 +57,23 @@
 #   （実SKIP件数が1件あっても検出できず正常扱いになる）。jest 固有の `Test Suites:` /
 #   `Tests:` / `Snapshots:` はGoのログに現れないため、これを先に見ることで誤判定を避ける。
 #
+# jest/pytest の判定条件と抽出条件を一致させる理由（#187）:
+#   上の3.の判定は `Test Suites:` / `Tests:` / `Snapshots:` の**いずれか**で jest と決めるが、
+#   件数抽出はその中の `Tests:` 行にしか依存できない（skip件数はこの行にしか出ない）。
+#   `Test Suites:` だけ・`Snapshots:` だけのログ（出力が途中で切れた等）では `Tests:` 行が
+#   存在せず、以前は `COUNT="${COUNT:-0}"` が抽出失敗を黙って0件に潰していた。これは #142 が
+#   塞いだのと同じ「判定できないのに0件と答えてしまう」失敗クラスである。extract_jest_skips /
+#   extract_pytest_skips は、数えるための足場となる行（jestは`^Tests:`行、pytestは
+#   `<N> skipped` の可能性がある最終サマリ行）そのものが存在しない場合に限り unknown
+#   （呼び出し元がexit 1にする）を返す。その行はあるが `<N> skipped` の断片が無い場合は
+#   （スキップが0件だと`skipped`という語自体が出力されないため）正当な0件として扱う。
+#
+# --runner 分岐と自動判定分岐が抽出ロジックを複製しない理由（#187）:
+#   以前は go/jest/pytest の抽出ロジックを3ブロックとも2箇所（--runner分岐・自動判定分岐）に
+#   逐語で複製していた。片方だけ直されると強制指定と自動判定で結果が食い違う。
+#   extract_go_skips / extract_jest_skips / extract_pytest_skips に切り出し、
+#   両方の分岐から同じ関数を呼ぶことでこの食い違いを構造的に防ぐ。
+#
 # 追加の依存物（jq 等）は要求しない。素の bash / grep / sed のみで完結させる。
 
 set -u
@@ -84,6 +101,54 @@ usage() {
   1 = 数えられなかった（skips=unknown）
   2 = 引数エラー
 USAGE
+}
+
+# ---------------------------------------------------------------------------
+# 抽出ロジック（--runner分岐・自動判定分岐の両方から呼ぶ。#187）
+#
+# それぞれ標準出力に件数を書いて exit 0 を返す（数えられた）か、何も出力せず
+# exit 1 を返す（unknown。呼び出し元が skips=unknown / exit 1 に倒す）。
+# 「0件」と「unknown」を区別できるのはこの exit code のみであり、$() で受けた
+# 標準出力の値だけでは区別できないことに注意する。
+# ---------------------------------------------------------------------------
+
+# extract_go_skips <input>
+#   `^--- SKIP` の一致行数をそのまま件数とする。go test は SKIP が無ければその
+#   行自体が出現しないため、0件は常に正当な結果であり unknown にはならない。
+extract_go_skips() {
+  printf '%s\n' "$1" | grep -cE -- '^--- SKIP'
+  return 0
+}
+
+# extract_jest_skips <input>
+#   数える足場となる `^Tests:` 行が存在しない場合にのみ unknown（exit 1）。
+#   `^Tests:` 行はあるが `<N> skipped` が無い場合は、skipが0件だと jest が
+#   `skipped` という語自体を出さないため、正当な0件として扱う。
+extract_jest_skips() {
+  local line count
+  line="$(printf '%s\n' "$1" | grep -E -- '^Tests:' | tail -1)"
+  if [ -z "$line" ]; then
+    return 1
+  fi
+  count="$(printf '%s\n' "$line" | grep -oE -- '[0-9]+ skipped' | grep -oE -- '[0-9]+')"
+  echo "${count:-0}"
+  return 0
+}
+
+# extract_pytest_skips <input>
+#   数える足場となる最終サマリ行（` in <秒数>s` を含む行。pytestが実行を完了すると
+#   必ず出力する）が存在しない場合にのみ unknown（exit 1）。サマリ行はあるが
+#   `<N> skipped` が無い場合は、skipが0件だと pytest が `skipped` という語自体を
+#   出さないため、正当な0件として扱う。
+extract_pytest_skips() {
+  local line count
+  line="$(printf '%s\n' "$1" | grep -E -- ' in [0-9.]+s' | tail -1)"
+  if [ -z "$line" ]; then
+    return 1
+  fi
+  count="$(printf '%s\n' "$line" | grep -oE -- '[0-9]+ skipped' | grep -oE -- '[0-9]+')"
+  echo "${count:-0}"
+  return 0
 }
 
 FILE=""
@@ -166,29 +231,37 @@ fi
 if [ -n "$RUNNER" ]; then
   case "$RUNNER" in
     go)
-      COUNT="$(printf '%s\n' "$INPUT" | grep -cE -- '^--- SKIP')"
+      COUNT="$(extract_go_skips "$INPUT")"
       echo "skips=${COUNT}"
       echo "runner=go"
       echo "pattern=none"
       exit 0
       ;;
     jest)
-      COUNT="$(printf '%s\n' "$INPUT" | grep -E -- '^Tests:' | tail -1 \
-        | grep -oE -- '[0-9]+ skipped' | grep -oE -- '[0-9]+')"
-      COUNT="${COUNT:-0}"
-      echo "skips=${COUNT}"
-      echo "runner=jest"
-      echo "pattern=none"
-      exit 0
+      if COUNT="$(extract_jest_skips "$INPUT")"; then
+        echo "skips=${COUNT}"
+        echo "runner=jest"
+        echo "pattern=none"
+        exit 0
+      else
+        echo "skips=unknown"
+        echo "runner=jest"
+        echo "pattern=none"
+        exit 1
+      fi
       ;;
     pytest)
-      COUNT="$(printf '%s\n' "$INPUT" | grep -oE -- '[0-9]+ skipped' | tail -1 \
-        | grep -oE -- '[0-9]+')"
-      COUNT="${COUNT:-0}"
-      echo "skips=${COUNT}"
-      echo "runner=pytest"
-      echo "pattern=none"
-      exit 0
+      if COUNT="$(extract_pytest_skips "$INPUT")"; then
+        echo "skips=${COUNT}"
+        echo "runner=pytest"
+        echo "pattern=none"
+        exit 0
+      else
+        echo "skips=unknown"
+        echo "runner=pytest"
+        echo "pattern=none"
+        exit 1
+      fi
       ;;
   esac
 fi
@@ -202,13 +275,17 @@ fi
 # ---------------------------------------------------------------------------
 
 if printf '%s\n' "$INPUT" | grep -Eq -- '^(Test Suites:|Tests:|Snapshots:)'; then
-  COUNT="$(printf '%s\n' "$INPUT" | grep -E -- '^Tests:' | tail -1 \
-    | grep -oE -- '[0-9]+ skipped' | grep -oE -- '[0-9]+')"
-  COUNT="${COUNT:-0}"
-  echo "skips=${COUNT}"
-  echo "runner=jest"
-  echo "pattern=none"
-  exit 0
+  if COUNT="$(extract_jest_skips "$INPUT")"; then
+    echo "skips=${COUNT}"
+    echo "runner=jest"
+    echo "pattern=none"
+    exit 0
+  else
+    echo "skips=unknown"
+    echo "runner=jest"
+    echo "pattern=none"
+    exit 1
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -216,13 +293,17 @@ fi
 # ---------------------------------------------------------------------------
 
 if printf '%s\n' "$INPUT" | grep -Fq -- 'test session starts'; then
-  COUNT="$(printf '%s\n' "$INPUT" | grep -oE -- '[0-9]+ skipped' | tail -1 \
-    | grep -oE -- '[0-9]+')"
-  COUNT="${COUNT:-0}"
-  echo "skips=${COUNT}"
-  echo "runner=pytest"
-  echo "pattern=none"
-  exit 0
+  if COUNT="$(extract_pytest_skips "$INPUT")"; then
+    echo "skips=${COUNT}"
+    echo "runner=pytest"
+    echo "pattern=none"
+    exit 0
+  else
+    echo "skips=unknown"
+    echo "runner=pytest"
+    echo "pattern=none"
+    exit 1
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -231,7 +312,7 @@ fi
 
 if printf '%s\n' "$INPUT" | grep -Eq -- '^--- (PASS|FAIL|SKIP)' \
   || printf '%s\n' "$INPUT" | grep -Eq -- '^(ok|FAIL|PASS)'; then
-  COUNT="$(printf '%s\n' "$INPUT" | grep -cE -- '^--- SKIP')"
+  COUNT="$(extract_go_skips "$INPUT")"
   echo "skips=${COUNT}"
   echo "runner=go"
   echo "pattern=none"
