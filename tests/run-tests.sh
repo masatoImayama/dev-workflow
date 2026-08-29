@@ -11911,6 +11911,76 @@ assert_eq "混在+--run-prep ケース: レーン側 shared_ok に準備コマ�
   "lane-write" "$(cat "${SPD116_LANE}/shared_ok/newfile.txt" 2>/dev/null || echo "READ_FAILED")"
 
 # ---------------------------------------------------------------------------
+# share-prepared-dirs.sh: 複数行の --run-prep で unlink が失敗した場合、本体の2行目以降が
+# 実行されず exit 4 になる（Review #117）
+#
+# #116 の解除は `unlink <dir> && ${RUN_PREP}` という文字列連結だった。`&&` が守るのは
+# RUN_PREP の「1行目」だけであり、RUN_PREP が複数行（Epic本文『## 準備コマンド』節の
+# フェンスコードブロックの中身をそのまま渡す実運用での通常形）の場合、unlink が失敗すると
+# 1行目はスキップされるが2行目以降は共有symlinkを張ったまま実行されてしまう。
+# ここでは unlink が実際に失敗する状況（linkした直後にスタブが symlink を取り除き、
+# --run-prep 側の unlink が ENOENT で失敗する）を作り、RUN_PREP の1行目・2行目のどちらも
+# 実行されず、exit 4（done マーカーを作らない失敗経路）に合流することを検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== share-prepared-dirs.sh: 複数行の --run-prep で unlink 失敗時に本体が実行されない（Review #117） =="
+
+SPD117_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-117-source.XXXXXX")"
+SPD117_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd-117-lane.XXXXXX")"
+SPD117_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-117-calllog.XXXXXX")"
+
+mkdir -p "${SPD117_SOURCE}/shared_ok"
+printf 'source-content\n' > "${SPD117_SOURCE}/shared_ok/original.txt"
+
+# 通常の spd_make_stub と違い、1回目の呼び出し（symlink作成フェーズ）の直後に
+# 作られたばかりの shared_ok symlink を取り除く。これにより2回目の呼び出し
+# （--run-prep フェーズ）内の `unlink shared_ok` が実際に ENOENT で失敗する。
+SPD117_STUB="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-117-stub.XXXXXX")"
+{
+  echo '#!/bin/bash'
+  echo 'set -u'
+  printf 'echo 1 >> %q\n' "$SPD117_CALL_LOG"
+  printf 'n=$(wc -l < %q)\n' "$SPD117_CALL_LOG"
+  echo 'cmd="${@: -1}"'
+  echo 'sh -c "$cmd"'
+  echo 'rc=$?'
+  echo 'if [ "$n" -eq 1 ]; then'
+  echo '  unlink "shared_ok" 2>/dev/null || true'
+  echo 'fi'
+  echo 'exit $rc'
+} > "$SPD117_STUB"
+
+SPD117_MARKER1="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-117-marker1.XXXXXX")"
+SPD117_MARKER2="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd-117-marker2.XXXXXX")"
+: > "$SPD117_MARKER1"
+: > "$SPD117_MARKER2"
+SPD117_PREP_CMD="printf x >> $(printf '%q' "$SPD117_MARKER1")
+printf x >> $(printf '%q' "$SPD117_MARKER2")"
+
+SPD117_OUT="$(spd_run "$SPD117_LANE" "$SPD117_STUB" --source "$SPD117_SOURCE" \
+  --dir "shared_ok" --dir "no_source_entry" --run-prep "$SPD117_PREP_CMD")"
+SPD117_EXIT=$?
+
+assert_exit_code "複数行--run-prep + unlink失敗ケース: exit 4 で失敗する（#117）" 4 "$SPD117_EXIT"
+
+case "$SPD117_OUT" in
+  *"prep=run"*)
+    pass "複数行--run-prep + unlink失敗ケース: prep=run が出る（#117）" ;;
+  *)
+    fail "複数行--run-prep + unlink失敗ケース: prep=run が出る（#117）" "output=[${SPD117_OUT}]" ;;
+esac
+
+# 本題1: unlink 失敗時は RUN_PREP の1行目すら実行されない
+assert_eq "複数行--run-prep + unlink失敗ケース: RUN_PREPの1行目が実行されない（#117）" \
+  "no" "$([ -s "$SPD117_MARKER1" ] && echo yes || echo no)"
+
+# 本題2（バグの核心）: 旧実装（&&連結）では2行目以降が無条件に実行されてしまっていた。
+# 修正後は unlink 失敗で `exit 1` するため、2行目も実行されない。
+assert_eq "複数行--run-prep + unlink失敗ケース: RUN_PREPの2行目以降が実行されない（#117）" \
+  "no" "$([ -s "$SPD117_MARKER2" ] && echo yes || echo no)"
+
+# ---------------------------------------------------------------------------
 # resolve-sandbox.sh: 規約パスのフォールバックとビルドコンテキスト解決（Task #123, Epic #122）
 #
 # ここでは resolve-sandbox.sh を sandbox-exec.sh 経由ではなく直接呼び出す
