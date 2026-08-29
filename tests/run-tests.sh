@@ -6914,6 +6914,65 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# generator がバックグラウンド化されたテストの「通知待ち」で停止しない（issue #138）
+#
+# ハーネスが長時間コマンドを自動でバックグラウンド化しても、それを generator 自身が
+# 待たずに「通知待ち」を宣言してターンを終えると、コミット0件のままレーンが停止する
+# （7回発生）。単に「バックグラウンド実行しない」と書くのではなく、待たずに終える
+# 誤認の理由（後続ターンが存在しない）と、完了確認の手段を明記していることを確認する。
+# ---------------------------------------------------------------------------
+
+echo "== generatorがバックグラウンド化されたテストの通知待ちで停止しない（#138） =="
+
+DOC138_GENERATOR_ROLE="${REPO_ROOT}/core/roles/generator.md"
+DOC138_AGENT_GENERATOR="${REPO_ROOT}/agents/generator.md"
+DOC138_CODEX_AGENT_GENERATOR="${REPO_ROOT}/codex-agents/generator.toml"
+DOC138_SKILL="$RUN_SKILL_FLAT"
+
+if grep -Fq 'バックグラウンド化されても「通知待ち」で停止しない' "$DOC138_GENERATOR_ROLE"; then
+  pass "core/roles/generator.md: バックグラウンド化されても停止しない旨の節がある（#138）"
+else
+  fail "core/roles/generator.md: バックグラウンド化されても停止しない旨の節がある（#138）"
+fi
+
+if grep -Fq '後から届く' "$DOC138_GENERATOR_ROLE" && grep -Fq '後続ターンは存在しない' "$DOC138_GENERATOR_ROLE"; then
+  pass "core/roles/generator.md: 通知を待てない理由（後続ターンが存在しない）が説明されている（#138）"
+else
+  fail "core/roles/generator.md: 通知を待てない理由（後続ターンが存在しない）が説明されている（#138）"
+fi
+
+if grep -Fq 'コミットに到達せずに報告を終えてはならない' "$DOC138_GENERATOR_ROLE" \
+  && grep -Fq 'git log --oneline -1' "$DOC138_GENERATOR_ROLE"; then
+  pass "core/roles/generator.md: コミット到達前に報告を終えない旨とgit log確認の記述がある（#138）"
+else
+  fail "core/roles/generator.md: コミット到達前に報告を終えない旨とgit log確認の記述がある（#138）"
+fi
+
+if [ -f "$DOC138_AGENT_GENERATOR" ] \
+  && grep -Fq 'バックグラウンド化されても「通知待ち」で停止しない' "$DOC138_AGENT_GENERATOR"; then
+  pass "agents/generator.md: 正本の#138追記内容が反映されている"
+else
+  fail "agents/generator.md: 正本の#138追記内容が反映されている" \
+    "見つかりません: ${DOC138_AGENT_GENERATOR}"
+fi
+
+if [ -f "$DOC138_CODEX_AGENT_GENERATOR" ] \
+  && grep -Fq 'バックグラウンド化されても「通知待ち」で停止しない' "$DOC138_CODEX_AGENT_GENERATOR"; then
+  pass "codex-agents/generator.toml: 正本の#138追記内容が反映されている"
+else
+  fail "codex-agents/generator.toml: 正本の#138追記内容が反映されている" \
+    "見つかりません: ${DOC138_CODEX_AGENT_GENERATOR}"
+fi
+
+# --- run側の救済（提案4）: skills/run/SKILL.md Step 4 が「コミット0件だが未コミットの
+#     変更がある」レーンを通常の失敗と区別して扱う記述を持つ ---
+if grep -Fq '未完」として扱う' "$DOC138_SKILL" && grep -Fq 'コミット0件だが作業ツリーに未コミットの変更が残っている' "$DOC138_SKILL"; then
+  pass "SKILL.md: レーン内ゲート判定が「コミット0件だが未コミットの変更あり」を失敗と区別している（#138）"
+else
+  fail "SKILL.md: レーン内ゲート判定が「コミット0件だが未コミットの変更あり」を失敗と区別している（#138）"
+fi
+
+# ---------------------------------------------------------------------------
 echo "== Task issueテンプレートの「- Epic: #N」行規定（レビュー#56） =="
 
 # plan-waves.sh の load_from_gh は本文の「- Epic: #N」行で他Epicのタスクを除外する
