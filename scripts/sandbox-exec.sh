@@ -6,7 +6,9 @@
 # このスクリプトは
 #   1. キャッシュディレクトリを named volume として永続化する
 #   2. コンテナを Epic 単位で常駐させ `docker exec` で叩く（起動オーバーヘッドを消す）
-# の2点で、同条件を約17秒に短縮する。
+#   3. dockerfile モードでは検証結果を「スタンプ」として再利用し、呼び出しごとの
+#      前置き検証（docker CLI 呼び出し）を省略する（issue #145。詳細は「スタンプについて」）
+# の3点で、同条件を大きく短縮する（2のみで約17秒。3の効果は「スタンプについて」を参照）。
 #
 # 使い方:
 #   bash scripts/sandbox-exec.sh 'go build ./... && go test ./...'   # 実行（複数コマンドは1回にまとめる）
@@ -21,6 +23,9 @@
 #                                                                     # 【作用範囲はepicではなくリポジトリ全体】
 #                                                                     # 同一リポジトリの管理コンテナが1つでも running
 #                                                                     # なら中断し、--force の指定を促す
+#                                                                     # DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV で作った
+#                                                                     # レーン別サブディレクトリも同じ volume 内にあるため
+#                                                                     # 同時に削除される（volume 自体は分割していない）
 #   bash scripts/sandbox-exec.sh --reset-cache --force                # running でも強制的に削除する
 #   bash scripts/sandbox-exec.sh --rebuild 'make test'                # イメージを強制再ビルドしてから実行する
 #   bash scripts/sandbox-exec.sh --print-plan                        # docker に触れず解決結果を表示（ドライラン）
@@ -43,7 +48,34 @@
 #   DEV_WORKFLOW_CACHE_PATHS      volume 化するコンテナ内パス（スペース区切り）。既定は下記 DEFAULT_CACHE_PATHS
 #   DEV_WORKFLOW_COMPOSE_SERVICE  compose モードで exec するサービス名（既定: app）
 #   DEV_WORKFLOW_COMPOSE_WORKDIR  compose モードでのコンテナ内マウント先の基点（既定: /workspace）
+#   DEV_WORKFLOW_STAMP_HOME       検証済みスタンプの置き場（既定: ${HOME}/.claude/dev-workflow/stamps）
+#   DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV
+#                                 レーンごとに分離したいキャッシュ環境変数の宣言
+#                                 （"<環境変数名>=<コンテナ内のキャッシュパス>" をスペース区切りで複数可。
+#                                 既定は空＝現行と完全に同一の挙動。詳細は「レーンスコープ・キャッシュについて」）
 #   その他は resolve-sandbox.sh を参照
+#
+# スタンプについて（issue #145。仕様は docs/adr/0002-sandbox-overhead-reduction.md 決定1）:
+#   dockerfile モードでは、1回の呼び出しで前置きの検証（イメージ存在・コンテナ存在・マウント元・
+#   イメージIDスキュー・running確認）に docker CLI が最大7回呼ばれる。呼び出しのたびにこれを
+#   やり直すと Epic あたり数分の固定オーバーヘッドになるため、検証結果を
+#   ${DEV_WORKFLOW_STAMP_HOME}/<コンテナ名>.stamp にスタンプとして残し、次回以降はスタンプの
+#   キー（解決イメージID・正規化済みマウント元・コンテナ名）が現在の状態と一致する場合に限り、
+#   「現在のイメージID再確認（1回）＋running確認（1回）」の2回だけで `docker exec` に進む。
+#   キーが1つでも変わっていれば、または --rebuild 指定時・スタンプ不在時は、必ず従来どおりの
+#   フル検証に戻る（fail-safe）。スタンプはリポジトリの追跡ファイルではなく、Epic 専用 worktree と
+#   isolation worktree の両方から共通に読める ${HOME} 配下に置く（ハーネス非注入原則）。
+#   --print-plan はスタンプの有無に関わらず docker に一切触れない（従来どおり）。
+#
+# レーンスコープ・キャッシュについて（issue #145。仕様は同ADR 決定2）:
+#   キャッシュ volume はリポジトリ単位で共有するため、cargo registry・yarn v1 等グローバル
+#   ロックを取るキャッシュでは並列レーンが直列化することがある。volume 自体は分割せず、
+#   DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV で宣言した環境変数だけを、同じ volume 内のレーン別
+#   サブディレクトリ（<宣言パス>/lanes/<レーンスコープ>）に向ける。レーンスコープは呼び出し元
+#   worktree から導出する（agent worktree なら `agent-xxxx`、それ以外は `shared`）。
+#   `shared` のときは実行時の env 上書きを行わない（従来どおり共有ディレクトリを使う）。
+#   volume 名・`--reset-cache` / `--ls` / `--down` の作用範囲は変わらない
+#   （レーン別サブディレクトリも同じ volume 内にあるため `--reset-cache` で一緒に消える）。
 #
 # compose モードについて（仕様書 4.8）:
 #   `docker compose -p <PROJECT> --project-directory <HOST_ROOT> -f <COMPOSE_FILE> ...` で呼ぶ。
@@ -174,6 +206,19 @@ COMPOSE_WORKDIR_BASE="${DEV_WORKFLOW_COMPOSE_WORKDIR:-/workspace}"
 COMPOSE_WORKDIR="$COMPOSE_WORKDIR_BASE"
 [ -n "$REL" ] && COMPOSE_WORKDIR="${COMPOSE_WORKDIR_BASE}/${REL}"
 
+# レーンスコープの導出（issue #145、仕様書 決定2）。
+# .claude/worktrees/agent-* から呼ばれたら「agent-xxxx」、それ以外（リポジトリルート・
+# epic worktree・リポジトリ外フォールバック）はすべて「shared」とする。
+# volume 自体は分割しないため、shared は「従来どおり共有ディレクトリを使う」を意味する。
+LANE_SCOPE="shared"
+case "$REL" in
+  .claude/worktrees/agent-*)
+    LANE_DIR_NAME="${REL#.claude/worktrees/}"
+    LANE_DIR_NAME="${LANE_DIR_NAME%%/*}"
+    LANE_SCOPE="$(sanitize "$LANE_DIR_NAME")"
+    ;;
+esac
+
 # キャッシュはリポジトリ単位で共有する。worktree の basename（agent-xxxx 等）を使うと
 # generator の isolation worktree ごとに別キャッシュになり、キャッシュが効かなくなる。
 # フォールバック時も PROJECT はリポジトリルート基準のまま変えない（キャッシュは常にリポジトリ単位）。
@@ -212,6 +257,49 @@ cache_mount_args() {
   for path in $CACHE_PATHS; do
     printf ' -v %s:%s' "$(cache_volume_name "$path")" "$path"
   done
+}
+
+# レーンスコープ・キャッシュの宣言解析（issue #145、仕様書 決定2）。
+# DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV は "<ENV1>=<path1> <ENV2>=<path2> ..." 形式。
+# '=' を含まない不正な要素は無視する（fail-safe。誤った宣言で env を壊さない）。
+LANE_CACHE_DECLS="${DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV:-}"
+
+lane_cache_declarations() {
+  # 標準出力: 宣言ごとに "<環境変数名>|<コンテナ内キャッシュパス>" を1行ずつ
+  local decl var_name base_path
+  for decl in $LANE_CACHE_DECLS; do
+    var_name="${decl%%=*}"
+    base_path="${decl#*=}"
+    if [ -z "$var_name" ] || [ -z "$base_path" ] || [ "$var_name" = "$decl" ]; then
+      continue
+    fi
+    printf '%s|%s\n' "$var_name" "$base_path"
+  done
+}
+
+# 実行時に渡す -e 引数とmkdir対象パス（レーンスコープが shared 以外のときだけ埋める）。
+# shared のときは現行と完全に同一の挙動（env 上書きなし）にする。
+LANE_ENV_ARGS=()
+LANE_CACHE_MKDIR_PATHS=()
+if [ "$LANE_SCOPE" != "shared" ]; then
+  while IFS='|' read -r lane_var_name lane_base_path; do
+    [ -n "$lane_var_name" ] || continue
+    lane_path="${lane_base_path}/lanes/${LANE_SCOPE}"
+    LANE_ENV_ARGS+=("-e" "${lane_var_name}=${lane_path}")
+    LANE_CACHE_MKDIR_PATHS+=("$lane_path")
+  done < <(lane_cache_declarations)
+fi
+
+# lane_cache_mkdir_prefix: 宣言されたレーン別キャッシュディレクトリを実行前に作る
+# `mkdir -p ... && ` プレフィックスを返す（無ければ空文字）。dockerfile/compose モードの
+# CMD にのみ適用する（none モードでホストの / を触らないようにするため、呼び出し側で限定する）。
+lane_cache_mkdir_prefix() {
+  [ "${#LANE_CACHE_MKDIR_PATHS[@]}" -gt 0 ] || return 0
+  local p quoted_paths=""
+  for p in "${LANE_CACHE_MKDIR_PATHS[@]}"; do
+    quoted_paths="${quoted_paths} '$(printf '%s' "$p" | sed "s/'/'\\\\''/g")'"
+  done
+  printf 'mkdir -p%s && ' "$quoted_paths"
 }
 
 # --print-plan: docker に一切触れず、解決結果を key=value 形式で出力するドライラン。
@@ -254,6 +342,13 @@ print_plan() {
   for path in $CACHE_PATHS; do
     printf 'cache_volume=%s:%s\n' "$(cache_volume_name "$path")" "$path"
   done
+
+  printf 'lane_scope=%s\n' "$LANE_SCOPE"
+  local plan_lane_var plan_lane_base
+  while IFS='|' read -r plan_lane_var plan_lane_base; do
+    [ -n "$plan_lane_var" ] || continue
+    printf 'lane_cache_env=%s=%s/lanes/%s\n' "$plan_lane_var" "$plan_lane_base" "$LANE_SCOPE"
+  done < <(lane_cache_declarations)
 }
 
 # 管理コンテナの列挙・後片付け（仕様書 4.2 / 4.5）。
@@ -323,6 +418,7 @@ down_all() {
 
   for name in "${targets[@]}"; do
     docker rm -f "$name" >/dev/null 2>&1 || true
+    invalidate_stamp "$name"
   done
 
   echo "削除しました: ${#targets[@]}件"
@@ -359,6 +455,53 @@ image_exists() {
 
 image_id_of() {
   docker image inspect -f '{{.Id}}' "$1" 2>/dev/null || true
+}
+
+# --- 検証結果のスタンプ（issue #145、仕様書 決定1） -------------------------------
+#
+# dockerfile モードの前置き検証（イメージ存在・コンテナ存在・マウント元・イメージID
+# スキュー・running確認）を毎回やり直すのは高コストなので、フル検証が成功した直後に
+# 「コンテナ名・解決イメージID・正規化済みマウント元」をスタンプとして残す。
+# 次回以降はこの3点が現在の状態と一致する場合に限り、フル検証をスキップして
+# `docker exec` へ直行する（fast path）。1つでも異なれば、またはスタンプが無い・
+# 読めない場合は必ずフル検証に戻る（fail-safe）。
+#
+# 置き場はリポジトリの追跡ファイルにしない（ハーネス非注入原則）。Epic 専用 worktree と
+# isolation worktree の両方から共通に読める ${HOME} 配下（規約パスと同じ考え方）に置く。
+# HOME が空の場合はスタンプを使わない（常にフル検証、fail-safe側に倒す）。
+STAMP_HOME="${DEV_WORKFLOW_STAMP_HOME:-}"
+if [ -z "$STAMP_HOME" ] && [ -n "${HOME:-}" ]; then
+  STAMP_HOME="${HOME}/.claude/dev-workflow/stamps"
+fi
+
+stamp_file_for() {
+  # stamp_file_for <container名>
+  printf '%s/%s.stamp' "$STAMP_HOME" "$(sanitize "$1")"
+}
+
+stamp_field() {
+  # stamp_field <stampファイル> <フィールド名>  例: stamp_field "$f" IMAGE_ID
+  local f="$1" field="$2"
+  [ -n "$f" ] && [ -r "$f" ] || return 0
+  sed -n "s/^${field}=//p" "$f" | head -n1
+}
+
+write_stamp() {
+  # write_stamp <container名> <image_id> <正規化済みmount_source>
+  [ -n "$STAMP_HOME" ] || return 0
+  mkdir -p "$STAMP_HOME" 2>/dev/null || return 0
+  {
+    printf 'CONTAINER=%s\n'    "$1"
+    printf 'IMAGE_ID=%s\n'     "$2"
+    printf 'MOUNT_SOURCE=%s\n' "$3"
+  } > "$(stamp_file_for "$1")" 2>/dev/null || true
+}
+
+invalidate_stamp() {
+  # invalidate_stamp <container名>  コンテナを削除する経路（--down / --reset-cache）で呼ぶ。
+  # 削除自体はせず空にする（fail-safe: 空/読めないスタンプは常にフル検証へ落ちる）。
+  [ -n "$STAMP_HOME" ] || return 0
+  : > "$(stamp_file_for "$1")" 2>/dev/null || true
 }
 
 ensure_sandbox_image() {
@@ -509,6 +652,7 @@ case "$ACTION" in
 
     echo "削除対象のコンテナ: ${CONTAINER}"
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    invalidate_stamp "$CONTAINER"
     echo "常駐コンテナを削除しました: ${CONTAINER}（キャッシュ volume は残しています）"
     exit 0
     ;;
@@ -541,6 +685,7 @@ case "$ACTION" in
 
     # 5. 削除するのは volume と当該（現在の repo+epic の）コンテナのみで、他 epic のコンテナは削除しない。
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    invalidate_stamp "$CONTAINER"
     for path in $CACHE_PATHS; do
       docker volume rm "$(cache_volume_name "$path")" >/dev/null 2>&1 || true
     done
@@ -631,17 +776,48 @@ case "$DEV_WORKFLOW_SANDBOX_MODE" in
       exit 1
     fi
 
-    run_and_report compose_cmd exec -T -w "$COMPOSE_WORKDIR" "$COMPOSE_SERVICE" sh -c "$CMD"
+    run_and_report compose_cmd exec -T -w "$COMPOSE_WORKDIR" "${LANE_ENV_ARGS[@]}" "$COMPOSE_SERVICE" sh -c "$(lane_cache_mkdir_prefix)${CMD}"
     exit $?
     ;;
 
   none)
-    # サンドボックス未設定。ホスト側で実行する（テストが環境を汚す可能性がある）
+    # サンドボックス未設定。ホスト側で実行する（テストが環境を汚す可能性がある）。
+    # レーンスコープ・キャッシュの mkdir プレフィックスは docker 前提（コンテナ内パス）
+    # なので、none モードには適用しない（ホストの / を触ってしまうため）。
     run_and_report sh -c "$CMD"
     exit $?
     ;;
 
   dockerfile)
+    # --- fast path（issue #145、仕様書 決定1） ---------------------------------
+    # スタンプ（コンテナ名・イメージID・正規化済みマウント元）が現在の状態と完全一致し、
+    # かつコンテナが running なら、前置きのフル検証（イメージ存在・コンテナ存在・
+    # マウント元再確認・作り直し判定）を省略して docker exec へ直行する。
+    # --rebuild 指定時はスタンプを一切参照せず必ずフル検証へ進む（fail-safe）。
+    NORM_MOUNT_SOURCE="$(normalize_mount_source "$MOUNT_SOURCE")"
+    FAST_PATH=0
+    CURRENT_IMAGE_ID=""
+
+    if [ "$REBUILD" -ne 1 ]; then
+      CURRENT_IMAGE_ID="$(image_id_of "$DEV_WORKFLOW_SANDBOX_IMAGE")"
+      if [ -n "$CURRENT_IMAGE_ID" ]; then
+        STAMP_PATH="$(stamp_file_for "$CONTAINER")"
+        if [ "$(stamp_field "$STAMP_PATH" CONTAINER)" = "$CONTAINER" ] \
+          && [ "$(stamp_field "$STAMP_PATH" IMAGE_ID)" = "$CURRENT_IMAGE_ID" ] \
+          && [ "$(stamp_field "$STAMP_PATH" MOUNT_SOURCE)" = "$NORM_MOUNT_SOURCE" ]; then
+          if [ "$(docker container inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)" = "true" ]; then
+            FAST_PATH=1
+          fi
+        fi
+      fi
+    fi
+
+    if [ "$FAST_PATH" -eq 1 ]; then
+      run_and_report docker exec -w "$WORKDIR" "${LANE_ENV_ARGS[@]}" "$CONTAINER" sh -c "$(lane_cache_mkdir_prefix)${CMD}"
+      exit $?
+    fi
+
+    # --- フル検証（fast path の条件を満たさなかった場合。従来どおり） -------------
     # イメージが無ければ自動ビルドする（--rebuild 指定時は強制的に再ビルドする）。
     ensure_sandbox_image
 
@@ -661,7 +837,8 @@ case "$DEV_WORKFLOW_SANDBOX_MODE" in
         RECREATE=1
       fi
 
-      CURRENT_IMAGE_ID="$(image_id_of "$DEV_WORKFLOW_SANDBOX_IMAGE")"
+      # fast path 判定で既に取得済みなら再取得しない（不要な docker CLI 呼び出しを避ける）。
+      [ -n "$CURRENT_IMAGE_ID" ] || CURRENT_IMAGE_ID="$(image_id_of "$DEV_WORKFLOW_SANDBOX_IMAGE")"
       EXISTING_IMAGE_ID="$(container_field "$CONTAINER" '{{.Image}}')"
       if [ -n "$CURRENT_IMAGE_ID" ] && [ -n "$EXISTING_IMAGE_ID" ] && [ "$EXISTING_IMAGE_ID" != "$CURRENT_IMAGE_ID" ]; then
         echo "WARNING: 既存コンテナ ${CONTAINER} のイメージ (${EXISTING_IMAGE_ID}) が現在のイメージ ${DEV_WORKFLOW_SANDBOX_IMAGE} (${CURRENT_IMAGE_ID}) と異なるため削除して作り直します（バージョンスキューの解消）" >&2
@@ -698,7 +875,12 @@ case "$DEV_WORKFLOW_SANDBOX_MODE" in
       }
     fi
 
-    run_and_report docker exec -w "$WORKDIR" "$CONTAINER" sh -c "$CMD"
+    # フル検証を経てコンテナの running が確定したので、次回以降の fast path 用に
+    # スタンプを更新する（--warm 呼び出しで温めておけば以降の呼び出しが速くなる）。
+    [ -n "$CURRENT_IMAGE_ID" ] || CURRENT_IMAGE_ID="$(image_id_of "$DEV_WORKFLOW_SANDBOX_IMAGE")"
+    write_stamp "$CONTAINER" "$CURRENT_IMAGE_ID" "$NORM_MOUNT_SOURCE"
+
+    run_and_report docker exec -w "$WORKDIR" "${LANE_ENV_ARGS[@]}" "$CONTAINER" sh -c "$(lane_cache_mkdir_prefix)${CMD}"
     exit $?
     ;;
 

@@ -69,3 +69,16 @@ Claude Code 版と異なり、**このエージェント専用の worktree は�
 # 「Phase 1 申し送りへの回答」を参照。
 [mcp_servers.context7]
 command = "context7-mcp"
+
+# LSP（任意依存・Epic #143・#154）: Claude Code 版は `enabledPlugins`（例:
+# `treflebonbon/dotfiles` の typescript-lsp / lua-lsp / gopls-lsp / rust-analyzer-lsp）で
+# marketplace プラグインとして有効化された LSP の MCP ツールを generator の `tools:` に
+# 追加している（adapters/claude/overlays/generator.md 参照）。
+#
+# **Codex 側には同等の機能が無い。** Codex には Claude Code の marketplace プラグイン /
+# `enabledPlugins` に相当する、ユーザーが任意に有効化できる LSP プラグインの仕組みが
+# 確認できていない。context7 のように「ローカルにインストール済みのバイナリを command で
+# 直接指す」形で個別の LSP サーバーを宣言することは技術的には可能だが、どの LSP 実装が
+# Codex から呼べる MCP サーバーとして配布されているかを実測できていないため、ここでは
+# 宣言しない（推測で書かない）。generator は本文の「定義・参照の追跡は、Grep の総当たりより
+# 先に LSP を引く」の手順どおり、LSP が無い場合は Grep / Read にフォールバックして動作する。

@@ -18,6 +18,16 @@ sandbox_mode = "read-only"
 # 設置後の .codex/agents/evaluator.toml で下行を有効にする。
 # model = "gpt-5.5"
 
+# Claude Code版（adapters/claude/overlays/evaluator.md）は Task #157 で「発見役は既定モデル
+# （sonnet）・確度判定役は起動時にmodel: opusを上書き」という1エージェント定義内でのモデル
+# 使い分けに対応した。Codex側で同等の「起動時にサブエージェント単位でmodelを上書きする」
+# 機構が使えるかどうかは確認していない（未確認。#153のADR 0004と同じ理由で、Codexは
+# `codex exec` を子プロセスとして逐次起動する構造であり、Claude Codeのサブエージェント起動時
+# 上書きに相当する機構の有無を実測していないため、推測で実装しない）。
+# 確認できるまでは model は上記のとおり親セッション継承のまま据え置き、発見役/確度判定役の
+# 分離は行わない（従来どおり単一 evaluator が全観点を1本で見る。#147のADR 0003で決定済みの
+# 「Codexは単一evaluatorのまま」という制約とも整合する）。詳細は docs/adr/0006 を参照。
+
 developer_instructions = '''
 <!-- include: core/roles/evaluator.md -->
 

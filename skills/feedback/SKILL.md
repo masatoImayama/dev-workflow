@@ -177,5 +177,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/feedback-ledger.sh" ready --scope harness
 
 ## 参照
 
-- `references/scope.md` … 修正範囲の境界と、project / harness の分類基準
-- `references/upstream.md` … redact 規約と issue 化の手順
+| ファイル | 読むタイミング |
+|---|---|
+| `references/scope.md` | 観測を project / harness に分類するとき、どこまで直してよいか迷ったとき |
+| `references/upstream.md` | Phase 5 で実際に issue を作るとき |
