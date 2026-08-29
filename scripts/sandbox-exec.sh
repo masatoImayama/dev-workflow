@@ -338,10 +338,19 @@ print_plan() {
   printf 'compose_project=%s\n' "$COMPOSE_PROJECT"
   printf 'compose_service=%s\n' "$COMPOSE_SERVICE"
 
-  local path
-  for path in $CACHE_PATHS; do
-    printf 'cache_volume=%s:%s\n' "$(cache_volume_name "$path")" "$path"
-  done
+  # cache_volume は dockerfile モード（docker run）でしか実際にマウントされない
+  # （cache_mount_args は docker run 分岐でしか呼ばれない。compose モードでは
+  # キャッシュ volume が一切接続されない。issue #104 原因分析1）。
+  # --print-plan は「実際に使われるもの」を表示するドライランであるため、
+  # compose/none モードでは cache_volume 行を出さない（出すと接続されているかの
+  # ように誤読させる）。--reset-cache 等の後片付け系はモードに関わらず volume名を
+  # 引き続き対象にする（idempotent な削除であり誤読の余地が無いため、こちらは変えない）。
+  if [ "${DEV_WORKFLOW_SANDBOX_MODE:-}" = "dockerfile" ]; then
+    local path
+    for path in $CACHE_PATHS; do
+      printf 'cache_volume=%s:%s\n' "$(cache_volume_name "$path")" "$path"
+    done
+  fi
 
   printf 'lane_scope=%s\n' "$LANE_SCOPE"
   local plan_lane_var plan_lane_base

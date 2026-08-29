@@ -690,6 +690,14 @@ node_modules  yarn.lock package.json
   必要がある（generator へは run が指示するが、人間が挙動を追えるようここにも明記する）。
   **実体コピーで共有されたエントリは symlink ではなく独立した実体のため、`--detach` の対象
   外である**（そもそも共有元と inode を共有しておらず、install しても共有元を汚さない）
+- 同一レーン worktree への準備コマンドの多重実行（issue #104 が報告したネイティブバイナリ
+  破損事故の原因）は、`share-prepared-dirs.sh` がレーンの `.git` 配下に作るロック兼完了マーカー
+  （`mkdir` によるアトミックな取得。実行中に2回目が来ると `exit 3`）で防いでいる。generator は
+  `exit 3` を受け取ったら待たず・2本目も起動せずそのまま停止する
+- **レーン専用の `node_modules` を named volume 化する案は実装していない。** 現行の
+  「コンテナは Epic 単位で1個だけ常駐し全レーンが `docker exec` で入る」モデルと構造的に
+  衝突するため据え置いた。理由の詳細は `docs/adr/0008-node-modules-named-volume-deferred.md`
+  を参照
 
 ### Epic の `## 編集時チェック` 節
 
@@ -1188,6 +1196,9 @@ volume 化は **dockerfile モード専用**であり、compose モードでは�
 呼ばれていません）。compose で同等のキャッシュを効かせるには、compose ファイル側で
 named volume を定義する必要があります。**`sandbox-exec.sh` は利用者の compose ファイルへ
 介入しません。** そのままコピーして使えるサンプルは以下のとおりです。
+`--print-plan` の出力も同じ理由で、compose/none モードでは `cache_volume=` 行を出しません
+（dockerfile モードでのみ出力します。issue #104。実際には接続されない設定を「これから
+使われる設定」として見せないようにするため）。
 
 ```yaml
 # docker-compose.dev.yml の例（app サービスにキャッシュ用 named volume を並べる）

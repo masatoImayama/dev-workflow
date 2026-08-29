@@ -15011,6 +15011,52 @@ case "$(cat "$SPD139_STDERR_W2" 2>/dev/null)" in
 esac
 
 # ---------------------------------------------------------------------------
+# sandbox-exec.sh --print-plan: cache_volume は dockerfile モードでのみ出力する（issue #104）
+#
+# cache_mount_args()（volume の -v 引数を組み立てる関数）は docker run を使う dockerfile
+# 分岐でしか呼ばれず、compose モードでは一切マウントされない（README「既知の限界
+# （キャッシュ volume）」節）。以前の --print-plan はモードに関わらず cache_volume= 行を
+# 出力しており、compose モードでもキャッシュが接続されているかのように誤読させる不整合が
+# あった（docs/adr/0008-node-modules-named-volume-deferred.md）。dockerfile モードの既存
+# 出力は変えず、compose モードでのみ行が消えることを確認する。
+# ---------------------------------------------------------------------------
+
+echo "== --print-plan: cache_volume は dockerfile モード限定（issue #104） =="
+
+CV104_DOCKERFILE_REPO="$(make_temp_repo)"
+copy_sandbox_scripts "$CV104_DOCKERFILE_REPO"
+CV104_DOCKERFILE_OUTPUT="$(print_plan_in "$CV104_DOCKERFILE_REPO")"
+
+assert_eq "#104: dockerfileモードの一時リポジトリは mode=dockerfile" \
+  "dockerfile" "$(plan_value mode "$CV104_DOCKERFILE_OUTPUT")"
+
+CV104_DOCKERFILE_CACHE_COUNT="$(printf '%s\n' "$CV104_DOCKERFILE_OUTPUT" | grep -c '^cache_volume=' || true)"
+if [ "$CV104_DOCKERFILE_CACHE_COUNT" -gt 0 ]; then
+  pass "#104: dockerfileモードでは従来どおり cache_volume が出力される（${CV104_DOCKERFILE_CACHE_COUNT}件）"
+else
+  fail "#104: dockerfileモードでは従来どおり cache_volume が出力される" "0件でした"
+fi
+
+CV104_COMPOSE_REPO="$(make_temp_repo)"
+copy_sandbox_scripts_no_dockerfile "$CV104_COMPOSE_REPO"
+printf 'services:\n  app:\n    build: .\n    volumes:\n      - .:/workspace\n' \
+  > "${CV104_COMPOSE_REPO}/docker-compose.dev.yml"
+(
+  cd "$CV104_COMPOSE_REPO" || exit 1
+  git add docker-compose.dev.yml
+  git commit -q -m "add compose file"
+) >/dev/null 2>&1
+
+CV104_COMPOSE_OUTPUT="$(print_plan_in "$CV104_COMPOSE_REPO")"
+
+assert_eq "#104: composeモードの一時リポジトリは mode=compose" \
+  "compose" "$(plan_value mode "$CV104_COMPOSE_OUTPUT")"
+
+CV104_COMPOSE_CACHE_COUNT="$(printf '%s\n' "$CV104_COMPOSE_OUTPUT" | grep -c '^cache_volume=' || true)"
+assert_eq "#104: composeモードでは cache_volume 行が出力されない（実際には接続されないため）" \
+  "0" "$CV104_COMPOSE_CACHE_COUNT"
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
