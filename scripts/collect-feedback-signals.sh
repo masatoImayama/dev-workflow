@@ -91,6 +91,9 @@ echo "since_days=${SINCE_DAYS}"
 # ---------------------------------------------------------------------------
 
 REPO_ROOT=""
+# 引数なし呼び出しは意図的（$PWD を起点にする）。dev_workflow_marker_root の $1 は
+# 起点ディレクトリであり、このスクリプトの $1 ではない
+# shellcheck disable=SC2119
 if REPO_ROOT="$(dev_workflow_marker_root)"; then
   :
 else
