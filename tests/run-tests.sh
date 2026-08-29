@@ -16079,6 +16079,93 @@ RG141_MINIFIED_EXIT=$?
 assert_exit_code "本物のミニファイコード（generated/の外）は許可リスト追加後も引き続き検出される" 2 "$RG141_MINIFIED_EXIT"
 
 # ---------------------------------------------------------------------------
+# check-readability.sh: リポジトリ直下の generated/ が許可されない誤検知の回帰
+# （issue #188）
+#
+# `*/generated/*` は先頭に `/` を要求するため、パスが `generated/graphql.ts` の形
+# （先頭ディレクトリそのものが generated。`git diff --name-only` / `git ls-files` が
+# 返すリポジトリ相対パスで、protobuf 出力・Go の生成物・モノレポのパッケージルート等で
+# 実際に起こる形）だと一致しなかった。回帰テストが `frontend/src/generated/...` という
+# 入れ子ケースだけを fixture にしていたため、この穴が #141 の回帰テストでは見えていなかった。
+#
+# 併せて、`generated/*` を先頭一致で足しても `pregenerated/` や `generated-old/` のような
+# 紛らわしい名前には誤って一致しないこと（検出力を弱めていないこと）も固定する。
+# ---------------------------------------------------------------------------
+
+echo "== check-readability.sh: リポジトリ直下のgenerated/が許可されない誤検知の回帰（#188） =="
+
+RG188_TMP_REPO="$(make_temp_repo)"
+
+RG188_TOPLEVEL_GENERATED_DIR="generated"
+RG188_TOPLEVEL_GENERATED_FILE="${RG188_TOPLEVEL_GENERATED_DIR}/graphql.ts"
+RG188_TOPLEVEL_DUNDER_DIR="__generated__"
+RG188_TOPLEVEL_DUNDER_FILE="${RG188_TOPLEVEL_DUNDER_DIR}/graphql.ts"
+RG188_PREGEN_DIR="pregenerated"
+RG188_PREGEN_FILE="${RG188_PREGEN_DIR}/graphql.ts"
+RG188_GENOLD_DIR="generated-old"
+RG188_GENOLD_FILE="${RG188_GENOLD_DIR}/graphql.ts"
+
+(
+  cd "$RG188_TMP_REPO" || exit 1
+  mkdir -p "$RG188_TOPLEVEL_GENERATED_DIR" "$RG188_TOPLEVEL_DUNDER_DIR" "$RG188_PREGEN_DIR" "$RG188_GENOLD_DIR"
+  printf 'export const documents = {"%s": Doc};\n' "$RG141_LONGLINE_PAYLOAD" > "$RG188_TOPLEVEL_GENERATED_FILE"
+  printf 'export const documents = {"%s": Doc};\n' "$RG141_LONGLINE_PAYLOAD" > "$RG188_TOPLEVEL_DUNDER_FILE"
+  printf 'export const documents = {"%s": Doc};\n' "$RG141_LONGLINE_PAYLOAD" > "$RG188_PREGEN_FILE"
+  printf 'export const documents = {"%s": Doc};\n' "$RG141_LONGLINE_PAYLOAD" > "$RG188_GENOLD_FILE"
+) >/dev/null 2>&1
+
+# --- リポジトリ直下の generated/（generated/graphql.ts相当）は誤検知しない ---
+RG188_TOPLEVEL_EXIT=0
+(
+  cd "$RG188_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG188_TOPLEVEL_GENERATED_FILE" >/dev/null 2>&1
+)
+RG188_TOPLEVEL_EXIT=$?
+assert_exit_code "リポジトリ直下のgenerated/配下（長い1行）は誤検知しない（#188）" 0 "$RG188_TOPLEVEL_EXIT"
+
+# --- --staged モード（git diff --cached --name-only相当のリポジトリ相対パス。
+#     実際の run 経路そのもの）でも同様に許可される。pregenerated/ / generated-old/ の
+#     ような本来ブロックされるべきfixtureは一緒にステージしない
+#     （--stagedは全ステージ済みファイルの違反を集約して返すため、一緒にステージすると
+#     このテストの意図（generated/自体の許可を見る）が別ファイルの違反で覆い隠される） ---
+RG188_STAGED_EXIT=0
+(
+  cd "$RG188_TMP_REPO" || exit 1
+  git add "$RG188_TOPLEVEL_GENERATED_FILE" "$RG188_TOPLEVEL_DUNDER_FILE" >/dev/null 2>&1
+  bash "$CHECK_READABILITY_SCRIPT" --staged >/dev/null 2>&1
+)
+RG188_STAGED_EXIT=$?
+assert_exit_code "--staged経由（実際の run 経路）でもリポジトリ直下のgenerated/は誤検知しない（#188）" 0 "$RG188_STAGED_EXIT"
+
+# --- リポジトリ直下の __generated__/ も同様に誤検知しない ---
+RG188_TOPLEVEL_DUNDER_EXIT=0
+(
+  cd "$RG188_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG188_TOPLEVEL_DUNDER_FILE" >/dev/null 2>&1
+)
+RG188_TOPLEVEL_DUNDER_EXIT=$?
+assert_exit_code "リポジトリ直下の__generated__/配下（長い1行）は誤検知しない（#188）" 0 "$RG188_TOPLEVEL_DUNDER_EXIT"
+
+# --- pregenerated/（先頭ディレクトリ名がgeneratedと完全一致しない）は誤って許可されない
+#     （検出力を弱めていないことの担保） ---
+RG188_PREGEN_EXIT=0
+(
+  cd "$RG188_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG188_PREGEN_FILE" >/dev/null 2>&1
+)
+RG188_PREGEN_EXIT=$?
+assert_exit_code "pregenerated/は先頭一致に誤って一致せず引き続き検出される（検出力の維持・#188）" 2 "$RG188_PREGEN_EXIT"
+
+# --- generated-old/（先頭ディレクトリ名がgeneratedと完全一致しない）も同様に誤って許可されない ---
+RG188_GENOLD_EXIT=0
+(
+  cd "$RG188_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG188_GENOLD_FILE" >/dev/null 2>&1
+)
+RG188_GENOLD_EXIT=$?
+assert_exit_code "generated-old/は先頭一致に誤って一致せず引き続き検出される（検出力の維持・#188）" 2 "$RG188_GENOLD_EXIT"
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 

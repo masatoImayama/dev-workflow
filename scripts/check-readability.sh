@@ -151,6 +151,17 @@ json_string() {
 #   「本物のミニファイ/難読化コードの検出を弱めない」と衝突する。
 #   判定できない（＝生成物か手書きか確証が持てない）場合は許可リスト側を
 #   狭く保ち、検査を効かせたままにする（安全側に倒す）。
+#
+# リポジトリ直下の generated/ が素通りしていた件について（#188）:
+#   `*/generated/*` は先頭に `/` を要求するため、パスが `generated/graphql.ts`
+#   のように「先頭ディレクトリそのものが generated」な形（`git diff --name-only` /
+#   `git ls-files` が返すリポジトリ相対パスで、protobuf 出力・Go の生成物・
+#   モノレポのパッケージルート等でよく起こる）には一致しなかった。
+#   `generated/*` / `__generated__/*` を先頭一致形として追加する。
+#   glob の case マッチは文字列全体に対して行われるため、`generated/*` は
+#   「先頭ディレクトリが厳密に generated であるパス」にしか一致せず、
+#   `pregenerated/foo` や `generated-old/foo`（先頭ディレクトリ名が
+#   `generated` と完全一致しない）には一致しない。検出力は弱めていない。
 is_allowlisted() {
   case "$1" in
     *.lock|*-lock.json|*-lock.yaml|*.lockb) return 0 ;;
@@ -160,7 +171,7 @@ is_allowlisted() {
     *.min.js|*.min.css|*.min.mjs) return 0 ;;
     *.svg|*.ico|*.woff|*.woff2|*.ttf|*.eot) return 0 ;;
     *.generated.*|*.gen.go|*.pb.go|*_pb2.py|*.g.dart|*.freezed.dart) return 0 ;;
-    */generated/*|*/__generated__/*) return 0 ;;
+    generated/*|__generated__/*|*/generated/*|*/__generated__/*) return 0 ;;
     *.map) return 0 ;;
   esac
   return 1
