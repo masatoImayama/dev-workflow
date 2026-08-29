@@ -7665,9 +7665,11 @@ assert_exit_code "adapters/codex/build.sh --check が通る（#154）" 0 "$DOC15
 
 # ---------------------------------------------------------------------------
 # 役割・スキル定義が permissions.deny 常連コマンドを規定していないことの回帰テスト
-# （issue #140・Epic #174 完了基準4）
+# （issue #140・Epic #174 完了基準4。issue #191 で検査対象の抜けと正規表現の
+# 取りこぼしを修正）
 #
-# `git reset --hard` / `git clean` / `git push --force` / `git branch -D` / `rm -rf` は
+# `git reset --hard` / `git clean` / `git push --force`（`--force-with-lease` /
+# `-f` を含む） / `git branch -D` / `rm -rf`（`-fr` / `-r -f` 等の順序違いを含む）は
 # 一般的な安全設定の permissions.deny に載っている代表例（Epic #143 のウェーブ2で
 # 全3レーンが `git reset --hard` の deny により着手不能になった実例。
 # core/roles/generator.md「渡されたベースにHEADを合わせる」参照）。deny はプロジェクト側の
@@ -7677,16 +7679,25 @@ assert_exit_code "adapters/codex/build.sh --check が通る（#154）" 0 "$DOC15
 #
 # 「コマンド位置」（行頭・`;`・`{`・`&&`・`||` の直後）に出現する場合だけを検出し、
 # 「`git reset --hard` は使わない」のような説明文中のバッククォート表記は誤検出しない。
+#
+# 検査対象は手で保守されるスキル・ロール定義（生成物である agents/・codex-agents/ を含む）を
+# 網羅する。`skills-codex/dev-workflow-run/SKILL.md` は adapters/codex/build.sh が生成しない
+# 手保守ファイルであり、本Epic自身が `git clean` の記述を書き換えた対象のため必須（#191）。
+# `core/references/` も正本の一部として含める。
 # ---------------------------------------------------------------------------
 
 echo "== 役割・スキル定義に permissions.deny 常連コマンドの規定が残っていない（issue #140） =="
 
-DENY140_PATTERN='(^|[;{]|&&|\|\|)[[:space:]]*(git reset --hard|git clean|git branch -D|git push[^|]*--force|rm -rf)([[:space:]]|$)'
+DENY140_PATTERN='(^|[;{]|&&|\|\|)[[:space:]]*(git reset --hard|git clean|git branch -D|git push[^|]*(--force(-with-lease)?|[[:space:]]-f)|rm[[:space:]]+(-[rRf]{2,}|-[rR]+[[:space:]]+-f+|-f+[[:space:]]+-[rR]+))([[:space:]]|$)'
 
 check_no_deny_common_commands() {
   # check_no_deny_common_commands <説明> <検査対象（ファイルまたはディレクトリ）>
   local desc="$1" target="$2"
   local hits
+  if [ ! -e "$target" ]; then
+    fail "$desc" "検査対象が存在しません: ${target}（対象消失時に無条件passしないための検査。#191）"
+    return
+  fi
   hits="$(grep -rnE "$DENY140_PATTERN" "$target" 2>/dev/null || true)"
   if [ -z "$hits" ]; then
     pass "$desc"
@@ -7697,14 +7708,18 @@ check_no_deny_common_commands() {
 
 check_no_deny_common_commands "core/roles/ に deny常連コマンドの実行例が無い（#140）" "${REPO_ROOT}/core/roles"
 check_no_deny_common_commands "core/instructions.md に deny常連コマンドの実行例が無い（#140）" "${REPO_ROOT}/core/instructions.md"
+check_no_deny_common_commands "core/references/ に deny常連コマンドの実行例が無い（#191）" "${REPO_ROOT}/core/references"
 check_no_deny_common_commands "adapters/claude/overlays/ に deny常連コマンドの実行例が無い（#140）" "${REPO_ROOT}/adapters/claude/overlays"
 check_no_deny_common_commands "adapters/codex/overlays/ に deny常連コマンドの実行例が無い（#140）" "${REPO_ROOT}/adapters/codex/overlays"
 check_no_deny_common_commands "skills/run/ に deny常連コマンドの実行例が無い（#140）" "${REPO_ROOT}/skills/run"
+check_no_deny_common_commands "skills-codex/dev-workflow-run/ に deny常連コマンドの実行例が無い（#191）" "${REPO_ROOT}/skills-codex/dev-workflow-run"
 check_no_deny_common_commands "agents/ に deny常連コマンドの実行例が無い（#140・生成物）" "${REPO_ROOT}/agents"
 check_no_deny_common_commands "codex-agents/ に deny常連コマンドの実行例が無い（#140・生成物）" "${REPO_ROOT}/codex-agents"
 
 # --- 検出パターン自体が実際の実行例に反応することを確認する
-#     （正規表現の誤りで検査が常に無反応になっていないことのフィクスチャ確認） ---
+#     （正規表現の誤りで検査が常に無反応になっていないことのフィクスチャ確認。
+#     #191で取りこぼしが判明した --force-with-lease / rm -fr / rm -r -f / git push -f も
+#     個別に確認する） ---
 
 DENY140_FIXTURE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-deny140-fixture.XXXXXX")"
 cat > "${DENY140_FIXTURE_DIR}/bad-example.md" <<'EOF'
@@ -7720,12 +7735,31 @@ else
     "反応しませんでした（正規表現が壊れている可能性）"
 fi
 
+DENY191_CASES_FILE="${DENY140_FIXTURE_DIR}/hit-cases-191.txt"
+cat > "$DENY191_CASES_FILE" <<'EOF'
+git push --force-with-lease origin x
+git push -f origin x
+rm -fr build
+rm -r -f build
+EOF
+while IFS= read -r denyLine; do
+  denyHit="$(printf '%s\n' "$denyLine" | grep -nE "$DENY140_PATTERN" || true)"
+  if [ -n "$denyHit" ]; then
+    pass "#191: 検出パターンが「${denyLine}」に反応する（取りこぼし修正の確認）"
+  else
+    fail "#191: 検出パターンが「${denyLine}」に反応する（取りこぼし修正の確認）" \
+      "反応しませんでした"
+  fi
+done < "$DENY191_CASES_FILE"
+
 # --- 「使わない」という説明文（バッククォート表記）や、置き換え後の非破壊コマンド
 #     （git status --short 等）は誤検出しないことも確認する ---
 
 cat > "${DENY140_FIXTURE_DIR}/good-example.md" <<'EOF'
 **`git reset --hard`は使わない。**`git clean`もdenyの対象になりうる。
 git status --short -- :/
+rm -r file.txt
+rm -f file.txt
 EOF
 DENY140_PROSE_HITS="$(grep -nE "$DENY140_PATTERN" "${DENY140_FIXTURE_DIR}/good-example.md" 2>/dev/null || true)"
 if [ -z "$DENY140_PROSE_HITS" ]; then
