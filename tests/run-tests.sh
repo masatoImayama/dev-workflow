@@ -16320,6 +16320,81 @@ for RG195_FILE in "core/roles/generator.md" "skills/run/SKILL.md" \
 done
 
 # ---------------------------------------------------------------------------
+# レビュー指摘対応時に「守るべき性質」の言語化を促す記述（issue #197）
+#
+# review issue は通常のウェーブループ（Step 1〜7）に載って処理されるため、対応する
+# generator は run の手順書ではなく issue 本文を読む。そのため、この指示は run 側の
+# 手順書だけでなく、R2 が作成する issue テンプレート自体に埋め込まれている必要がある。
+# Claude / Codex 両方の run スキルで、テンプレートの文言が消えたら赤くなることを固定する。
+#
+# evaluator 側は core/references/review-checklist-correctness.md に対応する確認観点
+# （#197「修正の妥当性」）を追加した。correctness 観点の evaluator が読む唯一の詳細
+# チェックリストファイルであり、Claude/Codex 双方の evaluator 定義が
+# `core/roles/evaluator.md`「観点（focus）」表を通じて共通で参照するため、
+# アダプタ別の複製は不要である（本体に直接埋め込むと、観点未指定時にしか働かない
+# チェックリスト構造と矛盾するため、`core/references/` 側に置く）。
+# ---------------------------------------------------------------------------
+
+echo "== レビュー指摘対応時に「守るべき性質」の言語化を促す記述がある（#197） =="
+
+RG197_INVARIANT_PHRASE='この修正が守ろうとしている性質を1文で書くこと'
+
+RG197_CLAUDE_HIT="$(grep -F "$RG197_INVARIANT_PHRASE" "${REPO_ROOT}/skills/run/references/review.md" || true)"
+if [ -n "$RG197_CLAUDE_HIT" ]; then
+  pass "skills/run/references/review.md: review issueテンプレートに性質の言語化を促す指示がある（#197）"
+else
+  fail "skills/run/references/review.md: review issueテンプレートに性質の言語化を促す指示がある（#197）"
+fi
+
+RG197_CODEX_HIT="$(grep -F "$RG197_INVARIANT_PHRASE" "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md" || true)"
+if [ -n "$RG197_CODEX_HIT" ]; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: review issueテンプレートに性質の言語化を促す指示がある（#197）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: review issueテンプレートに性質の言語化を促す指示がある（#197）"
+fi
+
+# issueテンプレートに埋め込む以上、実際に `gh issue create` の heredoc（`## 対応時の指示`
+# セクション）の中にあることを確認する。手順書の説明文にだけ書いて heredoc から漏れる
+# 再発を防ぐ（#194と同種の「別ファイルに書いたつもりが本来の適用箇所から漏れる」失敗）。
+RG197_CLAUDE_BODY_REGION="$(sed -n '/^gh issue create --label "task,review"/,/^BODY$/p' "${REPO_ROOT}/skills/run/references/review.md")"
+if echo "$RG197_CLAUDE_BODY_REGION" | grep -Fq "$RG197_INVARIANT_PHRASE"; then
+  pass "skills/run/references/review.md: 性質の言語化指示がissue本文のheredocの中にある（#197）"
+else
+  fail "skills/run/references/review.md: 性質の言語化指示がissue本文のheredocの中にある（#197）" \
+    "$RG197_CLAUDE_BODY_REGION"
+fi
+
+RG197_CODEX_BODY_REGION="$(sed -n '/^gh issue create --label "task,review"/,/^BODY$/p' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md")"
+if echo "$RG197_CODEX_BODY_REGION" | grep -Fq "$RG197_INVARIANT_PHRASE"; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: 性質の言語化指示がissue本文のheredocの中にある（#197）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: 性質の言語化指示がissue本文のheredocの中にある（#197）" \
+    "$RG197_CODEX_BODY_REGION"
+fi
+
+RG197_CHECKLIST_PHRASE='元の問題と同じ性質の欠陥を別の場所に作っていないか'
+
+if grep -Fq "$RG197_CHECKLIST_PHRASE" "${REPO_ROOT}/core/references/review-checklist-correctness.md"; then
+  pass "core/references/review-checklist-correctness.md: 修正の妥当性チェック項目がある（#197）"
+else
+  fail "core/references/review-checklist-correctness.md: 修正の妥当性チェック項目がある（#197）"
+fi
+
+# core/references/*.md は evaluator が起動時に自分で読むファイルであり、生成物
+# （agents/evaluator.md・codex-agents/evaluator.toml）には束ねられない。フラット化ビュー
+# （EVALUATOR_ROLE_FLAT / AGENT_EVALUATOR_FLAT / CODEX_AGENT_EVALUATOR_FLAT。冒頭で
+# core/references/*.md を連結して作る）でも見えることを確認し、Claude/Codex 双方の
+# evaluator が同じ観点表を経由して同じチェックリストに到達できることを固定する。
+for RG197_FLAT_NAME in EVALUATOR_ROLE_FLAT AGENT_EVALUATOR_FLAT CODEX_AGENT_EVALUATOR_FLAT; do
+  RG197_FLAT_PATH="${!RG197_FLAT_NAME}"
+  if grep -Fq "$RG197_CHECKLIST_PHRASE" "$RG197_FLAT_PATH"; then
+    pass "${RG197_FLAT_NAME}: 修正の妥当性チェック項目に到達できる（#197）"
+  else
+    fail "${RG197_FLAT_NAME}: 修正の妥当性チェック項目に到達できる（#197）"
+  fi
+done
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
