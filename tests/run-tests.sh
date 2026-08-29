@@ -16337,7 +16337,7 @@ done
 
 echo "== レビュー指摘対応時に「守るべき性質」の言語化を促す記述がある（#197） =="
 
-RG197_INVARIANT_PHRASE='この修正が守ろうとしている性質を1文で書くこと'
+RG197_INVARIANT_PHRASE='この修正が守ろうとしている性質を、コミットメッセージ本文（またはこのissueへのコメント）に1文で書くこと'
 
 RG197_CLAUDE_HIT="$(grep -F "$RG197_INVARIANT_PHRASE" "${REPO_ROOT}/skills/run/references/review.md" || true)"
 if [ -n "$RG197_CLAUDE_HIT" ]; then
