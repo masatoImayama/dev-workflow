@@ -6964,12 +6964,52 @@ else
     "見つかりません: ${DOC138_CODEX_AGENT_GENERATOR}"
 fi
 
-# --- run側の救済（提案4）: skills/run/SKILL.md Step 4 が「コミット0件だが未コミットの
-#     変更がある」レーンを通常の失敗と区別して扱う記述を持つ ---
-if grep -Fq '未完」として扱う' "$DOC138_SKILL" && grep -Fq 'コミット0件だが作業ツリーに未コミットの変更が残っている' "$DOC138_SKILL"; then
+# --- run側の救済（提案4。ただし#192でcore/instructions.mdとの矛盾・事実誤認を修正）:
+#     skills/run/SKILL.md Step 4 が「コミット0件だが未コミットの変更がある」レーンを
+#     通常の失敗と区別して報告する記述を持つ ---
+if grep -Fq '未完」として報告に記録する' "$DOC138_SKILL" && grep -Fq 'コミット0件だが作業ツリーに未コミットの変更が残っている' "$DOC138_SKILL"; then
   pass "SKILL.md: レーン内ゲート判定が「コミット0件だが未コミットの変更あり」を失敗と区別している（#138）"
 else
   fail "SKILL.md: レーン内ゲート判定が「コミット0件だが未コミットの変更あり」を失敗と区別している（#138）"
+fi
+
+# --- #192: 「同一ウェーブ内で再開できる経路があればそれを優先し」というcore/instructions.md
+#     「ウェーブ内では再試行しない」と衝突する記述が無く、代わりに
+#     core/instructions.mdの規定どおり明記されていることを確認する ---
+if grep -Fq '同一ウェーブ内で再開' "$DOC138_SKILL"; then
+  fail "SKILL.md: core/instructions.mdと衝突する「同一ウェーブ内で再開」の記述が無い（#192）" \
+    "$(grep -n '同一ウェーブ内で再開' "$DOC138_SKILL")"
+else
+  pass "SKILL.md: core/instructions.mdと衝突する「同一ウェーブ内で再開」の記述が無い（#192）"
+fi
+
+if grep -Fq 'ただしウェーブ内では' "$DOC138_SKILL" && grep -Fq '再試行しない' "$DOC138_SKILL"; then
+  pass "SKILL.md: 「未完」扱いでもウェーブ内では再試行しない旨がcore/instructions.mdと整合して明記されている（#192）"
+else
+  fail "SKILL.md: 「未完」扱いでもウェーブ内では再試行しない旨がcore/instructions.mdと整合して明記されている（#192）"
+fi
+
+# --- #192: 「未コミットの変更がisolation worktreeに残るため次回そのまま使える」という
+#     事実に反する根拠が無く、代わりに新しいworktreeが作られ引き継がれない事実が明記されている ---
+if grep -Fq 'そのまま使える' "$DOC138_SKILL"; then
+  fail "SKILL.md: 事実に反する根拠（未コミットの変更が次回そのまま使える）が無い（#192）" \
+    "$(grep -n 'そのまま使える' "$DOC138_SKILL")"
+else
+  pass "SKILL.md: 事実に反する根拠（未コミットの変更が次回そのまま使える）が無い（#192）"
+fi
+
+if grep -Fq '引き継ぐ機構は存在しない' "$DOC138_SKILL"; then
+  pass "SKILL.md: 未コミットの変更が次ウェーブへ引き継がれない事実が明記されている（#192）"
+else
+  fail "SKILL.md: 未コミットの変更が次ウェーブへ引き継がれない事実が明記されている（#192）"
+fi
+
+# --- #192: 「未完」の区別が、run が実際に実行できる手順（次ウェーブ再割当て時の
+#     generatorへの再指示に一言添える）として書かれていることを確認する ---
+if grep -Fq '#138' "$DOC138_SKILL" && grep -Fq 'Step 3 のプロンプトに' "$DOC138_SKILL" && grep -Fq '一文を追加する' "$DOC138_SKILL"; then
+  pass "SKILL.md: 「未完」の区別が、次ウェーブ再割当て時にgeneratorへ一言添えるという実行可能な手順として書かれている（#192）"
+else
+  fail "SKILL.md: 「未完」の区別が、次ウェーブ再割当て時にgeneratorへ一言添えるという実行可能な手順として書かれている（#192）"
 fi
 
 # ---------------------------------------------------------------------------
