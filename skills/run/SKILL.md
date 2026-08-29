@@ -109,7 +109,11 @@ fi
 
 **重要**: 以降の**すべてのステップ**（Docker 準備・タスクループ・generator/evaluator 起動・
 commit/push・PR 作成・クリーンアップ）は、この `$EPIC_WT`（= `.claude/worktrees/<epicN>`）を
-**作業ディレクトリ**として実行すること（`cd "$EPIC_WT"` してから、または `git -C "$EPIC_WT"` で操作）。
+**作業ディレクトリ**として実行すること。**git コマンドは `cd "$EPIC_WT"` してから叩かず、
+必ず `git -C "$EPIC_WT" ...` で対象を明示する**（`cd` 直後の git 実行は「未信頼な hooks が
+走りうる」として承認プロンプトを誘発するため。issue #140）。`sandbox-exec.sh` /
+`check-readability.sh` のように呼び出し元 cwd に依存するコマンドを叩く場合に限り
+`cd "$EPIC_WT"` を使い、その直後に git を続けない。
 **メインリポのチェックアウトを epic ブランチに切り替えてはならない**（兄弟 worktree も作らない）。
 
 ### 自律実行の開始を記録
@@ -405,11 +409,12 @@ references/progress-display.md を参照。`PREV_WAVE_*` はウェーブ1の実�
 ### Step 2: WAVE_BASE を記録する
 
 ```bash
-cd "$EPIC_WT"            # 作業 worktree に居ることを保証
-git fetch origin
-git checkout "${EPIC_BRANCH}"
-git pull origin "${EPIC_BRANCH}"
-WAVE_BASE=$(git rev-parse HEAD)
+# cd してから git を叩かない（cd 直後の git 実行は「未信頼なフックが走りうる」として
+# 承認プロンプトを誘発する。git -C で対象 worktree を明示する。issue #140）
+git -C "$EPIC_WT" fetch origin
+git -C "$EPIC_WT" checkout "${EPIC_BRANCH}"
+git -C "$EPIC_WT" pull origin "${EPIC_BRANCH}"
+WAVE_BASE=$(git -C "$EPIC_WT" rev-parse HEAD)
 IMPL_START_SEC=$(date +%s)   # 「実装」フェーズ（Step 3〜4）の計測開始
 ```
 
@@ -463,8 +468,9 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/watchdog.sh" --wave --epic "$EPIC_NUM" \
   ```bash
   BASE_EVIDENCE_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
   ```
-  1) `{ echo '$ git status --short'; git status --short; } | tee -a "$BASE_EVIDENCE_FILE"`
-     （空であることを確認。空でなければ着手せず、`$BASE_EVIDENCE_FILE` のパスを添えて報告し停止すること）
+  1) `{ echo '$ git status --short --untracked-files=all'; git status --short --untracked-files=all; } | tee -a "$BASE_EVIDENCE_FILE"`
+     （空であることを確認。`--untracked-files=all` で `status.showUntrackedFiles=no` のような
+     ローカル設定による空振りを防ぐ（#195）。空でなければ着手せず、`$BASE_EVIDENCE_FILE` のパスを添えて報告し停止すること）
   2) `{ echo '$ git merge --ff-only "[WAVE_BASE]"'; git merge --ff-only "[WAVE_BASE]"; } | tee -a "$BASE_EVIDENCE_FILE"`
      （HEADをWAVE_BASEに合わせる。fetch/checkout/pullではないためネットワーク不要。
      isolation worktreeの分岐元はWAVE_BASEの祖先であるためfast-forwardは必ず成功する。
@@ -562,12 +568,16 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/watchdog.sh" --wave --epic "$EPIC_NUM" \
   コミットにまとめない）
 - **1件のタスクに失敗しても、そのタスクだけを見送って次のタスクへ進むこと。**
   見送るときは `git restore --source=HEAD --staged --worktree -- :/` で追跡ファイルを直前の
-  成功コミットの状態へ戻し、`git clean -nd -- :/`（dry-run。削除はしない）で残る未追跡ファイルを
-  報告してから次へ進むこと。その実出力を `$EVIDENCE_FILE` に追記すること（レーン全体を
-  投げ出さない）。**`git reset --hard` はベース合わせと同じ理由で `permissions.deny` に
-  ブロックされうるため、ここでも使わないこと。`-- :/` は cwd 相対にならず常にリポジトリ
-  全域を対象にするために必須（省略するとサブディレクトリから実行した際に他所の変更・
-  未追跡ファイルが戻らない／報告されないまま「残留なし」という誤った証跡が残る）**
+  成功コミットの状態へ戻し、`git status --short --untracked-files=all -- :/`（削除はしない）で
+  残る未追跡ファイルを報告してから次へ進むこと。その実出力を `$EVIDENCE_FILE` に追記すること
+  （レーン全体を投げ出さない）。**`git reset --hard` / `git clean` はベース合わせと同じ理由で
+  `permissions.deny` にブロックされうるため（`git clean` はフラグに関わらずコマンド名の
+  前方一致でブロックされうるため、dry-runの `-nd` を付けても対象になる）、ここでも使わない
+  こと。`-- :/` は cwd 相対にならず常にリポジトリ全域を対象にするために必須（省略すると
+  サブディレクトリから実行した際に他所の変更・未追跡ファイルが戻らない／報告されないまま
+  「残留なし」という誤った証跡が残る）。`--untracked-files=all`（`-uall`）も必須
+  （`status.showUntrackedFiles=no` のようなローカル設定を上書きしないと、未追跡ファイルが
+  隠れたまま「残留なし」という誤った証跡が残る）**
 - 報告は**タスク1件につき1行**とし、レーン先頭のベース検証行を1回だけ添えること。
   各行には**必ず**次の5項目を含めること: **タスク番号 / 成功・見送り / SKIP件数 /
   所要秒数 / 証跡ファイルのパス**（例:
@@ -636,6 +646,24 @@ Epic #$ARGUMENTS のウェーブ差分を先行レビューしてください。
 - レーン内ゲートに失敗したタスクは wave へ取り込まれない（generator が commit を積んでいない）。
   試行回数を保持したまま次ウェーブへ持ち越す
 - **レーン内の一部のタスクが失敗しても、そのレーンの成功分は取り込む。** レーンごと捨てない
+- **「コミット0件だが作業ツリーに未コミットの変更が残っている」レーンは、通常の失敗と区別し
+  「未完」として報告に記録する**（issue #138。generator がサンドボックス実行の完了通知を待つと
+  誤認してターンを終えた場合に起こる。実装自体は揃っていることが多い）。**ただしウェーブ内では
+  再試行しない**（`core/instructions.md`「失敗時の扱い」の規定どおり。バリア同期のため、
+  ウェーブ内の再試行は完了済みの他レーンを待たせ続けるだけになる）。isolation worktree は
+  ハーネスが generator の spawn ごとに新規作成するため、**次ウェーブでは新しい worktree が
+  作られ、旧worktreeの未コミットの変更は引き継がれない**（引き継ぐ機構は存在しない。
+  `core/roles/generator.md`「レーンの先頭はウェーブごとに新規spawnされた自分自身の先頭を指す」
+  参照）。そのため「未完」の区別は**作業の保存**のためではなく、**同じ失敗を次ウェーブで
+  繰り返させないため**に使う: 次に計算されるウェーブへは、該当タスクの issue が開いたままの
+  ため通常どおり自然に含まれる（優先度を割り込ませる仕組みは無い）。そのタスクを次ウェーブで
+  レーンへ再割当てするときは、Step 3 のプロンプトに「前回はサンドボックス実行の完了通知を
+  待っている間にターンが終わっている（#138）。バックグラウンド化されても、証跡ファイルを
+  都度読み直して完了を自分で確認し（シェルにポーリングループを書かない）、コミットに到達する
+  まで報告を終えないこと」という一文を追加すること（`core/roles/generator.md`「バックグラウンド
+  化されても『通知待ち』で停止しない」節と同じ制約であり、`until` 等のポーリングループの
+  具体例を書かない。理由は同ファイル「Bash 呼び出しにポーリングループを新たに書かない」節、
+  issue #140）
 - 品質・設計・セキュリティの観点はここでは見ない。**それらは Epic 完了後の一括レビューで見る**
 
 各 generator の報告は「タスク1件につき1行＋証跡ファイルのパス」に縮小されている
@@ -723,13 +751,16 @@ merge-base 完全一致検証は Step 5 の `merge-lane.sh` が既に行って�
 分岐を参照）。念のため冒頭で wave ブランチの存在を確認してから進む:
 
 ```bash
-cd "$EPIC_WT"
-git rev-parse --verify -q "refs/heads/wave/${EPIC_NUM}/${WAVE_NO}" >/dev/null || {
+# git は git -C で対象 worktree を明示する（cd 直後の git 実行を避ける。issue #140）
+git -C "$EPIC_WT" rev-parse --verify -q "refs/heads/wave/${EPIC_NUM}/${WAVE_NO}" >/dev/null || {
   echo "ERROR: wave/${EPIC_NUM}/${WAVE_NO} が存在しません（取り込めたレーンが0本）。Step 7を実行せずStep 1へ戻ってください"
   exit 1
 }
-git checkout "wave/${EPIC_NUM}/${WAVE_NO}"
+git -C "$EPIC_WT" checkout "wave/${EPIC_NUM}/${WAVE_NO}"
 
+# check-readability.sh は内部で bare git（cwd依存）を使うため、ここでは cd が必要
+# （git の実行そのものは上で完了しており、この cd の後に git は続かない）
+cd "$EPIC_WT"
 # 可読性ガード — waveブランチの差分に対して実行（PostToolUseフックと同じ判定）
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-readability.sh" --git
 
@@ -756,10 +787,10 @@ MERGE_SEC=$((MERGE_END_SEC - MERGE_START_SEC))
 epicへの取り込みは、waveがWAVE_BASEの子孫であるため取り込み検証通過後は必ずfast-forwardになる。
 
 ```bash
-cd "$EPIC_WT"
-git checkout "${EPIC_BRANCH}"
-git merge --ff-only "wave/${EPIC_NUM}/${WAVE_NO}"
-git push origin "${EPIC_BRANCH}"
+# git は git -C で対象 worktree を明示する（cd 直後の git 実行を避ける。issue #140）
+git -C "$EPIC_WT" checkout "${EPIC_BRANCH}"
+git -C "$EPIC_WT" merge --ff-only "wave/${EPIC_NUM}/${WAVE_NO}"
+git -C "$EPIC_WT" push origin "${EPIC_BRANCH}"
 ```
 
 **Epicへのforce pushは行わない。waveブランチはoriginへpushしない**（ローカルの一時ブランチ）。
@@ -850,8 +881,11 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/watchdog.sh" --stop
 実行する。これが「機械的ゲートの三段構成」における唯一の全テスト実行点である。
 
 ```bash
+# git は git -C で対象 worktree を明示する（cd 直後の git 実行を避ける。issue #140）。
+# 以降の sandbox-exec.sh / check-readability.sh は呼び出し元cwdに依存するため、
+# git を終えたあとで cd する（cd の直後に git を続けない）
+git -C "$EPIC_WT" checkout "${EPIC_BRANCH}"
 cd "$EPIC_WT"
-git checkout "${EPIC_BRANCH}"
 EPIC_GATE_START_SEC=$(date +%s)   # 「Epic統合ゲート」フェーズの計測開始
 
 # 1) テスト（Docker sandbox内）— 1回にまとめる。落ちたら不合格

@@ -4220,7 +4220,7 @@ esac
 RS_STEP6="$(awk '/^### Step 6:/{f=1} /^### Step 7:/{f=0} f' "$RUN_SKILL")"
 
 case "$RS_STEP6" in
-  *'git rev-parse --verify'*)
+  *'rev-parse --verify'*)
     pass "SKILL.md: Step 6 冒頭に wave ブランチ存在確認のガードがある（#41）" ;;
   *)
     fail "SKILL.md: Step 6 冒頭に wave ブランチ存在確認のガードがある（#41）" "$RS_STEP6" ;;
@@ -6914,6 +6914,105 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# generator がバックグラウンド化されたテストの「通知待ち」で停止しない（issue #138）
+#
+# ハーネスが長時間コマンドを自動でバックグラウンド化しても、それを generator 自身が
+# 待たずに「通知待ち」を宣言してターンを終えると、コミット0件のままレーンが停止する
+# （7回発生）。単に「バックグラウンド実行しない」と書くのではなく、待たずに終える
+# 誤認の理由（後続ターンが存在しない）と、完了確認の手段を明記していることを確認する。
+# ---------------------------------------------------------------------------
+
+echo "== generatorがバックグラウンド化されたテストの通知待ちで停止しない（#138） =="
+
+DOC138_GENERATOR_ROLE="${REPO_ROOT}/core/roles/generator.md"
+DOC138_AGENT_GENERATOR="${REPO_ROOT}/agents/generator.md"
+DOC138_CODEX_AGENT_GENERATOR="${REPO_ROOT}/codex-agents/generator.toml"
+DOC138_SKILL="$RUN_SKILL_FLAT"
+
+if grep -Fq 'バックグラウンド化されても「通知待ち」で停止しない' "$DOC138_GENERATOR_ROLE"; then
+  pass "core/roles/generator.md: バックグラウンド化されても停止しない旨の節がある（#138）"
+else
+  fail "core/roles/generator.md: バックグラウンド化されても停止しない旨の節がある（#138）"
+fi
+
+if grep -Fq '後から届く' "$DOC138_GENERATOR_ROLE" && grep -Fq '後続ターンは存在しない' "$DOC138_GENERATOR_ROLE"; then
+  pass "core/roles/generator.md: 通知を待てない理由（後続ターンが存在しない）が説明されている（#138）"
+else
+  fail "core/roles/generator.md: 通知を待てない理由（後続ターンが存在しない）が説明されている（#138）"
+fi
+
+if grep -Fq 'コミットに到達せずに報告を終えてはならない' "$DOC138_GENERATOR_ROLE" \
+  && grep -Fq 'git log --oneline -1' "$DOC138_GENERATOR_ROLE"; then
+  pass "core/roles/generator.md: コミット到達前に報告を終えない旨とgit log確認の記述がある（#138）"
+else
+  fail "core/roles/generator.md: コミット到達前に報告を終えない旨とgit log確認の記述がある（#138）"
+fi
+
+if [ -f "$DOC138_AGENT_GENERATOR" ] \
+  && grep -Fq 'バックグラウンド化されても「通知待ち」で停止しない' "$DOC138_AGENT_GENERATOR"; then
+  pass "agents/generator.md: 正本の#138追記内容が反映されている"
+else
+  fail "agents/generator.md: 正本の#138追記内容が反映されている" \
+    "見つかりません: ${DOC138_AGENT_GENERATOR}"
+fi
+
+if [ -f "$DOC138_CODEX_AGENT_GENERATOR" ] \
+  && grep -Fq 'バックグラウンド化されても「通知待ち」で停止しない' "$DOC138_CODEX_AGENT_GENERATOR"; then
+  pass "codex-agents/generator.toml: 正本の#138追記内容が反映されている"
+else
+  fail "codex-agents/generator.toml: 正本の#138追記内容が反映されている" \
+    "見つかりません: ${DOC138_CODEX_AGENT_GENERATOR}"
+fi
+
+# --- run側の救済（提案4。ただし#192でcore/instructions.mdとの矛盾・事実誤認を修正）:
+#     skills/run/SKILL.md Step 4 が「コミット0件だが未コミットの変更がある」レーンを
+#     通常の失敗と区別して報告する記述を持つ ---
+if grep -Fq '未完」として報告に記録する' "$DOC138_SKILL" && grep -Fq 'コミット0件だが作業ツリーに未コミットの変更が残っている' "$DOC138_SKILL"; then
+  pass "SKILL.md: レーン内ゲート判定が「コミット0件だが未コミットの変更あり」を失敗と区別している（#138）"
+else
+  fail "SKILL.md: レーン内ゲート判定が「コミット0件だが未コミットの変更あり」を失敗と区別している（#138）"
+fi
+
+# --- #192: 「同一ウェーブ内で再開できる経路があればそれを優先し」というcore/instructions.md
+#     「ウェーブ内では再試行しない」と衝突する記述が無く、代わりに
+#     core/instructions.mdの規定どおり明記されていることを確認する ---
+if grep -Fq '同一ウェーブ内で再開' "$DOC138_SKILL"; then
+  fail "SKILL.md: core/instructions.mdと衝突する「同一ウェーブ内で再開」の記述が無い（#192）" \
+    "$(grep -n '同一ウェーブ内で再開' "$DOC138_SKILL")"
+else
+  pass "SKILL.md: core/instructions.mdと衝突する「同一ウェーブ内で再開」の記述が無い（#192）"
+fi
+
+if grep -Fq 'ただしウェーブ内では' "$DOC138_SKILL" && grep -Fq '再試行しない' "$DOC138_SKILL"; then
+  pass "SKILL.md: 「未完」扱いでもウェーブ内では再試行しない旨がcore/instructions.mdと整合して明記されている（#192）"
+else
+  fail "SKILL.md: 「未完」扱いでもウェーブ内では再試行しない旨がcore/instructions.mdと整合して明記されている（#192）"
+fi
+
+# --- #192: 「未コミットの変更がisolation worktreeに残るため次回そのまま使える」という
+#     事実に反する根拠が無く、代わりに新しいworktreeが作られ引き継がれない事実が明記されている ---
+if grep -Fq 'そのまま使える' "$DOC138_SKILL"; then
+  fail "SKILL.md: 事実に反する根拠（未コミットの変更が次回そのまま使える）が無い（#192）" \
+    "$(grep -n 'そのまま使える' "$DOC138_SKILL")"
+else
+  pass "SKILL.md: 事実に反する根拠（未コミットの変更が次回そのまま使える）が無い（#192）"
+fi
+
+if grep -Fq '引き継ぐ機構は存在しない' "$DOC138_SKILL"; then
+  pass "SKILL.md: 未コミットの変更が次ウェーブへ引き継がれない事実が明記されている（#192）"
+else
+  fail "SKILL.md: 未コミットの変更が次ウェーブへ引き継がれない事実が明記されている（#192）"
+fi
+
+# --- #192: 「未完」の区別が、run が実際に実行できる手順（次ウェーブ再割当て時の
+#     generatorへの再指示に一言添える）として書かれていることを確認する ---
+if grep -Fq '#138' "$DOC138_SKILL" && grep -Fq 'Step 3 のプロンプトに' "$DOC138_SKILL" && grep -Fq '一文を追加する' "$DOC138_SKILL"; then
+  pass "SKILL.md: 「未完」の区別が、次ウェーブ再割当て時にgeneratorへ一言添えるという実行可能な手順として書かれている（#192）"
+else
+  fail "SKILL.md: 「未完」の区別が、次ウェーブ再割当て時にgeneratorへ一言添えるという実行可能な手順として書かれている（#192）"
+fi
+
+# ---------------------------------------------------------------------------
 echo "== Task issueテンプレートの「- Epic: #N」行規定（レビュー#56） =="
 
 # plan-waves.sh の load_from_gh は本文の「- Epic: #N」行で他Epicのタスクを除外する
@@ -7603,6 +7702,111 @@ assert_exit_code "adapters/claude/build.sh --check が通る（#154）" 0 "$DOC1
 DOC154_CODEX_BUILD_CHECK="$(bash "${REPO_ROOT}/adapters/codex/build.sh" --check 2>&1)"
 DOC154_CODEX_BUILD_CHECK_EXIT=$?
 assert_exit_code "adapters/codex/build.sh --check が通る（#154）" 0 "$DOC154_CODEX_BUILD_CHECK_EXIT"
+
+# ---------------------------------------------------------------------------
+# 役割・スキル定義が permissions.deny 常連コマンドを規定していないことの回帰テスト
+# （issue #140・Epic #174 完了基準4。issue #191 で検査対象の抜けと正規表現の
+# 取りこぼしを修正）
+#
+# `git reset --hard` / `git clean` / `git push --force`（`--force-with-lease` /
+# `-f` を含む） / `git branch -D` / `rm -rf`（`-fr` / `-r -f` 等の順序違いを含む）は
+# 一般的な安全設定の permissions.deny に載っている代表例（Epic #143 のウェーブ2で
+# 全3レーンが `git reset --hard` の deny により着手不能になった実例。
+# core/roles/generator.md「渡されたベースにHEADを合わせる」参照）。deny はプロジェクト側の
+# allow で上書きできないため、役割・スキル定義がこれらを実行例として書いてしまうと
+# 許可設定では原理的に救えない。**deny ルールはフラグの有無に関わらずコマンド名の
+# 前方一致でブロックされるため**、dry-run（例: 旧 `git clean -nd`）であっても対象になる。
+#
+# 「コマンド位置」（行頭・`;`・`{`・`&&`・`||` の直後）に出現する場合だけを検出し、
+# 「`git reset --hard` は使わない」のような説明文中のバッククォート表記は誤検出しない。
+#
+# 検査対象は手で保守されるスキル・ロール定義（生成物である agents/・codex-agents/ を含む）を
+# 網羅する。`skills-codex/dev-workflow-run/SKILL.md` は adapters/codex/build.sh が生成しない
+# 手保守ファイルであり、本Epic自身が `git clean` の記述を書き換えた対象のため必須（#191）。
+# `core/references/` も正本の一部として含める。
+# ---------------------------------------------------------------------------
+
+echo "== 役割・スキル定義に permissions.deny 常連コマンドの規定が残っていない（issue #140） =="
+
+DENY140_PATTERN='(^|[;{]|&&|\|\|)[[:space:]]*(git reset --hard|git clean|git branch -D|git push[^|]*(--force(-with-lease)?|[[:space:]]-f)|rm[[:space:]]+(-[rRf]{2,}|-[rR]+[[:space:]]+-f+|-f+[[:space:]]+-[rR]+))([[:space:]]|$)'
+
+check_no_deny_common_commands() {
+  # check_no_deny_common_commands <説明> <検査対象（ファイルまたはディレクトリ）>
+  local desc="$1" target="$2"
+  local hits
+  if [ ! -e "$target" ]; then
+    fail "$desc" "検査対象が存在しません: ${target}（対象消失時に無条件passしないための検査。#191）"
+    return
+  fi
+  hits="$(grep -rnE "$DENY140_PATTERN" "$target" 2>/dev/null || true)"
+  if [ -z "$hits" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "$hits"
+  fi
+}
+
+check_no_deny_common_commands "core/roles/ に deny常連コマンドの実行例が無い（#140）" "${REPO_ROOT}/core/roles"
+check_no_deny_common_commands "core/instructions.md に deny常連コマンドの実行例が無い（#140）" "${REPO_ROOT}/core/instructions.md"
+check_no_deny_common_commands "core/references/ に deny常連コマンドの実行例が無い（#191）" "${REPO_ROOT}/core/references"
+check_no_deny_common_commands "adapters/claude/overlays/ に deny常連コマンドの実行例が無い（#140）" "${REPO_ROOT}/adapters/claude/overlays"
+check_no_deny_common_commands "adapters/codex/overlays/ に deny常連コマンドの実行例が無い（#140）" "${REPO_ROOT}/adapters/codex/overlays"
+check_no_deny_common_commands "skills/run/ に deny常連コマンドの実行例が無い（#140）" "${REPO_ROOT}/skills/run"
+check_no_deny_common_commands "skills-codex/dev-workflow-run/ に deny常連コマンドの実行例が無い（#191）" "${REPO_ROOT}/skills-codex/dev-workflow-run"
+check_no_deny_common_commands "agents/ に deny常連コマンドの実行例が無い（#140・生成物）" "${REPO_ROOT}/agents"
+check_no_deny_common_commands "codex-agents/ に deny常連コマンドの実行例が無い（#140・生成物）" "${REPO_ROOT}/codex-agents"
+
+# --- 検出パターン自体が実際の実行例に反応することを確認する
+#     （正規表現の誤りで検査が常に無反応になっていないことのフィクスチャ確認。
+#     #191で取りこぼしが判明した --force-with-lease / rm -fr / rm -r -f / git push -f も
+#     個別に確認する） ---
+
+DENY140_FIXTURE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-deny140-fixture.XXXXXX")"
+cat > "${DENY140_FIXTURE_DIR}/bad-example.md" <<'EOF'
+```bash
+git reset --hard "$WAVE_BASE"
+```
+EOF
+DENY140_FIXTURE_HITS="$(grep -rnE "$DENY140_PATTERN" "$DENY140_FIXTURE_DIR" 2>/dev/null || true)"
+if [ -n "$DENY140_FIXTURE_HITS" ]; then
+  pass "#140: 検出パターンが実際の git reset --hard 実行例に反応する（検査の前提確認）"
+else
+  fail "#140: 検出パターンが実際の git reset --hard 実行例に反応する（検査の前提確認）" \
+    "反応しませんでした（正規表現が壊れている可能性）"
+fi
+
+DENY191_CASES_FILE="${DENY140_FIXTURE_DIR}/hit-cases-191.txt"
+cat > "$DENY191_CASES_FILE" <<'EOF'
+git push --force-with-lease origin x
+git push -f origin x
+rm -fr build
+rm -r -f build
+EOF
+while IFS= read -r denyLine; do
+  denyHit="$(printf '%s\n' "$denyLine" | grep -nE "$DENY140_PATTERN" || true)"
+  if [ -n "$denyHit" ]; then
+    pass "#191: 検出パターンが「${denyLine}」に反応する（取りこぼし修正の確認）"
+  else
+    fail "#191: 検出パターンが「${denyLine}」に反応する（取りこぼし修正の確認）" \
+      "反応しませんでした"
+  fi
+done < "$DENY191_CASES_FILE"
+
+# --- 「使わない」という説明文（バッククォート表記）や、置き換え後の非破壊コマンド
+#     （git status --short 等）は誤検出しないことも確認する ---
+
+cat > "${DENY140_FIXTURE_DIR}/good-example.md" <<'EOF'
+**`git reset --hard`は使わない。**`git clean`もdenyの対象になりうる。
+git status --short -- :/
+rm -r file.txt
+rm -f file.txt
+EOF
+DENY140_PROSE_HITS="$(grep -nE "$DENY140_PATTERN" "${DENY140_FIXTURE_DIR}/good-example.md" 2>/dev/null || true)"
+if [ -z "$DENY140_PROSE_HITS" ]; then
+  pass "#140: 説明文中のバッククォート表記・置き換え後の非破壊コマンドは誤検出しない"
+else
+  fail "#140: 説明文中のバッククォート表記・置き換え後の非破壊コマンドは誤検出しない" "$DENY140_PROSE_HITS"
+fi
 
 echo "== Epic一括レビューに「変更50ファイル超」しきい値の3分岐を入れる（#74） =="
 
@@ -8714,6 +8918,130 @@ CS_BOTHIN_OUTPUT="$(printf 'Tests:       0 skipped, 5 passed, 5 total\n' | bash 
 assert_eq "--fileと標準入力の併存: --fileを優先（go形式のskips=2のまま）" "2" "$(cs_field skips "$CS_BOTHIN_OUTPUT")"
 assert_eq "--fileと標準入力の併存: runnerもgoのまま" "go" "$(cs_field runner "$CS_BOTHIN_OUTPUT")"
 
+# --- ケース12（回帰・issue #142）: jest の `PASS <file>` / `FAIL <file>` 行が
+#     Go判定の `^(ok|FAIL|PASS)` と字面衝突し、runner=go・skips=0（実際は1件）に
+#     誤検出されていた事象を、issue本文のログ断片をfixtureにして固定する。
+#     「skips=unknown」ではなく「skips=0（誤り）」として観測される点が最も危険だった。 ---
+CS_JEST_MISDETECT_INPUT="$(cat <<'JEST_LOG_142'
+yarn run v1.22.19
+$ jest
+PASS src/components/Foo.test.tsx
+FAIL src/components/Bar.test.tsx
+  ● Bar renders correctly
+
+    expect(received).toBe(expected)
+
+Test Suites: 5 failed, 69 passed, 74 total
+Tests:       13 failed, 1 skipped, 899 passed, 913 total
+Snapshots:   0 total
+Time:        12.345s
+JEST_LOG_142
+)"
+CS_JEST_MISDETECT_OUTPUT="$(printf '%s\n' "$CS_JEST_MISDETECT_INPUT" | bash "$COUNT_SKIPS_SCRIPT")"
+CS_JEST_MISDETECT_EXIT=$?
+assert_eq "回帰(#142): PASS/FAIL行を含むjestログでもrunner=jest（goに誤検出しない）" \
+  "jest" "$(cs_field runner "$CS_JEST_MISDETECT_OUTPUT")"
+assert_eq "回帰(#142): PASS/FAIL行を含むjestログでskips=1（0件に誤検出しない）" \
+  "1" "$(cs_field skips "$CS_JEST_MISDETECT_OUTPUT")"
+assert_exit_code "回帰(#142): exit 0（正しく数えられた）" 0 "$CS_JEST_MISDETECT_EXIT"
+
+# --- ケース13: --runner jest で自動判定を上書きし、あいまいなログでも強制的にjestとして数える ---
+CS_RUNNER_FORCE_OUTPUT="$(printf '%s\n' "$CS_JEST_MISDETECT_INPUT" | bash "$COUNT_SKIPS_SCRIPT" --runner jest)"
+CS_RUNNER_FORCE_EXIT=$?
+assert_eq "--runner jest: runner=jestを強制する" "jest" "$(cs_field runner "$CS_RUNNER_FORCE_OUTPUT")"
+assert_eq "--runner jest: skips=1" "1" "$(cs_field skips "$CS_RUNNER_FORCE_OUTPUT")"
+assert_exit_code "--runner jest: exit 0" 0 "$CS_RUNNER_FORCE_EXIT"
+
+# --- ケース14: --runner go / --runner pytest も同様に自動判定を上書きする ---
+CS_RUNNER_GO_OUTPUT="$(printf -- '--- SKIP: T1 (0.00s)\n--- SKIP: T2 (0.00s)\nok  \tpkg\t0.01s\n' | bash "$COUNT_SKIPS_SCRIPT" --runner go)"
+assert_eq "--runner go: skips=2 / runner=go" "go" "$(cs_field runner "$CS_RUNNER_GO_OUTPUT")"
+assert_eq "--runner go: skips=2" "2" "$(cs_field skips "$CS_RUNNER_GO_OUTPUT")"
+
+CS_RUNNER_PYTEST_OUTPUT="$(printf -- '========== test session starts ==========\n1 passed, 2 skipped in 0.01s\n' | bash "$COUNT_SKIPS_SCRIPT" --runner pytest)"
+assert_eq "--runner pytest: skips=2 / runner=pytest" "pytest" "$(cs_field runner "$CS_RUNNER_PYTEST_OUTPUT")"
+assert_eq "--runner pytest: skips=2" "2" "$(cs_field skips "$CS_RUNNER_PYTEST_OUTPUT")"
+
+# --- ケース15: --pattern と --runner が両方指定された場合、--pattern を優先する ---
+CS_RUNNER_AND_PATTERN_OUTPUT="$(printf 'skip - foo\nskip - bar\n' | bash "$COUNT_SKIPS_SCRIPT" --runner go --pattern '^skip - ')"
+assert_eq "--runnerと--patternの併存: --patternを優先しrunner=custom" "custom" "$(cs_field runner "$CS_RUNNER_AND_PATTERN_OUTPUT")"
+assert_eq "--runnerと--patternの併存: skips=2" "2" "$(cs_field skips "$CS_RUNNER_AND_PATTERN_OUTPUT")"
+
+# --- ケース16: --runner に未知の値を渡すと引数エラー（exit 2） ---
+bash "$COUNT_SKIPS_SCRIPT" --runner rspec >/dev/null 2>&1
+assert_exit_code "--runner に未知の値でexit 2" 2 "$?"
+
+bash "$COUNT_SKIPS_SCRIPT" --runner >/dev/null 2>&1
+assert_exit_code "--runner に値なしでexit 2" 2 "$?"
+
+# --- ケース17: --help は使い方を表示してexit 0（引数エラーにしない） ---
+CS_HELP_OUTPUT="$(bash "$COUNT_SKIPS_SCRIPT" --help)"
+CS_HELP_EXIT=$?
+assert_exit_code "--help: exit 0" 0 "$CS_HELP_EXIT"
+case "$CS_HELP_OUTPUT" in
+  *'使い方'*'--runner'*)
+    pass "--help: 使い方に--runnerの説明が含まれる（#142）" ;;
+  *)
+    fail "--help: 使い方に--runnerの説明が含まれる（#142）" "$CS_HELP_OUTPUT" ;;
+esac
+
+# --- ケース18（回帰・issue #187）: jest判定は `Test Suites:` / `Tests:` / `Snapshots:` の
+#     いずれかで決まるが、件数抽出は `Tests:` 行にしか依存できない。`Test Suites:` だけの
+#     ログでは `Tests:` 行が存在せず、以前は `COUNT="${COUNT:-0}"` が抽出失敗を0件に潰し
+#     `skips=0 / exit 0`（#142と同種の「判定できないのに0件と答える」誤り）を返していた。
+#     修正後は skips=unknown / exit 1 になることを固定する ---
+CS_JEST_NOTESTS_INPUT="$(printf -- 'PASS a.test.ts\nTest Suites: 1 passed, 1 total\n')"
+CS_JEST_NOTESTS_OUTPUT="$(printf '%s\n' "$CS_JEST_NOTESTS_INPUT" | bash "$COUNT_SKIPS_SCRIPT")"
+CS_JEST_NOTESTS_EXIT=$?
+assert_eq "回帰(#187): Test Suites:だけのjestログはskips=unknown（0件と誤報告しない）" \
+  "unknown" "$(cs_field skips "$CS_JEST_NOTESTS_OUTPUT")"
+assert_eq "回帰(#187): Test Suites:だけのjestログでもrunner=jest（判定自体は維持）" \
+  "jest" "$(cs_field runner "$CS_JEST_NOTESTS_OUTPUT")"
+assert_exit_code "回帰(#187): exit 1（fail loud）" 1 "$CS_JEST_NOTESTS_EXIT"
+
+# --- ケース19（回帰・issue #187）: `Snapshots:` だけのログも同様にskips=unknownになる ---
+CS_JEST_SNAPONLY_OUTPUT="$(printf 'Snapshots: 0 total\n' | bash "$COUNT_SKIPS_SCRIPT")"
+CS_JEST_SNAPONLY_EXIT=$?
+assert_eq "回帰(#187): Snapshots:だけのjestログはskips=unknown" \
+  "unknown" "$(cs_field skips "$CS_JEST_SNAPONLY_OUTPUT")"
+assert_exit_code "回帰(#187): Snapshots:だけのjestログはexit 1" 1 "$CS_JEST_SNAPONLY_EXIT"
+
+# --- ケース20（issue #187）: --runner jest を強制指定してもTests:行が無ければ
+#     同様にunknownへ倒れる（--runner分岐と自動判定分岐で抽出ロジックを共用しているため） ---
+CS_RUNNERJEST_NOTESTS_OUTPUT="$(printf 'Test Suites: 1 passed, 1 total\n' | bash "$COUNT_SKIPS_SCRIPT" --runner jest)"
+CS_RUNNERJEST_NOTESTS_EXIT=$?
+assert_eq "issue #187: --runner jestでもTests:行が無ければskips=unknown" \
+  "unknown" "$(cs_field skips "$CS_RUNNERJEST_NOTESTS_OUTPUT")"
+assert_exit_code "issue #187: --runner jestでもTests:行が無ければexit 1" 1 "$CS_RUNNERJEST_NOTESTS_EXIT"
+
+# --- ケース21（issue #187）: jestでTests:行はあるがskip 0件（`skipped`という語が出ない）は
+#     正当な0件として扱う（unknownと混同しない） ---
+CS_JEST_ZERO_OUTPUT="$(printf 'Tests:       0 skipped, 5 passed, 5 total\n' | bash "$COUNT_SKIPS_SCRIPT")"
+CS_JEST_ZERO_EXIT=$?
+assert_eq "issue #187: jestでTests:行があればskipped無しでも正当な0件" \
+  "0" "$(cs_field skips "$CS_JEST_ZERO_OUTPUT")"
+assert_exit_code "issue #187: jestの正当な0件はexit 0のまま" 0 "$CS_JEST_ZERO_EXIT"
+
+# --- ケース22（issue #187）: pytest側の ${COUNT:-0} も同様に見直す。
+#     `test session starts` はあるが最終サマリ行（` in <秒>s`）が無い（出力が途中で切れた等）
+#     ログは、以前はskips=0（誤り）になっていた。修正後はskips=unknownへ倒す ---
+CS_PYTEST_NOSUMMARY_INPUT="$(printf -- '========== test session starts ==========\ncollecting ...\n')"
+CS_PYTEST_NOSUMMARY_OUTPUT="$(printf '%s\n' "$CS_PYTEST_NOSUMMARY_INPUT" | bash "$COUNT_SKIPS_SCRIPT")"
+CS_PYTEST_NOSUMMARY_EXIT=$?
+assert_eq "issue #187: サマリ行の無いpytestログはskips=unknown（0件と誤報告しない）" \
+  "unknown" "$(cs_field skips "$CS_PYTEST_NOSUMMARY_OUTPUT")"
+assert_eq "issue #187: サマリ行の無いpytestログでもrunner=pytest（判定自体は維持）" \
+  "pytest" "$(cs_field runner "$CS_PYTEST_NOSUMMARY_OUTPUT")"
+assert_exit_code "issue #187: サマリ行の無いpytestログはexit 1（fail loud）" 1 "$CS_PYTEST_NOSUMMARY_EXIT"
+
+# --- ケース23（issue #187）: pytestでサマリ行はあるがskip 0件（`skipped`という語が出ない）は
+#     正当な0件として扱う ---
+CS_PYTEST_ZERO_INPUT="$(printf -- '========== test session starts ==========\n5 passed in 0.01s\n')"
+CS_PYTEST_ZERO_OUTPUT="$(printf '%s\n' "$CS_PYTEST_ZERO_INPUT" | bash "$COUNT_SKIPS_SCRIPT")"
+CS_PYTEST_ZERO_EXIT=$?
+assert_eq "issue #187: pytestでサマリ行があればskipped無しでも正当な0件" \
+  "0" "$(cs_field skips "$CS_PYTEST_ZERO_OUTPUT")"
+assert_exit_code "issue #187: pytestの正当な0件はexit 0のまま" 0 "$CS_PYTEST_ZERO_EXIT"
+
 # ---------------------------------------------------------------------------
 # cleanup-lane-worktrees.sh（取り込み済みレーンworktreeの片付け・Task #93）
 #
@@ -9708,6 +10036,15 @@ case "$H97_README_CS" in
     pass "README.md: count-skips.sh節に出力・判定順序・DEV_WORKFLOW_SKIP_PATTERNが書かれている（#97）" ;;
   *)
     fail "README.md: count-skips.sh節に出力・判定順序・DEV_WORKFLOW_SKIP_PATTERNが書かれている（#97）" \
+      "$H97_README_CS" ;;
+esac
+
+# --- README.md: --runner オプションとjest優先判定（誤検出対策）が書かれている（#142） ---
+case "$H97_README_CS" in
+  *'--runner'*'jest と判定できる'*'Go と判定できる'*)
+    pass "README.md: count-skips.sh節に--runnerオプションとjest優先の判定順序が書かれている（#142）" ;;
+  *)
+    fail "README.md: count-skips.sh節に--runnerオプションとjest優先の判定順序が書かれている（#142）" \
       "$H97_README_CS" ;;
 esac
 
@@ -14317,11 +14654,17 @@ for H161_FILE in "core/roles/generator.md" "README.md" "skills/run/SKILL.md" \
   fi
 done
 
-# --- タスク見送り時の作業ツリー復旧が非破壊手順（git restore + git clean -nd）に置き換わっている（#161, #169） ---
+# --- タスク見送り時の作業ツリー復旧が非破壊手順（git restore + git status --short）に
+#     置き換わっている（#161, #169, #140） ---
 # -- :/ が付いていることも要求する（#167: pathspec省略はcwd相対になり、サブディレクトリから
 # 実行するとリポジトリ他所の変更・未追跡ファイルが戻らない／報告されないまま
 # 「残留なし」という誤った証跡が残るため）
 # skills/run/SKILL.md も対象に加える（#169。実際に取りこぼしが起きたのはこのファイル）
+# `git clean -nd` は dry-run でもコマンド名の前方一致で permissions.deny にブロックされうる
+# ため、`git status --short` に置き換えた（issue #140、Epic #174 完了基準4）。
+# --untracked-files=all が付いていることも要求する（#193: status.showUntrackedFiles=no の
+# ローカル設定があると --short の出力が常に空になり、未追跡ファイルが残っていても
+# 「残留なし」という誤った証跡が残るため。-uall はこの設定を明示的に上書きする）
 for H161_FILE in "core/roles/generator.md" "README.md" "skills/run/SKILL.md" \
   "skills-codex/dev-workflow-run/SKILL.md"; do
   case "$H161_FILE" in
@@ -14329,11 +14672,11 @@ for H161_FILE in "core/roles/generator.md" "README.md" "skills/run/SKILL.md" \
     *)                   H161_PATH="${REPO_ROOT}/${H161_FILE}" ;;
   esac
   if grep -Fq 'git restore --source=HEAD --staged --worktree -- :/' "$H161_PATH" \
-    && grep -Fq 'git clean -nd -- :/' "$H161_PATH"; then
-    pass "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd -- :/ に置き換わっている（#161, #167）"
+    && grep -Fq 'git status --short --untracked-files=all -- :/' "$H161_PATH"; then
+    pass "${H161_FILE}: 見送り時の復旧が git restore + git status --short --untracked-files=all -- :/ に置き換わっている（#161, #167, #140, #193）"
   else
-    fail "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd -- :/ に置き換わっている（#161, #167）" \
-      "$(grep -n 'git restore\|git clean' "$H161_PATH")"
+    fail "${H161_FILE}: 見送り時の復旧が git restore + git status --short --untracked-files=all -- :/ に置き換わっている（#161, #167, #140, #193）" \
+      "$(grep -n 'git restore\|git clean\|git status --short' "$H161_PATH")"
   fi
 done
 
@@ -15705,6 +16048,276 @@ assert_eq "#185: 誤発火しないので診断WARNINGも出力されない" \
   "" "$(cat "$SPD185_STDERR" 2>/dev/null)"
 assert_eq "#185: コピー先の内容がソースと一致する（末端ファイルまで正しく展開される）" \
   "x" "$(cat "${SPD185_LANE}/packages/pkg9/node_modules/pkg10/src/lib/internal/file.txt" 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
+# check-readability.sh: generated/ ディレクトリ配下の codegen 生成物を
+# 誤検知しない（回帰防止 #141）
+#
+# `frontend/src/generated/graphql.ts`（graphql-codegen の client preset 相当）を
+# 模した fixture: GraphQL ドキュメントの AST を1行のJSONとして出力する codegen
+# ツールの実出力形状を再現し、issue #141 で報告された「極端に長い行」の誤検知
+# （ミニファイ/難読化コードとして誤判定される）を回帰テストとして固定する。
+#
+# 併せて同一テストブロックで次の2点も担保する（Epic #174「#141の修正で、本物の
+# ミニファイ/難読化コードの検出を弱めないこと」「判定できなかったときに安全側へ
+# 倒れるかを設計すること」への対応）:
+#   - `generated/` / `__generated__/` は許可されるが、同じ内容でも許可リストの
+#     外（generated/以外の通常ディレクトリ）や、一般的すぎるため意図的に許可
+#     リストへ加えなかった `gen/`（issue #141 の提案の一部を採用しなかった判断
+#     の回帰確認）は引き続き検出される
+#   - 本物のミニファイ/難読化コード（generated/の外）は許可リスト追加後も
+#     引き続き検出される（検出力を弱めていないことの担保）
+# ---------------------------------------------------------------------------
+
+echo "== check-readability.sh: generated/ ディレクトリの誤検知回帰（#141） =="
+
+RG141_TMP_REPO="$(make_temp_repo)"
+
+# codegen が出力する「1行に集約されたJSONドキュメント」を模したペイロード
+# （graphql-codegen の client preset は GraphQL AST をこの形で1行出力する。
+# issue #141 の実測では最長行 6115文字）
+RG141_LONGLINE_PAYLOAD="$(head -c 6200 /dev/zero | tr '\0' 'x')"
+
+RG141_GENERATED_DIR="frontend/src/generated"
+RG141_GENERATED_FILE="${RG141_GENERATED_DIR}/graphql.ts"
+RG141_DUNDER_DIR="frontend/src/__generated__"
+RG141_DUNDER_FILE="${RG141_DUNDER_DIR}/graphql.ts"
+RG141_PLAIN_DIR="frontend/src/api"
+RG141_PLAIN_FILE="${RG141_PLAIN_DIR}/graphql.ts"
+RG141_GEN_DIR="frontend/src/gen"
+RG141_GEN_FILE="${RG141_GEN_DIR}/graphql.ts"
+
+(
+  cd "$RG141_TMP_REPO" || exit 1
+  mkdir -p "$RG141_GENERATED_DIR" "$RG141_DUNDER_DIR" "$RG141_PLAIN_DIR" "$RG141_GEN_DIR"
+  printf 'export const documents = {"%s": Doc};\n' "$RG141_LONGLINE_PAYLOAD" > "$RG141_GENERATED_FILE"
+  printf 'export const documents = {"%s": Doc};\n' "$RG141_LONGLINE_PAYLOAD" > "$RG141_DUNDER_FILE"
+  printf 'export const documents = {"%s": Doc};\n' "$RG141_LONGLINE_PAYLOAD" > "$RG141_PLAIN_FILE"
+  printf 'export const documents = {"%s": Doc};\n' "$RG141_LONGLINE_PAYLOAD" > "$RG141_GEN_FILE"
+) >/dev/null 2>&1
+
+# --- generated/ 配下（frontend/src/generated/graphql.ts 相当）は誤検知しない ---
+RG141_GENERATED_EXIT=0
+(
+  cd "$RG141_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG141_GENERATED_FILE" >/dev/null 2>&1
+)
+RG141_GENERATED_EXIT=$?
+assert_exit_code "generated/配下のcodegen生成物（長い1行）は誤検知しない（#141）" 0 "$RG141_GENERATED_EXIT"
+
+# --- __generated__/ 配下も同様に誤検知しない ---
+RG141_DUNDER_EXIT=0
+(
+  cd "$RG141_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG141_DUNDER_FILE" >/dev/null 2>&1
+)
+RG141_DUNDER_EXIT=$?
+assert_exit_code "__generated__/配下のcodegen生成物（長い1行）は誤検知しない（#141）" 0 "$RG141_DUNDER_EXIT"
+
+# --- 同じ内容でもgenerated/の外なら引き続き検出される（検出力は弱めていない） ---
+RG141_PLAIN_EXIT=0
+(
+  cd "$RG141_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG141_PLAIN_FILE" >/dev/null 2>&1
+)
+RG141_PLAIN_EXIT=$?
+assert_exit_code "generated/の外にある同一内容の長い1行は引き続き検出される（検出力の維持）" 2 "$RG141_PLAIN_EXIT"
+
+# --- gen/（一般語で判定できない）配下は意図的に許可リストへ加えていないため引き続き検出される ---
+RG141_GEN_EXIT=0
+(
+  cd "$RG141_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG141_GEN_FILE" >/dev/null 2>&1
+)
+RG141_GEN_EXIT=$?
+assert_exit_code "gen/（一般語で判定できない）配下は許可リストに加えず引き続き検出される（安全側に倒す設計）" 2 "$RG141_GEN_EXIT"
+
+# --- 本物のミニファイ/難読化コード（generated/の外）も引き続き検出される ---
+RG141_MINIFIED_FILE="frontend/src/app/bundle.js"
+(
+  cd "$RG141_TMP_REPO" || exit 1
+  mkdir -p "$(dirname "$RG141_MINIFIED_FILE")"
+  {
+    i=0
+    while [ "$i" -lt 400 ]; do
+      printf 'var v%d=function(a,b){return a+b};' "$i"
+      i=$((i + 1))
+    done
+    printf '\n'
+  } > "$RG141_MINIFIED_FILE"
+) >/dev/null 2>&1
+
+RG141_MINIFIED_EXIT=0
+(
+  cd "$RG141_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG141_MINIFIED_FILE" >/dev/null 2>&1
+)
+RG141_MINIFIED_EXIT=$?
+assert_exit_code "本物のミニファイコード（generated/の外）は許可リスト追加後も引き続き検出される" 2 "$RG141_MINIFIED_EXIT"
+
+# ---------------------------------------------------------------------------
+# check-readability.sh: リポジトリ直下の generated/ が許可されない誤検知の回帰
+# （issue #188）
+#
+# `*/generated/*` は先頭に `/` を要求するため、パスが `generated/graphql.ts` の形
+# （先頭ディレクトリそのものが generated。`git diff --name-only` / `git ls-files` が
+# 返すリポジトリ相対パスで、protobuf 出力・Go の生成物・モノレポのパッケージルート等で
+# 実際に起こる形）だと一致しなかった。回帰テストが `frontend/src/generated/...` という
+# 入れ子ケースだけを fixture にしていたため、この穴が #141 の回帰テストでは見えていなかった。
+#
+# 併せて、`generated/*` を先頭一致で足しても `pregenerated/` や `generated-old/` のような
+# 紛らわしい名前には誤って一致しないこと（検出力を弱めていないこと）も固定する。
+# ---------------------------------------------------------------------------
+
+echo "== check-readability.sh: リポジトリ直下のgenerated/が許可されない誤検知の回帰（#188） =="
+
+RG188_TMP_REPO="$(make_temp_repo)"
+
+RG188_TOPLEVEL_GENERATED_DIR="generated"
+RG188_TOPLEVEL_GENERATED_FILE="${RG188_TOPLEVEL_GENERATED_DIR}/graphql.ts"
+RG188_TOPLEVEL_DUNDER_DIR="__generated__"
+RG188_TOPLEVEL_DUNDER_FILE="${RG188_TOPLEVEL_DUNDER_DIR}/graphql.ts"
+RG188_PREGEN_DIR="pregenerated"
+RG188_PREGEN_FILE="${RG188_PREGEN_DIR}/graphql.ts"
+RG188_GENOLD_DIR="generated-old"
+RG188_GENOLD_FILE="${RG188_GENOLD_DIR}/graphql.ts"
+
+(
+  cd "$RG188_TMP_REPO" || exit 1
+  mkdir -p "$RG188_TOPLEVEL_GENERATED_DIR" "$RG188_TOPLEVEL_DUNDER_DIR" "$RG188_PREGEN_DIR" "$RG188_GENOLD_DIR"
+  printf 'export const documents = {"%s": Doc};\n' "$RG141_LONGLINE_PAYLOAD" > "$RG188_TOPLEVEL_GENERATED_FILE"
+  printf 'export const documents = {"%s": Doc};\n' "$RG141_LONGLINE_PAYLOAD" > "$RG188_TOPLEVEL_DUNDER_FILE"
+  printf 'export const documents = {"%s": Doc};\n' "$RG141_LONGLINE_PAYLOAD" > "$RG188_PREGEN_FILE"
+  printf 'export const documents = {"%s": Doc};\n' "$RG141_LONGLINE_PAYLOAD" > "$RG188_GENOLD_FILE"
+) >/dev/null 2>&1
+
+# --- リポジトリ直下の generated/（generated/graphql.ts相当）は誤検知しない ---
+RG188_TOPLEVEL_EXIT=0
+(
+  cd "$RG188_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG188_TOPLEVEL_GENERATED_FILE" >/dev/null 2>&1
+)
+RG188_TOPLEVEL_EXIT=$?
+assert_exit_code "リポジトリ直下のgenerated/配下（長い1行）は誤検知しない（#188）" 0 "$RG188_TOPLEVEL_EXIT"
+
+# --- --staged モード（git diff --cached --name-only相当のリポジトリ相対パス。
+#     実際の run 経路そのもの）でも同様に許可される。pregenerated/ / generated-old/ の
+#     ような本来ブロックされるべきfixtureは一緒にステージしない
+#     （--stagedは全ステージ済みファイルの違反を集約して返すため、一緒にステージすると
+#     このテストの意図（generated/自体の許可を見る）が別ファイルの違反で覆い隠される） ---
+RG188_STAGED_EXIT=0
+(
+  cd "$RG188_TMP_REPO" || exit 1
+  git add "$RG188_TOPLEVEL_GENERATED_FILE" "$RG188_TOPLEVEL_DUNDER_FILE" >/dev/null 2>&1
+  bash "$CHECK_READABILITY_SCRIPT" --staged >/dev/null 2>&1
+)
+RG188_STAGED_EXIT=$?
+assert_exit_code "--staged経由（実際の run 経路）でもリポジトリ直下のgenerated/は誤検知しない（#188）" 0 "$RG188_STAGED_EXIT"
+
+# --- リポジトリ直下の __generated__/ も同様に誤検知しない ---
+RG188_TOPLEVEL_DUNDER_EXIT=0
+(
+  cd "$RG188_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG188_TOPLEVEL_DUNDER_FILE" >/dev/null 2>&1
+)
+RG188_TOPLEVEL_DUNDER_EXIT=$?
+assert_exit_code "リポジトリ直下の__generated__/配下（長い1行）は誤検知しない（#188）" 0 "$RG188_TOPLEVEL_DUNDER_EXIT"
+
+# --- pregenerated/（先頭ディレクトリ名がgeneratedと完全一致しない）は誤って許可されない
+#     （検出力を弱めていないことの担保） ---
+RG188_PREGEN_EXIT=0
+(
+  cd "$RG188_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG188_PREGEN_FILE" >/dev/null 2>&1
+)
+RG188_PREGEN_EXIT=$?
+assert_exit_code "pregenerated/は先頭一致に誤って一致せず引き続き検出される（検出力の維持・#188）" 2 "$RG188_PREGEN_EXIT"
+
+# --- generated-old/（先頭ディレクトリ名がgeneratedと完全一致しない）も同様に誤って許可されない ---
+RG188_GENOLD_EXIT=0
+(
+  cd "$RG188_TMP_REPO" || exit 1
+  bash "$CHECK_READABILITY_SCRIPT" "$RG188_GENOLD_FILE" >/dev/null 2>&1
+)
+RG188_GENOLD_EXIT=$?
+assert_exit_code "generated-old/は先頭一致に誤って一致せず引き続き検出される（検出力の維持・#188）" 2 "$RG188_GENOLD_EXIT"
+
+# ---------------------------------------------------------------------------
+# run が generator へ渡すプロンプト（Step 3/4）に、core/roles/generator.md が禁じる
+# シェルのポーリングループ例を書き込んでいないことの回帰（issue #194）
+#
+# #192 の書き直しで、次ウェーブ再割当て時に Step 3 のプロンプトへ添える一文として
+# `until grep -q ... done; do sleep 30; done` という具体例が紛れ込んだ。これは同じ差分の
+# #189 対応が core/roles/generator.md に明記した「シェルの until ... do ... done のような
+# ループ相当の待ち方を書かない（issue #140: 承認プロンプトを誘発する）」という禁止事項と
+# 正面から衝突する。run のプロンプトは generator にとって「目の前の具体的な指示」であり、
+# 抽象的なロール規定より優先されやすいため、一度紛れ込むと実害が大きい。
+#
+# 検査範囲は「generatorへ渡すプロンプトの記述」に限定する（run 自身が実行する正当なシェルの
+# for ループ等まで誤検出しないため）。具体的には、generator 起動・再指示に関わる Step 3
+# （Claude版はStep 4のレーン内ゲート確認も、Step 3のプロンプトに追記する一文の記述元として含む）
+# の範囲だけを抽出して調べる。
+# ---------------------------------------------------------------------------
+
+echo "== run スキル: generatorへの指示にシェルのポーリングループ例を書かない（#194） =="
+
+RG194_POLL_PATTERN='\b(until|while|for)\b.*\bdo\b.*\bdone\b'
+
+RG194_CLAUDE_STEP_REGION="$(sed -n '/^### Step 3:/,/^### Step 5:/p' "${REPO_ROOT}/skills/run/SKILL.md")"
+RG194_CLAUDE_HITS="$(echo "$RG194_CLAUDE_STEP_REGION" | grep -nE "$RG194_POLL_PATTERN" || true)"
+if [ -z "$RG194_CLAUDE_HITS" ]; then
+  pass "skills/run/SKILL.md: Step 3/4（generatorへ渡すプロンプトの記述範囲）にシェルのポーリングループ例が無い（#194）"
+else
+  fail "skills/run/SKILL.md: Step 3/4（generatorへ渡すプロンプトの記述範囲）にシェルのポーリングループ例が無い（#194）" \
+    "$RG194_CLAUDE_HITS"
+fi
+
+RG194_CODEX_STEP_REGION="$(sed -n '/^### Step 3:/,/^### Step 4:/p' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md")"
+RG194_CODEX_HITS="$(echo "$RG194_CODEX_STEP_REGION" | grep -nE "$RG194_POLL_PATTERN" || true)"
+if [ -z "$RG194_CODEX_HITS" ]; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: Step 3（generatorへ渡すプロンプトの記述範囲）にシェルのポーリングループ例が無い（#194）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: Step 3（generatorへ渡すプロンプトの記述範囲）にシェルのポーリングループ例が無い（#194）" \
+    "$RG194_CODEX_HITS"
+fi
+
+# --- 今回の再発そのもの（`until ... done; do sleep 30; done`）も併せて固定する ---
+
+if ! grep -Fq 'until grep -q' "${REPO_ROOT}/skills/run/SKILL.md"; then
+  pass "skills/run/SKILL.md: #192由来の具体的な until ポーリング文言が残っていない（#194）"
+else
+  fail "skills/run/SKILL.md: #192由来の具体的な until ポーリング文言が残っていない（#194）"
+fi
+
+# ---------------------------------------------------------------------------
+# 「0. 渡されたベースにHEADを合わせる」手順1（作業ツリーが空であることを確認する安全弁）の
+# git status --short に --untracked-files=all が付いていることの回帰（issue #195）
+#
+# #193 は見送り時の作業ツリー復旧（上記H161の回帰テスト対象）には --untracked-files=all を
+# 付けたが、実装着手前のベース合わせ手順1は素の `git status --short` のまま据え置かれた。
+# status.showUntrackedFiles=no のローカル設定では出力が常に空になり、汚れた作業ツリーの上で
+# 着手したうえ「空だった」という誤った証跡が残ってしまう（#193 と同質の失敗モード）。
+# BASE_EVIDENCE_FILE 行に絞って検査し、H161（EVIDENCE_FILE = 見送り時の復旧）の対象と
+# 混同しないようにする。
+# ---------------------------------------------------------------------------
+
+echo "== ベース合わせ手順1のgit status --shortに--untracked-files=allが付いている（#195） =="
+
+for RG195_FILE in "core/roles/generator.md" "skills/run/SKILL.md" \
+  "skills-codex/dev-workflow-run/SKILL.md" "agents/generator.md" "codex-agents/generator.toml"; do
+  case "$RG195_FILE" in
+    skills/run/SKILL.md) RG195_PATH="$RUN_SKILL_FLAT" ;;
+    *)                   RG195_PATH="${REPO_ROOT}/${RG195_FILE}" ;;
+  esac
+  RG195_LINE="$(grep -n 'BASE_EVIDENCE_FILE' "$RG195_PATH" | grep -F 'git status --short' || true)"
+  RG195_MISSING_FLAG="$(echo "$RG195_LINE" | grep -Fv 'git status --short --untracked-files=all' || true)"
+  if [ -n "$RG195_LINE" ] && [ -z "$RG195_MISSING_FLAG" ]; then
+    pass "${RG195_FILE}: ベース合わせ手順1のgit status --shortに--untracked-files=allが付いている（#195）"
+  else
+    fail "${RG195_FILE}: ベース合わせ手順1のgit status --shortに--untracked-files=allが付いている（#195）" \
+      "$RG195_LINE"
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # 結果集計

@@ -397,7 +397,7 @@ Phase は人間向けの区分として残るが、**実行順序の決定には
 - ベース合わせ（`git merge --ff-only <WAVE_BASE>`）・プロジェクト固有の準備コマンド・共有ディレクトリのセットアップは、**レーンの先頭で1回だけ**行う
 - 2件目以降のタスクは、1件目で得たリポジトリの理解（ディレクトリ構成・テストコマンド・規約）をそのまま使い、調べ直さない
 - タスク1件につき独立したコミットを積む。run はタスク単位で issue をクローズする
-- **1件のタスクに失敗しても、レーン全体を投げ出さない。** 失敗したタスクは `git restore --source=HEAD --staged --worktree -- :/` で追跡ファイルをHEADの状態へ戻し、`git clean -nd -- :/`（dry-run。削除はしない）で残る未追跡ファイルを報告してから見送り、次のタスクへ進む（`git reset --hard` はベース合わせと同じ理由で`permissions.deny`にブロックされうるため、ここでも使わない。`-- :/` は cwd 相対にならず常にリポジトリ全域を対象にするために必須）
+- **1件のタスクに失敗しても、レーン全体を投げ出さない。** 失敗したタスクは `git restore --source=HEAD --staged --worktree -- :/` で追跡ファイルをHEADの状態へ戻し、`git status --short --untracked-files=all -- :/`（削除はしない）で残る未追跡ファイルを報告してから見送り、次のタスクへ進む（`git reset --hard` / `git clean` はベース合わせと同じ理由で`permissions.deny`にブロックされうるため、ここでも使わない。`git clean`はフラグに関わらずコマンド名の前方一致でブロックされうるため、dry-runの`-nd`を付けても対象になる。`-- :/` は cwd 相対にならず常にリポジトリ全域を対象にするために必須。`--untracked-files=all`（`-uall`）は `status.showUntrackedFiles=no` のようなローカル設定を上書きし、未追跡ファイルが隠れたまま「残留なし」という誤った証跡が残るのを防ぐために必須）
 
 これは Epic #42 の実測（generator 81k〜150k トークン／タスク）のうち、**タスクごとの cold start が占める分**——system prompt の読み直しとリポジトリの再調査——を取り除くための変更である。従来のサブバッチ方式が持っていた「サブバッチごとに全レーンの完了を待つ」バリア同期も同時に消える。
 
@@ -611,8 +611,9 @@ Epic issue 本文にこの節があれば、run がその内容を Epic 開始�
 「SKIP されたテストがあれば件数と内容を報告に含めること」という自然言語の依頼は、`tail` で目視して `--- SKIP` が見えなかったことをもって「SKIP 0件」と誤報告する事故を招いた（依存物が未配置だとテストは無言で `SKIP` され `ok` と表示されるため）。レーン内ゲート（generator）・統合ゲート（run）のどちらも、この自己申告ではなく `count-skips.sh` で機械的に数える。
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" [--file <テスト出力のログ>] [--pattern <ERE>]
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" [--file <テスト出力のログ>] [--pattern <ERE>] [--runner <go|jest|pytest>]
 <テスト出力> | bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --help
 ```
 
 出力（1行1項目・機械可読、この順で必ず3行）:
@@ -623,17 +624,20 @@ runner=<go|pytest|jest|custom|unknown>
 pattern=<実際に使ったERE または none>
 ```
 
-終了コードは `0`=数えられた `1`=数えられなかった（`skips=unknown`。fail loud） `2`=引数エラー。
+終了コードは `0`=数えられた `1`=数えられなかった（`skips=unknown`。fail loud） `2`=引数エラー。`--help` は使い方を表示して `0` で終了する。
 
 判定順序（上から最初に一致したものを使う）:
 
 1. `--pattern` または環境変数 `DEV_WORKFLOW_SKIP_PATTERN` があれば `runner=custom` としてそのEREに一致する行数を数える（最優先）
-2. Go と判定できる（`^--- (PASS|FAIL|SKIP)` または `^(ok|FAIL|PASS)` を含む）→ `^--- SKIP` の一致行数
-3. jest と判定できる（`^Tests:` を含む）→ `Tests:` 行の `<N> skipped` の N
+2. `--runner <go|jest|pytest>` が指定されていれば、自動判定を行わずそのランナーの抽出ロジックを強制する（誤検出時に呼び出し側から矯正する手段。#142）
+3. jest と判定できる（`^Test Suites:` / `^Tests:` / `^Snapshots:` のいずれかを含む）→ `Tests:` 行の `<N> skipped` の N
 4. pytest と判定できる（`test session starts` を含む）→ サマリ行の最後の `<N> skipped` の N
-5. どれにも当てはまらない → `skips=unknown` / `runner=unknown` / exit 1
+5. Go と判定できる（`^--- (PASS|FAIL|SKIP)` または `^(ok|FAIL|PASS)` を含む）→ `^--- SKIP` の一致行数
+6. どれにも当てはまらない → `skips=unknown` / `runner=unknown` / exit 1
 
-built-in ランナー（go/jest/pytest）と異なる出力形式のプロジェクトでは既定で `skips=unknown` になる。この場合に必ず「0件」として扱ってはならない（下記「Epic の `## SKIPパターン` 節」で `DEV_WORKFLOW_SKIP_PATTERN` を設定する）。
+jest はテストファイルごとに `PASS <file>` / `FAIL <file>` という行を出力し、これがGo判定の `^(ok|FAIL|PASS)` と字面衝突する。そのため jest 判定をGo判定より先に行う（#142。以前は逆順だったため、jestのログが `runner=go` に誤判定され、実際にはSKIPがあっても `skips=0`（exit 0）という最も危険な誤りが返っていた）。
+
+built-in ランナー（go/jest/pytest）と異なる出力形式のプロジェクトでは既定で `skips=unknown` になる。この場合に必ず「0件」として扱ってはならない（下記「Epic の `## SKIPパターン` 節」で `DEV_WORKFLOW_SKIP_PATTERN` を設定するか、誤検出であれば `--runner` で矯正する）。
 
 ### Epic の `## SKIPパターン` 節
 
@@ -944,7 +948,9 @@ bash "${CLAUDE_PLUGIN_ROOT}/adapters/common/install-git-hooks.sh" --uninstall .
 
 ### 誤検知対策
 
-- **許可リスト:** lock ファイル、`__snapshots__`、`fixtures`/`testdata`、`node_modules`/`vendor`、`*.min.*`、`*.svg`、`*.generated.*`、gitignore 済みファイル等は自動で除外
+- **許可リスト:** lock ファイル、`__snapshots__`、`fixtures`/`testdata`、`node_modules`/`vendor`、`*.min.*`、`*.svg`、`*.generated.*`、**`generated/`・`__generated__/`（ディレクトリ名）**、gitignore 済みファイル等は自動で除外
+  - `generated/` 配下の除外は、`graphql-codegen` の client preset のように**1ファイルへ集約された生成物**（例: `frontend/src/generated/graphql.ts`）が極端に長い1行として出力され、ミニファイ/難読化コードと誤検知される問題への対処（#141）。ディレクトリ名は `generated` / `__generated__` に限定し、**`gen/` のような一般的すぎる短縮名は含めない**。「gen」は codegen 出力の慣用名でもあるが単なる一般語でもあり、これを許可すると「ディレクトリ名を gen にするだけで検査を回避できる」経路になってしまう。生成物かどうか確証が持てない場合は許可リストを狭く保ち、検査を効かせたままにする（安全側に倒す）
+  - この誤検知は `readability-guard:allow` コメントでは解消できない。生成物は再生成のたびに書き換わるためコメントが消え、「codegen再実行で差分が出ないこと」を完了条件に持つワークフローではその確認を必ず壊してしまう
 - **エスケープハッチ:** どうしてもエンコード済みデータが必要な場合、ファイル内に `readability-guard:allow <理由>` と書くと当該ファイルを除外。**人間可読な正当化をソースに残させる**ことで抑止の理念と整合させる
 
 ### 調整（環境変数）

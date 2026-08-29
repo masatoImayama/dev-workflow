@@ -308,8 +308,9 @@ Task #<番号> を実装してください。
   ```bash
   BASE_EVIDENCE_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
   ```
-  1) `{ echo '$ git status --short'; git status --short; } | tee -a "$BASE_EVIDENCE_FILE"`
-     （空であることを確認。空でなければ実装を始めず、`$BASE_EVIDENCE_FILE` のパスを添えて報告し停止すること）
+  1) `{ echo '$ git status --short --untracked-files=all'; git status --short --untracked-files=all; } | tee -a "$BASE_EVIDENCE_FILE"`
+     （空であることを確認。`--untracked-files=all` で `status.showUntrackedFiles=no` のような
+     ローカル設定による空振りを防ぐ（#195）。空でなければ実装を始めず、`$BASE_EVIDENCE_FILE` のパスを添えて報告し停止すること）
   2) `{ echo '$ git merge --ff-only <WAVE_BASE>'; git merge --ff-only <WAVE_BASE>; } | tee -a "$BASE_EVIDENCE_FILE"`
      （HEADをWAVE_BASEに合わせる。fetch/checkout/pullではないためネットワーク不要。
      `git reset --hard` は一般的な安全設定でブロックされるため使わない。既に WAVE_BASE の
@@ -380,10 +381,14 @@ Task #<番号> を実装してください。
   コミットにまとめない
 - **1件のタスクに失敗しても、そのタスクだけを見送って次のタスクへ進むこと。**
   見送るときは `git restore --source=HEAD --staged --worktree -- :/` で追跡ファイルを
-  HEADの状態へ戻し、`git clean -nd -- :/`（dry-run。削除はしない）で残る未追跡ファイルを報告し、
-  その実出力を `$EVIDENCE_FILE` に追記すること（レーン全体を投げ出さない。
-  `git reset --hard` はベース合わせと同じ理由で一般的な安全設定にブロックされうるため、
-  ここでも使わない。`-- :/` は cwd 相対にならず常にリポジトリ全域を対象にするために必須）
+  HEADの状態へ戻し、`git status --short --untracked-files=all -- :/`（削除はしない）で残る
+  未追跡ファイルを報告し、その実出力を `$EVIDENCE_FILE` に追記すること（レーン全体を
+  投げ出さない。`git reset --hard` / `git clean` はベース合わせと同じ理由で一般的な安全設定に
+  ブロックされうるため、ここでも使わない。`git clean` はフラグに関わらずコマンド名の
+  前方一致でブロックされうるため、dry-runの `-nd` を付けても対象になる。`-- :/` は cwd 相対に
+  ならず常にリポジトリ全域を対象にするために必須。`--untracked-files=all`（`-uall`）も必須
+  （`status.showUntrackedFiles=no` のようなローカル設定を上書きしないと未追跡ファイルが
+  隠れたまま「残留なし」という誤った証跡が残る）
 - 報告は**タスク1件につき1行**とし、「ベース検証」の行はレーンの先頭で1回だけ添えること。
   各行には**必ず**次の5項目を含めること: **タスク番号 / 成功・見送り / SKIP件数 /
   所要秒数 / 証跡ファイルのパス**（例:

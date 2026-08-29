@@ -129,6 +129,39 @@ json_string() {
 # ── 許可リスト（このパターンに一致するパスは検査をスキップ）────────────
 # 生成物・ロックファイル・テストフィクスチャ・ベンダリングされた依存など、
 # 「人間可読でないことが正当」かつ「ソースの正本ではない」ものを除外する。
+#
+# ディレクトリ名パターン（*/generated/*, */__generated__/*）について（#141）:
+#   `*.generated.*` はファイル名パターンのみを見るため、`frontend/src/generated/graphql.ts`
+#   のように「ディレクトリ名が generated」なケースを取りこぼしていた
+#   （graphql-codegen の client preset 等、生成物を1ファイルにまとめて出力する
+#   codegen ツールで典型的に発生する）。この誤検知は `readability-guard:allow` の
+#   コメント追記でも回避できない: 生成物は再生成で全面的に書き換わるためコメントが
+#   消え、「codegen再実行で差分が出ないこと」を完了条件に持つワークフローでは
+#   その確認を必ず壊してしまう。ハーネス側の許可リストで解決するのが筋。
+#
+#   `generated` / `__generated__` は「生成物であること」を意図して付けられる
+#   固有性の高いディレクトリ名であり、既存の `__snapshots__` と同種の性質を持つ
+#   （手書きソースがこの名前を名乗ることは通常ない）ため許可リストに加える。
+#
+#   一方で issue #141 が提案していた `*/gen/*` は**採用しない**。「gen」は
+#   codegen 出力の慣用名であると同時に、単なる一般的な短縮語でもあり
+#   （手書きの `gen/` ディレクトリが実在しうる）、`*/gen/*` を許可すると
+#   「ディレクトリ名を gen にするだけでミニファイ/難読化コードの検査を
+#   回避できる」経路を作ってしまう。それは #141 が同時に要求している
+#   「本物のミニファイ/難読化コードの検出を弱めない」と衝突する。
+#   判定できない（＝生成物か手書きか確証が持てない）場合は許可リスト側を
+#   狭く保ち、検査を効かせたままにする（安全側に倒す）。
+#
+# リポジトリ直下の generated/ が素通りしていた件について（#188）:
+#   `*/generated/*` は先頭に `/` を要求するため、パスが `generated/graphql.ts`
+#   のように「先頭ディレクトリそのものが generated」な形（`git diff --name-only` /
+#   `git ls-files` が返すリポジトリ相対パスで、protobuf 出力・Go の生成物・
+#   モノレポのパッケージルート等でよく起こる）には一致しなかった。
+#   `generated/*` / `__generated__/*` を先頭一致形として追加する。
+#   glob の case マッチは文字列全体に対して行われるため、`generated/*` は
+#   「先頭ディレクトリが厳密に generated であるパス」にしか一致せず、
+#   `pregenerated/foo` や `generated-old/foo`（先頭ディレクトリ名が
+#   `generated` と完全一致しない）には一致しない。検出力は弱めていない。
 is_allowlisted() {
   case "$1" in
     *.lock|*-lock.json|*-lock.yaml|*.lockb) return 0 ;;
@@ -138,6 +171,7 @@ is_allowlisted() {
     *.min.js|*.min.css|*.min.mjs) return 0 ;;
     *.svg|*.ico|*.woff|*.woff2|*.ttf|*.eot) return 0 ;;
     *.generated.*|*.gen.go|*.pb.go|*_pb2.py|*.g.dart|*.freezed.dart) return 0 ;;
+    generated/*|__generated__/*|*/generated/*|*/__generated__/*) return 0 ;;
     *.map) return 0 ;;
   esac
   return 1
