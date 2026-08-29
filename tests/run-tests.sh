@@ -16395,6 +16395,52 @@ for RG197_FLAT_NAME in EVALUATOR_ROLE_FLAT AGENT_EVALUATOR_FLAT CODEX_AGENT_EVAL
 done
 
 # ---------------------------------------------------------------------------
+# heredoc本文にdev-workflow内部のissue番号を埋め込んでいないこと（issue #198）
+#
+# R2（指摘のissue化）が作成するreview issueテンプレートに、dev-workflow自身のissue番号
+# `#197` が heredoc 本文（`gh issue create --body` の中身）として埋め込まれ、そのまま
+# 駆動先プロジェクトのissue本文として作成される事故があった（#198）。dev-workflowは
+# 駆動先プロジェクトでSKILL.mdを実行するプラグインであり、駆動先リポジトリの`#197`は
+# 無関係なissueを指す。GitHubはこれをリンクとしてレンダリングしてしまう。
+#
+# これは#197（「修正が同じ性質の欠陥を別の場所に作り直す」問題）の修正自身が同じ失敗を
+# 犯した実例であるため、個別ケースの回帰テストではなく、`skills/`・`skills-codex/`配下の
+# 全heredoc本文を機械的に走査する不変条件テストとして固定する（#198「併せて検討すること」）。
+#
+# heredocの区切りは全ファイルで`cat <<'BODY'`〜`^BODY$`の1種類のみ（事前調査で確認済み）。
+# 判定対象はheredoc本文の中だけに限る。heredocの外側にある手順書側の説明文
+# （`### 指摘対応時に「性質」を言語化させる（#197）`等）は、駆動先issue本文には漏れないため
+# 対象外でよい（review.md「対応時の指示」節参照）。
+#
+# `#[0-9]+`（`#`の直後が数字）という固定issue番号のパターンだけを検査する。
+# プレースホルダ（`#[epic番号]` / `#[番号]` / `#XX` 等）は`#`の直後が`[`や`X`であり
+# 数字ではないため一致しない。`$ARGUMENTS`由来の動的な参照も数字を直接書かないため
+# 一致しない。誤検出ゼロであることは、既存の全heredoc（epic/task issueテンプレート、
+# スキップ済みタスクのコメント、PR本文）を対象に確認済み。
+# ---------------------------------------------------------------------------
+
+echo "== heredoc本文にdev-workflow内部のissue番号が埋め込まれていない（#198） =="
+
+RG198_LEAK_DETAIL=""
+for RG198_FILE in $(find "${REPO_ROOT}/skills" "${REPO_ROOT}/skills-codex" -name "*.md" | sort); do
+  RG198_BODY_REGION="$(awk '/cat <<.BODY./{inblk=1; next} inblk && /^BODY$/{inblk=0; next} inblk' "$RG198_FILE")"
+  [ -n "$RG198_BODY_REGION" ] || continue
+  RG198_HIT="$(printf '%s\n' "$RG198_BODY_REGION" | grep -noE '#[0-9]+' || true)"
+  if [ -n "$RG198_HIT" ]; then
+    RG198_LEAK_DETAIL="${RG198_LEAK_DETAIL}${RG198_FILE}: ${RG198_HIT}
+"
+  fi
+done
+
+if [ -z "$RG198_LEAK_DETAIL" ]; then
+  pass "skills/ skills-codex/: 全heredoc本文にdev-workflow内部のissue番号が埋め込まれていない（#198）"
+else
+  fail "skills/ skills-codex/: 全heredoc本文にdev-workflow内部のissue番号が埋め込まれていない（#198）" \
+    "$RG198_LEAK_DETAIL"
+fi
+unset RG198_FILE RG198_BODY_REGION RG198_HIT RG198_LEAK_DETAIL
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
