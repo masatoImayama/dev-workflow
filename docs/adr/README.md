@@ -17,6 +17,7 @@
 | [0007](0007-share-prepared-dirs-copy-fallback.md) | symlink 失敗時のコピー・フォールバック（Windows バインドマウント環境） | Windows + Docker Desktop 環境での `ln -s` 失敗（issue #139）そのものは再現できなかったため symlink 方式は据え置き、`link-failed` になったエントリに限り実体コピー（`cp -a`。ハードリンクは不採用）を追加で試みる防御を入れる | 承認済み（Task #139） |
 | [0008](0008-node-modules-named-volume-deferred.md) | レーン専用 `node_modules` の named volume 化は据え置く | レーンごとの named volume 化は「コンテナ=epic」共有コンテナモデルと構造的に衝突し `docs/adr/0002` 決定2の却下理由と一致するため実装しない。`--print-plan` が compose/none モードでも `cache_volume` 行を誤って出力していたバグは修正した | 承認済み・据え置き（Task #104） |
 | [0009](0009-flaky-suite-mitigation-deferred.md) | 統合ゲートの flaky スイート対策（issue #114）は前提未確認のため見送る | issue #114 が対策要否判定の前提とした「並行 install の解消」が #176 の実測でまだ確認されていないため、独立した flaky/回帰判定ロジックの実装を見送る。単純なリトライは前提の確認状況に関わらず不採用。再開条件は #176 の実測結果に連動させる | 承認済み・見送り（Task #114） |
+| [0010](0010-plugin-script-permission-wrapper-deferred.md) | プラグインスクリプトの許可集約ラッパー（issue #131）は観測不足のため実装を保留する | 狭い許可運用チームでの許可エントリ増殖再発の有無・より低コストなワイルドカード許可1本での緩和の有効性・Codex `execpolicy` 側の対応可否のいずれも本タスクの範囲では確認できなかったため、ラッパー実装（(A)）・wontfix確定（(B)）のいずれも行わず判断を保留する。再開条件を明記した | 保留（Task #131） |
 
 ## 命名・運用ルール
 
