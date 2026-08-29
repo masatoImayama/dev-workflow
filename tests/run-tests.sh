@@ -14588,6 +14588,9 @@ done
 # skills/run/SKILL.md も対象に加える（#169。実際に取りこぼしが起きたのはこのファイル）
 # `git clean -nd` は dry-run でもコマンド名の前方一致で permissions.deny にブロックされうる
 # ため、`git status --short` に置き換えた（issue #140、Epic #174 完了基準4）。
+# --untracked-files=all が付いていることも要求する（#193: status.showUntrackedFiles=no の
+# ローカル設定があると --short の出力が常に空になり、未追跡ファイルが残っていても
+# 「残留なし」という誤った証跡が残るため。-uall はこの設定を明示的に上書きする）
 for H161_FILE in "core/roles/generator.md" "README.md" "skills/run/SKILL.md" \
   "skills-codex/dev-workflow-run/SKILL.md"; do
   case "$H161_FILE" in
@@ -14595,10 +14598,10 @@ for H161_FILE in "core/roles/generator.md" "README.md" "skills/run/SKILL.md" \
     *)                   H161_PATH="${REPO_ROOT}/${H161_FILE}" ;;
   esac
   if grep -Fq 'git restore --source=HEAD --staged --worktree -- :/' "$H161_PATH" \
-    && grep -Fq 'git status --short -- :/' "$H161_PATH"; then
-    pass "${H161_FILE}: 見送り時の復旧が git restore + git status --short -- :/ に置き換わっている（#161, #167, #140）"
+    && grep -Fq 'git status --short --untracked-files=all -- :/' "$H161_PATH"; then
+    pass "${H161_FILE}: 見送り時の復旧が git restore + git status --short --untracked-files=all -- :/ に置き換わっている（#161, #167, #140, #193）"
   else
-    fail "${H161_FILE}: 見送り時の復旧が git restore + git status --short -- :/ に置き換わっている（#161, #167, #140）" \
+    fail "${H161_FILE}: 見送り時の復旧が git restore + git status --short --untracked-files=all -- :/ に置き換わっている（#161, #167, #140, #193）" \
       "$(grep -n 'git restore\|git clean\|git status --short' "$H161_PATH")"
   fi
 done
