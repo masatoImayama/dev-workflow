@@ -4220,7 +4220,7 @@ esac
 RS_STEP6="$(awk '/^### Step 6:/{f=1} /^### Step 7:/{f=0} f' "$RUN_SKILL")"
 
 case "$RS_STEP6" in
-  *'git rev-parse --verify'*)
+  *'rev-parse --verify'*)
     pass "SKILL.md: Step 6 冒頭に wave ブランチ存在確認のガードがある（#41）" ;;
   *)
     fail "SKILL.md: Step 6 冒頭に wave ブランチ存在確認のガードがある（#41）" "$RS_STEP6" ;;
@@ -7603,6 +7603,77 @@ assert_exit_code "adapters/claude/build.sh --check が通る（#154）" 0 "$DOC1
 DOC154_CODEX_BUILD_CHECK="$(bash "${REPO_ROOT}/adapters/codex/build.sh" --check 2>&1)"
 DOC154_CODEX_BUILD_CHECK_EXIT=$?
 assert_exit_code "adapters/codex/build.sh --check が通る（#154）" 0 "$DOC154_CODEX_BUILD_CHECK_EXIT"
+
+# ---------------------------------------------------------------------------
+# 役割・スキル定義が permissions.deny 常連コマンドを規定していないことの回帰テスト
+# （issue #140・Epic #174 完了基準4）
+#
+# `git reset --hard` / `git clean` / `git push --force` / `git branch -D` / `rm -rf` は
+# 一般的な安全設定の permissions.deny に載っている代表例（Epic #143 のウェーブ2で
+# 全3レーンが `git reset --hard` の deny により着手不能になった実例。
+# core/roles/generator.md「渡されたベースにHEADを合わせる」参照）。deny はプロジェクト側の
+# allow で上書きできないため、役割・スキル定義がこれらを実行例として書いてしまうと
+# 許可設定では原理的に救えない。**deny ルールはフラグの有無に関わらずコマンド名の
+# 前方一致でブロックされるため**、dry-run（例: 旧 `git clean -nd`）であっても対象になる。
+#
+# 「コマンド位置」（行頭・`;`・`{`・`&&`・`||` の直後）に出現する場合だけを検出し、
+# 「`git reset --hard` は使わない」のような説明文中のバッククォート表記は誤検出しない。
+# ---------------------------------------------------------------------------
+
+echo "== 役割・スキル定義に permissions.deny 常連コマンドの規定が残っていない（issue #140） =="
+
+DENY140_PATTERN='(^|[;{]|&&|\|\|)[[:space:]]*(git reset --hard|git clean|git branch -D|git push[^|]*--force|rm -rf)([[:space:]]|$)'
+
+check_no_deny_common_commands() {
+  # check_no_deny_common_commands <説明> <検査対象（ファイルまたはディレクトリ）>
+  local desc="$1" target="$2"
+  local hits
+  hits="$(grep -rnE "$DENY140_PATTERN" "$target" 2>/dev/null || true)"
+  if [ -z "$hits" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "$hits"
+  fi
+}
+
+check_no_deny_common_commands "core/roles/ に deny常連コマンドの実行例が無い（#140）" "${REPO_ROOT}/core/roles"
+check_no_deny_common_commands "core/instructions.md に deny常連コマンドの実行例が無い（#140）" "${REPO_ROOT}/core/instructions.md"
+check_no_deny_common_commands "adapters/claude/overlays/ に deny常連コマンドの実行例が無い（#140）" "${REPO_ROOT}/adapters/claude/overlays"
+check_no_deny_common_commands "adapters/codex/overlays/ に deny常連コマンドの実行例が無い（#140）" "${REPO_ROOT}/adapters/codex/overlays"
+check_no_deny_common_commands "skills/run/ に deny常連コマンドの実行例が無い（#140）" "${REPO_ROOT}/skills/run"
+check_no_deny_common_commands "agents/ に deny常連コマンドの実行例が無い（#140・生成物）" "${REPO_ROOT}/agents"
+check_no_deny_common_commands "codex-agents/ に deny常連コマンドの実行例が無い（#140・生成物）" "${REPO_ROOT}/codex-agents"
+
+# --- 検出パターン自体が実際の実行例に反応することを確認する
+#     （正規表現の誤りで検査が常に無反応になっていないことのフィクスチャ確認） ---
+
+DENY140_FIXTURE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-deny140-fixture.XXXXXX")"
+cat > "${DENY140_FIXTURE_DIR}/bad-example.md" <<'EOF'
+```bash
+git reset --hard "$WAVE_BASE"
+```
+EOF
+DENY140_FIXTURE_HITS="$(grep -rnE "$DENY140_PATTERN" "$DENY140_FIXTURE_DIR" 2>/dev/null || true)"
+if [ -n "$DENY140_FIXTURE_HITS" ]; then
+  pass "#140: 検出パターンが実際の git reset --hard 実行例に反応する（検査の前提確認）"
+else
+  fail "#140: 検出パターンが実際の git reset --hard 実行例に反応する（検査の前提確認）" \
+    "反応しませんでした（正規表現が壊れている可能性）"
+fi
+
+# --- 「使わない」という説明文（バッククォート表記）や、置き換え後の非破壊コマンド
+#     （git status --short 等）は誤検出しないことも確認する ---
+
+cat > "${DENY140_FIXTURE_DIR}/good-example.md" <<'EOF'
+**`git reset --hard`は使わない。**`git clean`もdenyの対象になりうる。
+git status --short -- :/
+EOF
+DENY140_PROSE_HITS="$(grep -nE "$DENY140_PATTERN" "${DENY140_FIXTURE_DIR}/good-example.md" 2>/dev/null || true)"
+if [ -z "$DENY140_PROSE_HITS" ]; then
+  pass "#140: 説明文中のバッククォート表記・置き換え後の非破壊コマンドは誤検出しない"
+else
+  fail "#140: 説明文中のバッククォート表記・置き換え後の非破壊コマンドは誤検出しない" "$DENY140_PROSE_HITS"
+fi
 
 echo "== Epic一括レビューに「変更50ファイル超」しきい値の3分岐を入れる（#74） =="
 
@@ -14317,11 +14388,14 @@ for H161_FILE in "core/roles/generator.md" "README.md" "skills/run/SKILL.md" \
   fi
 done
 
-# --- タスク見送り時の作業ツリー復旧が非破壊手順（git restore + git clean -nd）に置き換わっている（#161, #169） ---
+# --- タスク見送り時の作業ツリー復旧が非破壊手順（git restore + git status --short）に
+#     置き換わっている（#161, #169, #140） ---
 # -- :/ が付いていることも要求する（#167: pathspec省略はcwd相対になり、サブディレクトリから
 # 実行するとリポジトリ他所の変更・未追跡ファイルが戻らない／報告されないまま
 # 「残留なし」という誤った証跡が残るため）
 # skills/run/SKILL.md も対象に加える（#169。実際に取りこぼしが起きたのはこのファイル）
+# `git clean -nd` は dry-run でもコマンド名の前方一致で permissions.deny にブロックされうる
+# ため、`git status --short` に置き換えた（issue #140、Epic #174 完了基準4）。
 for H161_FILE in "core/roles/generator.md" "README.md" "skills/run/SKILL.md" \
   "skills-codex/dev-workflow-run/SKILL.md"; do
   case "$H161_FILE" in
@@ -14329,11 +14403,11 @@ for H161_FILE in "core/roles/generator.md" "README.md" "skills/run/SKILL.md" \
     *)                   H161_PATH="${REPO_ROOT}/${H161_FILE}" ;;
   esac
   if grep -Fq 'git restore --source=HEAD --staged --worktree -- :/' "$H161_PATH" \
-    && grep -Fq 'git clean -nd -- :/' "$H161_PATH"; then
-    pass "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd -- :/ に置き換わっている（#161, #167）"
+    && grep -Fq 'git status --short -- :/' "$H161_PATH"; then
+    pass "${H161_FILE}: 見送り時の復旧が git restore + git status --short -- :/ に置き換わっている（#161, #167, #140）"
   else
-    fail "${H161_FILE}: 見送り時の復旧が git restore + git clean -nd -- :/ に置き換わっている（#161, #167）" \
-      "$(grep -n 'git restore\|git clean' "$H161_PATH")"
+    fail "${H161_FILE}: 見送り時の復旧が git restore + git status --short -- :/ に置き換わっている（#161, #167, #140）" \
+      "$(grep -n 'git restore\|git clean\|git status --short' "$H161_PATH")"
   fi
 done
 
