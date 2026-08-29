@@ -15057,6 +15057,276 @@ assert_eq "#104: composeモードでは cache_volume 行が出力されない（
   "0" "$CV104_COMPOSE_CACHE_COUNT"
 
 # ---------------------------------------------------------------------------
+# share-prepared-dirs.sh: コピー・フォールバックの再設計（Review #177/#178/#179/#180）
+#
+# 4件はいずれも「部分的に失敗したコピーを成功として確定させない」という同じ根に対する
+# 再設計の検証であり、まとめて1セクションに置く。SPD139_SOURCE（node_modules/.bin +
+# some-pkg.js）と spd139_make_stub（fakebinをPATHに割り込ませるスタブ生成）を再利用する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== share-prepared-dirs.sh: コピー・フォールバックの再設計（Review #177/#178/#179/#180） =="
+
+# --- Review #177: cp の部分失敗が入れ子コピーを作らず、copied にも化けない ---
+#
+# BusyBox の cp は名前衝突（コピー先に同名の非ディレクトリが既にある）等で
+# エントリ単位のエラーを起こすと、他のエントリはコピーしたまま rc=1 を返す（部分失敗）。
+# 旧実装はこの部分失敗後の再試行 `cp -r "$s" "$tmp"`（要素形。$tmp が既に存在すると
+# ネストする）で壊れたツリーを copied として成功報告していた。再設計後は $tmp を新規に
+# mkdir してから内容形コピー（"$s/." -> "$tmp/"）のみを使うため、そもそもネストする
+# コードパスが無いことを確認する。
+SPD177_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd177-source.XXXXXX")"
+SPD177_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd177-lane.XXXXXX")"
+mkdir -p "${SPD177_SOURCE}/node_modules/dirA"
+printf 'one\n' > "${SPD177_SOURCE}/node_modules/dirA/one.txt"
+printf 'two\n' > "${SPD177_SOURCE}/node_modules/fileB.txt"
+
+SPD177_REAL_CP="$(command -v cp)"
+SPD177_FAKEBIN_LN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd177-fakebin-ln.XXXXXX")"
+cat > "${SPD177_FAKEBIN_LN}/ln" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "${SPD177_FAKEBIN_LN}/ln"
+
+SPD177_MARKER="$(mktemp -u "${TMPDIR:-/tmp}/dw-test-spd177-marker.XXXXXX")"
+SPD177_FAKEBIN_CP="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd177-fakebin-cp.XXXXXX")"
+cat > "${SPD177_FAKEBIN_CP}/cp" <<EOF
+#!/bin/sh
+# コピー先の3番目の引数（cp -aL "\$s/." "\$tmp/" の \$tmp/ に相当）へ、初回呼び出し
+# だけ「dirA」という名前の衝突ファイルを先置きし、実物の cp を部分失敗させる。
+MARKER="${SPD177_MARKER}"
+DEST="\$3"
+if [ ! -f "\$MARKER" ]; then
+  touch "\$MARKER"
+  mkdir -p "\$DEST"
+  echo blocker > "\${DEST}dirA"
+fi
+exec "${SPD177_REAL_CP}" "\$@"
+EOF
+chmod +x "${SPD177_FAKEBIN_CP}/cp"
+
+SPD177_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd177-calllog.XXXXXX")"
+SPD177_STUB="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd177-stub.XXXXXX")"
+cat > "$SPD177_STUB" <<EOF
+#!/bin/bash
+set -u
+printf 1 >> "${SPD177_CALL_LOG}"
+PATH="${SPD177_FAKEBIN_CP}:${SPD177_FAKEBIN_LN}:\$PATH"
+cmd="\${@: -1}"
+sh -c "\$cmd"
+EOF
+chmod +x "$SPD177_STUB"
+
+SPD177_OUT="$(spd_run "$SPD177_LANE" "$SPD177_STUB" --source "$SPD177_SOURCE" --dir "node_modules")"
+
+case "$SPD177_OUT" in
+  *"copied"*)
+    fail "#177: 部分失敗したコピーが copied にならない" "output=[${SPD177_OUT}]" ;;
+  *)
+    pass "#177: 部分失敗したコピーが copied にならない" ;;
+esac
+case "$SPD177_OUT" in
+  *"skip"*"node_modules"*"reason"*"link-failed"*)
+    pass "#177: 部分失敗したコピーは skip reason link-failed のまま（#139のフォールバック未成立）" ;;
+  *)
+    fail "#177: 部分失敗したコピーは skip reason link-failed のまま" "output=[${SPD177_OUT}]" ;;
+esac
+
+SPD177_NESTED="$(find "$SPD177_LANE" -path '*node_modules*node_modules*' 2>/dev/null)"
+assert_eq "#177: レーン側に入れ子コピー（node_modules/node_modules）が作られない" \
+  "" "$SPD177_NESTED"
+
+# --- Review #180: 空の実体ディレクトリへの in-place コピーが部分失敗しても、
+#     次回実行が exists と誤判定されない ---
+#
+# ln -s の失敗時に空の実体ディレクトリが副作用として残る状況（issue #139 の報告）を
+# SPD139_FAKEBIN_EMPTY で再現し、その状態でコピーも失敗させると <dir> は空のまま残る。
+# 旧実装は判定順序2（`[ -e "$d" ]`）が空ディレクトリの存在だけで真になるため、再実行時に
+# exists と誤判定されフォールバックが働かなくなっていた（#180）。再設計後は判定順序2が
+# 「空の実体ディレクトリ」を exists から除外し、link-failed として毎回コピー・
+# フォールバックに委ねることを確認する。
+SPD180_SOURCE="$SPD139_SOURCE"
+SPD180_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd180-lane.XXXXXX")"
+
+SPD180_FAKEBIN_CPFAIL="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd180-fakebin-cpfail.XXXXXX")"
+cat > "${SPD180_FAKEBIN_CPFAIL}/cp" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "${SPD180_FAKEBIN_CPFAIL}/cp"
+
+SPD180_STUB1="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd180-stub1.XXXXXX")"
+cat > "$SPD180_STUB1" <<EOF
+#!/bin/bash
+set -u
+PATH="${SPD180_FAKEBIN_CPFAIL}:${SPD139_FAKEBIN_EMPTY}:\$PATH"
+cmd="\${@: -1}"
+sh -c "\$cmd"
+EOF
+chmod +x "$SPD180_STUB1"
+
+# 1回目: ln -s 失敗の副作用で空ディレクトリが残り、コピーも失敗するため <dir> は空のまま
+SPD180_OUT1="$(spd_run "$SPD180_LANE" "$SPD180_STUB1" --source "$SPD180_SOURCE" --dir "node_modules")"
+case "$SPD180_OUT1" in
+  *"skip"*"node_modules"*"reason"*"link-failed"*)
+    pass "#180: 1回目は link-failed（空ディレクトリが副作用として残る想定どおり）" ;;
+  *)
+    fail "#180: 1回目は link-failed（空ディレクトリが副作用として残る想定どおり）" "output=[${SPD180_OUT1}]" ;;
+esac
+assert_eq "#180: 1回目の後、<dir> は空のまま（cpが失敗しても部分内容が書き込まれない）" \
+  "" "$(ls -A "${SPD180_LANE}/node_modules" 2>/dev/null)"
+
+# 2回目: 同じレーン・同じ状況（ln は相変わらず失敗、cp も相変わらず失敗）で再実行しても
+# 判定順序2の exists 誤判定は起きず、link-failed が再現する（#180 本題）
+SPD180_OUT2="$(spd_run "$SPD180_LANE" "$SPD180_STUB1" --source "$SPD180_SOURCE" --dir "node_modules")"
+case "$SPD180_OUT2" in
+  *"skip"*"node_modules"*"reason"*"exists"*)
+    fail "#180: 2回目が exists に化けない" "output=[${SPD180_OUT2}]" ;;
+  *"skip"*"node_modules"*"reason"*"link-failed"*)
+    pass "#180: 2回目が exists に化けない（link-failed が再現する）" ;;
+  *)
+    fail "#180: 2回目が exists に化けない" "output=[${SPD180_OUT2}]" ;;
+esac
+case "$SPD180_OUT2" in
+  *"prep=run"*)
+    pass "#180: 2回目も prep=run のまま（フォールバックが働く）" ;;
+  *)
+    fail "#180: 2回目も prep=run のまま（フォールバックが働く）" "output=[${SPD180_OUT2}]" ;;
+esac
+
+# 3回目: 今度は cp を失敗させない（ln のみ失敗）。空のまま残っていた <dir> に、
+# 単一の手順（tmpへコピー→完全性検証→mv -Tで確定）が正しく内容を埋められることを確認する
+SPD180_STUB2="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd180-stub2.XXXXXX")"
+cat > "$SPD180_STUB2" <<EOF
+#!/bin/bash
+set -u
+PATH="${SPD139_FAKEBIN_EMPTY}:\$PATH"
+cmd="\${@: -1}"
+sh -c "\$cmd"
+EOF
+chmod +x "$SPD180_STUB2"
+
+SPD180_OUT3="$(spd_run "$SPD180_LANE" "$SPD180_STUB2" --source "$SPD180_SOURCE" --dir "node_modules")"
+case "$SPD180_OUT3" in
+  *"copied"*"node_modules"*)
+    pass "#180: 3回目（cpが成功する状況）で空だった <dir> に正しく展開される" ;;
+  *)
+    fail "#180: 3回目（cpが成功する状況）で空だった <dir> に正しく展開される" "output=[${SPD180_OUT3}]" ;;
+esac
+assert_eq "#180: 復旧後、コピー先の内容がソースと一致する" \
+  "yes" "$(cmp -s "${SPD180_SOURCE}/node_modules/some-pkg.js" "${SPD180_LANE}/node_modules/some-pkg.js" && echo yes || echo no)"
+
+# --- Review #179: コピー失敗時の一時ディレクトリの残骸がレーンの作業ツリーに残らない ---
+#
+# レーンが git worktree の場合（実運用は常にそう）、コピー失敗時の一時ディレクトリは
+# git-dir 配下（追跡対象外）に置かれ、レーンの作業ツリーからは一切見えないことを確認する。
+SPD179_SOURCE="$SPD139_SOURCE"
+SPD179_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd179-lane.XXXXXX")"
+(
+  cd "$SPD179_LANE" || exit 1
+  git init -q
+  git config user.email "dw-test@example.com"
+  git config user.name "dw-test"
+) >/dev/null 2>&1
+
+SPD179_FAKEBIN_CPFAIL="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd179-fakebin-cpfail.XXXXXX")"
+cat > "${SPD179_FAKEBIN_CPFAIL}/cp" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "${SPD179_FAKEBIN_CPFAIL}/cp"
+
+SPD179_FAKEBIN_LN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd179-fakebin-ln.XXXXXX")"
+cat > "${SPD179_FAKEBIN_LN}/ln" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "${SPD179_FAKEBIN_LN}/ln"
+
+SPD179_STUB="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd179-stub.XXXXXX")"
+cat > "$SPD179_STUB" <<EOF
+#!/bin/bash
+set -u
+PATH="${SPD179_FAKEBIN_CPFAIL}:${SPD179_FAKEBIN_LN}:\$PATH"
+cmd="\${@: -1}"
+sh -c "\$cmd"
+EOF
+chmod +x "$SPD179_STUB"
+
+SPD179_STDERR="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd179-stderr.XXXXXX")"
+SPD179_OUT="$(spd_run "$SPD179_LANE" "$SPD179_STUB" --source "$SPD179_SOURCE" --dir "node_modules" 2>"$SPD179_STDERR")"
+
+case "$SPD179_OUT" in
+  *"skip"*"node_modules"*"reason"*"link-failed"*)
+    pass "#179: コピー失敗時は link-failed のまま（残骸確認の前提が成立）" ;;
+  *)
+    fail "#179: コピー失敗時は link-failed のまま" "output=[${SPD179_OUT}]" ;;
+esac
+
+SPD179_VISIBLE_RESIDUE="$(find "$SPD179_LANE" -mindepth 1 -not -path "${SPD179_LANE}/.git" -not -path "${SPD179_LANE}/.git/*" 2>/dev/null)"
+assert_eq "#179: レーンの作業ツリー（.git を除く）に一時ディレクトリの残骸が残らない" \
+  "" "$SPD179_VISIBLE_RESIDUE"
+
+SPD179_GITDIR_RESIDUE="$(find "${SPD179_LANE}/.git" -iname '*dwcopy*' 2>/dev/null)"
+if [ -n "$SPD179_GITDIR_RESIDUE" ]; then
+  pass "#179: 残骸は git-dir 配下（追跡対象外）に置かれている"
+else
+  fail "#179: 残骸は git-dir 配下（追跡対象外）に置かれている" "見つかりませんでした"
+fi
+
+SPD179_GIT_STATUS="$(cd "$SPD179_LANE" && git status --porcelain --ignored 2>/dev/null)"
+assert_eq "#179: git status が汚れない（残骸が git の追跡対象外に置かれているため）" \
+  "" "$SPD179_GIT_STATUS"
+
+# git-dir を解決できない場合（レーンが git リポジトリでない）は、従来どおりレーンの作業
+# ツリー直下に一時ディレクトリが残り、そのパスが stderr に明示されることを確認する。
+SPD179_NOGIT_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd179-nogit-lane.XXXXXX")"
+SPD179_NOGIT_STDERR="$(mktemp "${TMPDIR:-/tmp}/dw-test-spd179-nogit-stderr.XXXXXX")"
+spd_run "$SPD179_NOGIT_LANE" "$SPD179_STUB" --source "$SPD179_SOURCE" --dir "node_modules" \
+  >/dev/null 2>"$SPD179_NOGIT_STDERR"
+case "$(cat "$SPD179_NOGIT_STDERR" 2>/dev/null)" in
+  *"残骸"*"node_modules.dwtmp"*)
+    pass "#179: git-dir が無い場合は残骸のパスを stderr に明示する（従来どおりレーン直下）" ;;
+  *)
+    fail "#179: git-dir が無い場合は残骸のパスを stderr に明示する" \
+      "stderr=[$(cat "$SPD179_NOGIT_STDERR" 2>/dev/null)]" ;;
+esac
+
+# --- Review #178: symlink を含むソースが、コピー・フォールバックで正しく実体化される（-L の効果） ---
+#
+# symlink 作成が拒否される環境では `cp -a` / `cp -r` も symlink(2) を呼ぶため
+# `.bin/*` のようなシンボリックリンクで部分的に失敗する（#178）。`-L` を付けて
+# シンボリックリンクを辿って実体をコピーすることで、この経路でも正しく実体化される
+# ことを確認する。
+SPD178_SOURCE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd178-source.XXXXXX")"
+SPD178_LANE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd178-lane.XXXXXX")"
+mkdir -p "${SPD178_SOURCE}/node_modules/.bin" "${SPD178_SOURCE}/node_modules/pkgX"
+printf '#!/bin/sh\necho real-bin\n' > "${SPD178_SOURCE}/node_modules/pkgX/real-bin"
+chmod +x "${SPD178_SOURCE}/node_modules/pkgX/real-bin"
+ln -s ../pkgX/real-bin "${SPD178_SOURCE}/node_modules/.bin/real-bin"
+
+SPD178_FAKEBIN_LN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-spd178-fakebin-ln.XXXXXX")"
+cat > "${SPD178_FAKEBIN_LN}/ln" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "${SPD178_FAKEBIN_LN}/ln"
+SPD178_STUB="$(spd139_make_stub "$SPD139_CALL_LOG" "$SPD178_FAKEBIN_LN")"
+
+SPD178_OUT="$(spd_run "$SPD178_LANE" "$SPD178_STUB" --source "$SPD178_SOURCE" --dir "node_modules")"
+case "$SPD178_OUT" in
+  *"copied"*"node_modules"*)
+    pass "#178: symlink を含むソースでもコピー・フォールバックが copied になる" ;;
+  *)
+    fail "#178: symlink を含むソースでもコピー・フォールバックが copied になる" "output=[${SPD178_OUT}]" ;;
+esac
+assert_eq "#178: .bin 配下の symlink が実ファイルとして展開される（symlinkのままではない）" \
+  "yes" "$([ -f "${SPD178_LANE}/node_modules/.bin/real-bin" ] && [ ! -L "${SPD178_LANE}/node_modules/.bin/real-bin" ] && echo yes || echo no)"
+assert_eq "#178: 展開されたファイルの内容がリンク先の実体と一致する" \
+  "yes" "$(cmp -s "${SPD178_SOURCE}/node_modules/pkgX/real-bin" "${SPD178_LANE}/node_modules/.bin/real-bin" && echo yes || echo no)"
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 

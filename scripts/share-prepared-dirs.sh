@@ -77,9 +77,19 @@
 #
 # エントリごとの判定順序（共有モード）:
 #   1. <source>/<dir> が存在しない（ディレクトリでない）      -> no-source
-#   2. レーン側 <dir> が既に存在する（symlink・実体を問わない） -> exists
+#   2. レーン側 <dir> が既に存在する。ただし「空の」実体ディレクトリは exists に
+#      含めない（#180）。symlink、または「非空」の実体・非ディレクトリの場合のみ
+#      -> exists
 #   3. フィンガープリントファイルの欠損・不一致が1つでもある   -> fingerprint-mismatch
-#   4. symlink を作り、作った symlink を辿った実体がディレクトリであることまで確認する
+#   4. レーン側 <dir> が「空の」実体ディレクトリとして既に存在する場合   -> link-failed
+#      （#180。`ln -s <target> <既存の空ディレクトリ>` は <dir> 自体を symlink に
+#      置き換えず、<dir> の中に target のベース名で symlink を作ってしまう
+#      （BusyBox/coreutils 双方で確認済み）。<dir> は symlink 化されないまま
+#      `ln -s` 自体は rc=0 を返すため、ln -s を試みると壊れた成功になる。よって
+#      空の実体ディレクトリに対しては ln -s を一切試みず、直接 link-failed として
+#      確定し、下記の「コピー・フォールバックについて」に委ねる。コピー・フォールバックは
+#      自身でも「空であること」を確認したうえで安全に埋める）
+#   5. symlink を作り、作った symlink を辿った実体がディレクトリであることまで確認する
 #      （`ln -s` はターゲットが存在しなくても成功するため、作成成功だけでは
 #      dangling symlink を linked と誤報告しうる。#115）。成功なら linked、
 #      作成失敗または実体確認に失敗した場合は                -> link-failed
@@ -87,13 +97,12 @@
 #      `unlink` で撤去してから link-failed とする。撤去しないと dangling symlink が
 #      <dir> を占有したまま残り、(a) 同一実行内で --run-prep を使うとその dangling
 #      symlink に <dir> が占有されたまま install が走り失敗する（#116 の解除対象は
-#      kind=linked のみ）、(b) 再実行すると判定順序2の `[ -e "$d" ] || [ -L "$d" ]` が
-#      dangling symlink でも真になり exists と誤判定され、フォールバックの install が
-#      走らないまま done が書かれる、という2つの不具合が生じる。#118）。link-failed に
-#      なった場合は続けて下記の「コピー・フォールバックについて」を試み、成功すれば
-#      結果は copied に置き換わる（#139）
+#      kind=linked のみ）、(b) 再実行すると判定順序2が dangling symlink でも exists と
+#      誤判定し、フォールバックの install が走らないまま done が書かれる、という
+#      2つの不具合が生じる。#118）。link-failed になった場合は続けて下記の
+#      「コピー・フォールバックについて」を試み、成功すれば結果は copied に置き換わる（#139）
 #
-# コピー・フォールバックについて（#139）:
+# コピー・フォールバックについて（#139。#177/#178/#179/#180 で再設計）:
 #
 # Windows + Docker Desktop のバインドマウント環境では、コンテナ内からの `ln -s` が
 # `Operation not permitted` になり symlink 方式そのものが成立しないと報告されている
@@ -104,15 +113,40 @@
 #     バインドマウント上に `docker run -v` でマウント）では、コンテナ内から
 #     バインドマウント配下への `ln -s` は成功した。また `cp -a` / `cp -r` による
 #     実体コピーも成功することを確認した（コピー先とコピー元の inode 番号が異なることまで
-#     確認し、独立したファイルであることを検証済み）
+#     確認し、独立したファイルであることを検証済み）。**一方で `cp -a` / `cp -r` は
+#     シンボリックリンクを symlink(2) で再作成することも確認した（#178）。**
+#     つまり symlink 作成そのものが拒否される環境では、`node_modules/.bin/*` 等の
+#     シンボリックリンクを含むソースに対して `cp -a` / `cp -r` も同じ理由で部分的に
+#     失敗する。これは机上の懸念ではなく、本フォールバックが対象とする状況（`ln -s` が
+#     拒否される環境）そのものに直結する。そのため後述のとおり `-L`（シンボリックリンクを
+#     辿って実体をコピーする）を付けて symlink(2) の呼び出し自体を避ける
+#   - 確認できたこと（`-L` の挙動）: `cp -aL` / `cp -rL` は BusyBox でも利用可能で、
+#     (a) 相対シンボリックリンク（`.bin/foo -> ../pkg/foo`）を実体としてコピーする、
+#     (b) ソースツリー外を指す相対シンボリックリンク（yarn workspace 等の
+#     `node_modules/pkg -> ../../packages/pkg`）も正しく解決して実体をコピーする、
+#     (c) リンク先が存在しないシンボリックリンク（dangling symlink）に対しては
+#     `cp` がそのエントリでエラーを返し、他のエントリは成功したまま全体の終了コードが
+#     非0になる（部分失敗）ことを確認した。(c) は後述の完全性検証でそのまま
+#     copy-failed として扱われるため、dangling symlink があっても壊れた成功にはならない
 #   - 確認できなかったこと: issue #139 の元の再現環境（compose モード・実際の
 #     Node.js/yarn プロジェクト）そのものは用意できず、`ln -s` が実際に失敗する状態
 #     そのものは再現できていない。そのため本フォールバックが issue #139 の実環境で
-#     効果があるかどうかは未検証である
+#     効果があるかどうかは未検証である（#176 で実環境測定時に `.bin` 配下のリンク
+#     再作成が成功したかを確認項目に追加した）
 #
 # 上記の理由により symlink 方式自体は変更せず、引き続き第一選択のままにする（Windows 以外の
 # 既存動作を変えない）。symlink 作成が link-failed になったエントリに限り、実体コピー
-# （`cp -a`。失敗時は `cp -r` にフォールバック）を1回だけ追加で試みる。
+# （`cp -aL`。失敗時は `cp -rL` にフォールバック）を1回だけ追加で試みる。
+#
+# `-L` を付けるトレードオフ（#178）: シンボリックリンクがディレクトリを指している場合
+# （yarn workspace 等）、`-L` はそのディレクトリの中身を丸ごと重複コピーするため、
+# ハードリンク・symlink方式に比べてディスク使用量が増える。**それでもこのトレードオフを
+# 受け入れる。** 理由は、本フォールバックが必要になる状況（symlink 作成が拒否される環境）
+# では `-L` を付けない `cp -a` / `cp -r` も `.bin` 配下のようなシンボリックリンクで
+# 必ず部分的に失敗するため、`-L` を付けない実装は本フォールバックの主要な対象
+# （実 Node.js/yarn プロジェクトの `node_modules`。ほぼ必ず `.bin` を含む）に対して
+# 事実上機能しない。ディスク使用量の増加は、フォールバック自体が成立しないことに比べて
+# 小さい代償と判断した。
 #
 # ハードリンク（`cp -al` 等）は意図的に使わない。ハードリンクは共有元と同一 inode を指すため、
 # 後続の `--run-prep`（yarn install 等）がコピー先へ書き込むと共有元（Epic 専用 worktree）を
@@ -121,16 +155,57 @@
 # unlink）が効かない（unlink はシンボリックリンクの解除であり、ハードリンクされた実体
 # ディレクトリには使えない）。よって実体を完全に独立させるコピーのみを使う。
 #
-# コピー先の書き込み条件（触れてよいことが明確な場合に限る）:
-#   - 対象 <dir> が存在しない            -> 一時名にコピーしてから mv で確定させる
-#                                          （cp が失敗しても実名 <dir> には何も現れない。
-#                                          「空の実体ディレクトリが残らない」ことに対応）
-#   - 対象 <dir> が「空の」実体ディレクトリ -> その場に内容を展開する。Windows で `ln -s` の
-#     失敗時に空ディレクトリが副作用として残るという報告（issue #139。「.bin と node_modules
-#     だけを含む空サブディレクトリ」）への対応。このケース自体は再現できていないが、対応しても
-#     空でなければ何もしない・触れないため、既存動作を壊さず防御的に組み込む
-#   - symlink・非空の実体・その他何かが既にある -> 触れない（link-failed のまま。安全ルールに
-#     従い削除は行わない）
+# コピー先の書き込み条件・完全性の確定方法（#177/#180 で再設計。「部分的に失敗したコピーを
+# 成功として確定させない」ことが目的）:
+#
+#   - 対象 <dir> が既に「空でない」実体ディレクトリ、または symlink・その他の非ディレクトリで
+#     ある -> 一切触れない（copy-failed のまま。安全ルールに従い削除は行わない）
+#   - それ以外（<dir> が存在しない、または「空の」実体ディレクトリとして残っている
+#     [Windows で `ln -s` 失敗時の副作用として空ディレクトリが残るという issue #139 の
+#     報告への対応]）は、次の**単一の**手順で処理する。「存在しない」場合と「空」場合を
+#     別コードパスにしない（#177 の根本原因は、この2ケースをコードパスとして分けたうえで
+#     「存在しない」側の再試行がネスト・コピーを作ったことだった。単一の手順に統一することで
+#     この分岐自体を無くす）:
+#       1. `<dir>` とは別の、コミット対象になりえない一時ディレクトリ（後述）を新規に
+#          `mkdir` する（既に同名の一時ディレクトリが残っていれば `mkdir` は失敗し、
+#          そのエントリは copy-failed として確定させる。**古い残骸を再利用しての
+#          継ぎ足しコピーは行わない**。これにより #177 のネスト・コピーが構造的に
+#          発生しなくなる: 一時ディレクトリは常に新規かつ空から始まり、コピーは
+#          「ソースの中身を一時ディレクトリの直下へ」（`cp -aL "<src>/." "<tmp>/"`）という
+#          内容形のみを使うため、一時ディレクトリの深さが不意に1段増える余地が無い）
+#       2. `cp -aL "<src>/." "<tmp>/" || cp -rL "<src>/." "<tmp>/"` で内容をコピーする
+#       3. **確定前に完全性を検証する。** `ls -A` によるソースと一時ディレクトリ直下の
+#          エントリ数が一致する場合に限り「完全」とみなす（#177 が指摘したとおり、rc だけの
+#          判定は部分失敗を成功として通してしまう経路を作りうる。直下エントリ数の比較を
+#          使う理由は、`-L` によるディレクトリ・シンボリックリンクの実体展開があっても
+#          直下の1エントリという対応関係は崩れないため、`-L` と両立できる）
+#       4. 完全性検証を満たした場合のみ `mv -T "<tmp>" "<dir>"` で確定させる。`mv -T` は
+#          rename(2) 相当であり、`<dir>` が存在しない場合はそのまま作成、`<dir>` が
+#          「空の」実体ディレクトリとして残っている場合はその場所に上書きで置き換える
+#          （サンドボックスで両方の挙動を確認済み）ことをどちらも1回の呼び出しで扱える。
+#          検証を満たさない場合は copy-failed として確定させず `mv` もしない
+#          （`<dir>` 自体には何も書き込まれないため、次回実行時に `<dir>` が誤って
+#          exists 判定されることはない。#180）
+#
+# 一時ディレクトリの置き場所について（#179）: 従来は `<dir>.dwtmp$$` としてレーンの
+# 作業ツリー直下に置いていたが、コピーが失敗して残った場合、generator は安全ルールにより
+# `rm`/`rmdir` を使えず自力で除去できない。しかも駆動先の `.gitignore` は通常
+# `node_modules/` のような名前しか無視しないため `node_modules.dwtmp12345` には一致せず、
+# 未追跡ファイルとして `git status` に現れ `git add -A` 系の操作でコミットに巻き込まれうる。
+#
+# この問題を避けるため、レーンが git worktree である場合（実運用では常にそう。ロック兼
+# 完了マーカーが git-dir を解決できた場合と同じ条件）は、一時ディレクトリをレーンの
+# 作業ツリーの外――`git rev-parse --git-dir` が指すディレクトリ（worktree ごとに独立しており、
+# git の追跡対象外で `git status` にも一切現れない）配下の `dev-workflow-copy-tmp/` ――に
+# 作る。失敗して残った場合もレーンの作業ツリーから見えないため、generator が除去できなくても
+# 実害が無い（**削除自体はしない。安全ルールと矛盾しないための意図的な選択であり、
+# 失敗が繰り返されるとこの領域にゴミが蓄積することは許容する**）。
+#
+# git-dir を解決できない場合（レーンの作業ディレクトリが git リポジトリでない。実運用では
+# 起こらないが、素の一時ディレクトリでの検証等）は、従来どおりレーンの作業ツリー直下の
+# `<dir>.dwtmp$$` にフォールバックする。この場合に限り、コピーが失敗して残った一時
+# ディレクトリのパスを stderr に明示する（「人間が消す必要がある」ことを伝えるため。
+# 出力形式は `WARNING: ... 残骸 <path>` の1行）。
 #
 # symlink が確認できる環境（Linux/macOS 等。`ln -s` が通常成功する）では link-failed が
 # そもそも発生しないため、この経路は実行されない（既存動作を変えない）。
@@ -484,10 +559,21 @@ if [ "${#CANDIDATE_DIR[@]}" -gt 0 ]; then
     fpok="${CANDIDATE_FPOK[$i]}"
     CONTAINER_SCRIPT+="d=$(printf '%q' "$d")"$'\n'
     CONTAINER_SCRIPT+="t=$(printf '%q' "$t")"$'\n'
-    CONTAINER_SCRIPT+='if [ -e "$d" ] || [ -L "$d" ]; then'$'\n'
+    # 判定順序2（#180 で修正）: <dir> が symlink、または「非空」の実体・非ディレクトリで
+    # あれば exists（触れない）。<dir> が「空の」実体ディレクトリの場合はここでは exists と
+    # しない。`ln -s <target> <既存の空ディレクトリ>` は BusyBox/coreutils いずれでも
+    # ディレクトリ自体を置き換えず「ディレクトリの中に」target のベース名で symlink を
+    # 作ってしまう（サンドボックスで確認済み。<dir> 自体は symlink 化されないまま
+    # rc=0 になり、壊れた成功を生む）。そのため空の実体ディレクトリは ln -s を一切
+    # 試みず、fpmismatch 判定の後で直接 link-failed として確定し、後続のコピー・
+    # フォールバック（#177/#179 で再設計済み。空であることを自身でも確認したうえで
+    # 安全に埋める）に委ねる。
+    CONTAINER_SCRIPT+='if [ -L "$d" ] || { [ -e "$d" ] && { [ ! -d "$d" ] || [ -n "$(ls -A "$d" 2>/dev/null)" ]; }; }; then'$'\n'
     CONTAINER_SCRIPT+='  printf "exists\t%s\n" "$d"'$'\n'
     CONTAINER_SCRIPT+="elif [ ${fpok} -ne 1 ]; then"$'\n'
     CONTAINER_SCRIPT+='  printf "fpmismatch\t%s\n" "$d"'$'\n'
+    CONTAINER_SCRIPT+='elif [ -d "$d" ]; then'$'\n'
+    CONTAINER_SCRIPT+='  printf "linkfailed\t%s\n" "$d"'$'\n'
     CONTAINER_SCRIPT+='elif [ -z "$t" ]; then'$'\n'
     CONTAINER_SCRIPT+='  printf "linkfailed\t%s\n" "$d"'$'\n'
     CONTAINER_SCRIPT+='else'$'\n'
@@ -539,32 +625,15 @@ if [ "${#CANDIDATE_DIR[@]}" -gt 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# コピー・フォールバック（#139）。
+# コピー・フォールバック（#139。#177/#178/#179/#180 で再設計。詳細は冒頭コメント
+# 「コピー・フォールバックについて」を参照）。
 #
-# Windows + Docker Desktop のバインドマウント環境では、コンテナ内からの `ln -s` が
-# 権限エラーで失敗する場合があると報告されている（issue #139。Docker Desktop の
-# ファイル共有バックエンドの制約）。この経路自体は本リポジトリのサンドボックス
-# （dockerfile モード・Alpine/BusyBox、Windows バインドマウント）では実際に確認できた
-# 限り再現しなかった（`ln -s` は成功した）。**issue #139 の元の再現環境（compose モード・
-# 実プロジェクト）そのものは用意できず、`ln -s` が失敗する状態そのものは再現できていない。**
-# そのため symlink 方式自体は変更せず、依然として第一選択のままにする。
-#
-# 一方で「symlink が失敗した場合に、何もできず prep=run のまま人手を待つしかない」状態は
-# 環境非依存に改善できる。symlink 作成が link-failed になったエントリに限り、
-# 実体コピー（`cp -a`。ハードリンクはしない。理由は冒頭コメント「コピー・フォールバックに
-# ついて」を参照）を1回だけ追加で試みる。
-#
-# 生成先は次のいずれかの状態でのみ書き込む（触れてよいことが明確な場合に限る）:
-#   - 対象 <dir> が存在しない          -> 一時名にコピーしてから mv で確定させる
-#                                        （cp が失敗しても実名 <dir> には何も現れない）
-#   - 対象 <dir> が「空の」実体ディレクトリ -> その場にコピーする（内容を直接展開する）。
-#     Windows 環境で `ln -s` の失敗時に空ディレクトリが副作用として残るという報告
-#     （issue #139）に対応するため。このケースは再現・実証できていないが、対応しても
-#     既存動作を壊さない（空でなければ何もしない・触れない）ため、防御的に組み込む
-#   - symlink・非空の実体・その他何か既にある -> 触れない（link-failed のまま）
-#
-# symlink が確認できる環境（Linux/macOS 等。`ln -s` が通常成功する）では link-failed が
-# 発生しないため、この経路は一切実行されない（既存動作を変えない）。
+# 「存在しない」と「空の実体ディレクトリとして残っている」の2ケースを単一の手順
+# （一時ディレクトリへ内容形コピー → 直下エントリ数で完全性検証 → mv -T で確定）に
+# 統一する。一時ディレクトリはレーンが git worktree である場合、git-dir 配下
+# （git の追跡対象外）に置き、レーンの作業ツリーには一切現れないようにする（#179）。
+# git-dir を解決できない場合のみレーンの作業ツリー直下 <dir>.dwtmp$$ にフォールバックし、
+# その場合に限り残骸のパスを stderr に明示する。
 # ---------------------------------------------------------------------------
 
 if [ "$DRY_RUN" -eq 0 ]; then
@@ -581,33 +650,53 @@ if [ "$DRY_RUN" -eq 0 ]; then
   done
 
   if [ "${#COPY_CANDIDATE_DIR[@]}" -gt 0 ]; then
+    # 一時ディレクトリの置き場所（#179）。LOCK_ELIGIBLE は既にロック兼完了マーカーの
+    # 節（共有モードのみ・DRY_RUN=0）で `git rev-parse --git-dir` の成否から決まっている
+    # ため、ここではそれをそのまま再利用する（同じ条件で「レーンが git worktree か」を
+    # 二重に判定しない）。
+    COPY_TMP_BASE=""
+    if [ "$LOCK_ELIGIBLE" -eq 1 ]; then
+      COPY_TMP_BASE="$(compute_rel_path "$CWD" "$GIT_DIR_ABS")" || COPY_TMP_BASE=""
+    fi
+
     COPY_SCRIPT="set -u"$'\n'
-    # shellcheck disable=SC2016  # 単一引用符は意図的。$d/$s はコンテナ側で実行される
-    # ミニスクリプトの文字列としてそのまま埋め込む。
+    # shellcheck disable=SC2016  # 単一引用符は意図的。$tmp_base はここでは展開せず、
+    # コンテナ側で実行されるミニスクリプトの文字列としてそのまま埋め込む。
+    if [ -n "$COPY_TMP_BASE" ]; then
+      COPY_SCRIPT+="tmp_base=$(printf '%q' "${COPY_TMP_BASE}/dev-workflow-copy-tmp")"$'\n'
+      COPY_SCRIPT+='mkdir -p "$tmp_base" 2>/dev/null'$'\n'
+    else
+      COPY_SCRIPT+='tmp_base=""'$'\n'
+    fi
+    # shellcheck disable=SC2016  # 単一引用符は意図的。$d/$s/$tmp 等はコンテナ側で
+    # 実行されるミニスクリプトの文字列としてそのまま埋め込む。
     for i in "${!COPY_CANDIDATE_DIR[@]}"; do
       d="${COPY_CANDIDATE_DIR[$i]}"
       s="${COPY_CANDIDATE_SRC[$i]}"
       COPY_SCRIPT+="d=$(printf '%q' "$d")"$'\n'
       COPY_SCRIPT+="s=$(printf '%q' "$s")"$'\n'
-      COPY_SCRIPT+='tmp="${d}.dwtmp$$"'$'\n'
+      COPY_SCRIPT+="entry_idx=$(printf '%q' "$i")"$'\n'
       COPY_SCRIPT+='if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then'$'\n'
       COPY_SCRIPT+='  printf "copyfailed\t%s\n" "$d"'$'\n'
-      COPY_SCRIPT+='elif [ -d "$d" ]; then'$'\n'
-      COPY_SCRIPT+='  if [ -n "$(ls -A "$d" 2>/dev/null)" ]; then'$'\n'
-      COPY_SCRIPT+='    printf "copyfailed\t%s\n" "$d"'$'\n'
-      COPY_SCRIPT+='  elif cp -a "$s/." "$d/" 2>/dev/null || cp -r "$s/." "$d/" 2>/dev/null; then'$'\n'
-      COPY_SCRIPT+='    printf "copied\t%s\n" "$d"'$'\n'
-      COPY_SCRIPT+='  else'$'\n'
-      COPY_SCRIPT+='    printf "copyfailed\t%s\n" "$d"'$'\n'
-      COPY_SCRIPT+='  fi'$'\n'
-      COPY_SCRIPT+='elif { cp -a "$s" "$tmp" 2>/dev/null || cp -r "$s" "$tmp" 2>/dev/null; } && [ -d "$tmp" ]; then'$'\n'
-      COPY_SCRIPT+='  if mv -T "$tmp" "$d" 2>/dev/null && [ -d "$d" ]; then'$'\n'
-      COPY_SCRIPT+='    printf "copied\t%s\n" "$d"'$'\n'
-      COPY_SCRIPT+='  else'$'\n'
-      COPY_SCRIPT+='    printf "copyfailed\t%s\n" "$d"'$'\n'
-      COPY_SCRIPT+='  fi'$'\n'
-      COPY_SCRIPT+='else'$'\n'
+      COPY_SCRIPT+='elif [ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ]; then'$'\n'
       COPY_SCRIPT+='  printf "copyfailed\t%s\n" "$d"'$'\n'
+      COPY_SCRIPT+='else'$'\n'
+      COPY_SCRIPT+='  if [ -n "$tmp_base" ]; then tmp="${tmp_base}/dwcopy.$$.${entry_idx}"; else tmp="${d}.dwtmp$$"; fi'$'\n'
+      COPY_SCRIPT+='  src_count=$(ls -A "$s" 2>/dev/null | wc -l)'$'\n'
+      COPY_SCRIPT+='  if mkdir "$tmp" 2>/dev/null; then'$'\n'
+      COPY_SCRIPT+='    if cp -aL "$s/." "$tmp/" 2>/dev/null || cp -rL "$s/." "$tmp/" 2>/dev/null; then'$'\n'
+      COPY_SCRIPT+='      tmp_count=$(ls -A "$tmp" 2>/dev/null | wc -l)'$'\n'
+      COPY_SCRIPT+='      if [ "$tmp_count" = "$src_count" ] && mv -T "$tmp" "$d" 2>/dev/null && [ -d "$d" ]; then'$'\n'
+      COPY_SCRIPT+='        printf "copied\t%s\n" "$d"'$'\n'
+      COPY_SCRIPT+='      else'$'\n'
+      COPY_SCRIPT+='        printf "copyfailed\t%s\t%s\n" "$d" "$tmp"'$'\n'
+      COPY_SCRIPT+='      fi'$'\n'
+      COPY_SCRIPT+='    else'$'\n'
+      COPY_SCRIPT+='      printf "copyfailed\t%s\t%s\n" "$d" "$tmp"'$'\n'
+      COPY_SCRIPT+='    fi'$'\n'
+      COPY_SCRIPT+='  else'$'\n'
+      COPY_SCRIPT+='    printf "copyfailed\t%s\n" "$d"'$'\n'
+      COPY_SCRIPT+='  fi'$'\n'
       COPY_SCRIPT+='fi'$'\n'
     done
 
@@ -616,13 +705,27 @@ if [ "$DRY_RUN" -eq 0 ]; then
     COPY_OUTPUT="$(bash "$SANDBOX_EXEC" "${COPY_SANDBOX_ARGS[@]}" "$COPY_SCRIPT")"
 
     copy_i=0
-    while IFS=$'\t' read -r ckind _cdir; do
+    COPY_RESIDUE_PATHS=()
+    while IFS=$'\t' read -r ckind cdir cresidue; do
       [ -z "$ckind" ] && continue
       [ "$copy_i" -lt "${#COPY_CANDIDATE_ORIG_IDX[@]}" ] || break
       corig_idx="${COPY_CANDIDATE_ORIG_IDX[$copy_i]}"
-      [ "$ckind" = "copied" ] && RESULT_KIND[corig_idx]="copied"
+      if [ "$ckind" = "copied" ]; then
+        RESULT_KIND[corig_idx]="copied"
+      elif [ -n "$cresidue" ] && [ -z "$COPY_TMP_BASE" ]; then
+        # git-dir 配下に置けなかった場合（#179）に限り、レーンの作業ツリーに
+        # 残った一時ディレクトリのパスを人間が消せるよう明示する。
+        COPY_RESIDUE_PATHS+=("${cdir}: ${cresidue}")
+      fi
       copy_i=$((copy_i + 1))
     done <<< "$COPY_OUTPUT"
+
+    if [ "${#COPY_RESIDUE_PATHS[@]}" -gt 0 ]; then
+      echo "WARNING: コピー・フォールバックが失敗し、レーンの作業ツリーに一時ディレクトリの残骸が残りました（generator は安全ルールにより自力で除去できません。人間が確認して削除してください。#179）:" >&2
+      for _residue in "${COPY_RESIDUE_PATHS[@]}"; do
+        echo "  - ${_residue}" >&2
+      done
+    fi
   fi
 fi
 
