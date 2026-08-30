@@ -16320,6 +16320,127 @@ for RG195_FILE in "core/roles/generator.md" "skills/run/SKILL.md" \
 done
 
 # ---------------------------------------------------------------------------
+# レビュー指摘対応時に「守るべき性質」の言語化を促す記述（issue #197）
+#
+# review issue は通常のウェーブループ（Step 1〜7）に載って処理されるため、対応する
+# generator は run の手順書ではなく issue 本文を読む。そのため、この指示は run 側の
+# 手順書だけでなく、R2 が作成する issue テンプレート自体に埋め込まれている必要がある。
+# Claude / Codex 両方の run スキルで、テンプレートの文言が消えたら赤くなることを固定する。
+#
+# evaluator 側は core/references/review-checklist-correctness.md に対応する確認観点
+# （#197「修正の妥当性」）を追加した。correctness 観点の evaluator が読む唯一の詳細
+# チェックリストファイルであり、Claude/Codex 双方の evaluator 定義が
+# `core/roles/evaluator.md`「観点（focus）」表を通じて共通で参照するため、
+# アダプタ別の複製は不要である（本体に直接埋め込むと、観点未指定時にしか働かない
+# チェックリスト構造と矛盾するため、`core/references/` 側に置く）。
+# ---------------------------------------------------------------------------
+
+echo "== レビュー指摘対応時に「守るべき性質」の言語化を促す記述がある（#197） =="
+
+RG197_INVARIANT_PHRASE='この修正が守ろうとしている性質を、コミットメッセージ本文（またはこのissueへのコメント）に1文で書くこと'
+
+RG197_CLAUDE_HIT="$(grep -F "$RG197_INVARIANT_PHRASE" "${REPO_ROOT}/skills/run/references/review.md" || true)"
+if [ -n "$RG197_CLAUDE_HIT" ]; then
+  pass "skills/run/references/review.md: review issueテンプレートに性質の言語化を促す指示がある（#197）"
+else
+  fail "skills/run/references/review.md: review issueテンプレートに性質の言語化を促す指示がある（#197）"
+fi
+
+RG197_CODEX_HIT="$(grep -F "$RG197_INVARIANT_PHRASE" "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md" || true)"
+if [ -n "$RG197_CODEX_HIT" ]; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: review issueテンプレートに性質の言語化を促す指示がある（#197）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: review issueテンプレートに性質の言語化を促す指示がある（#197）"
+fi
+
+# issueテンプレートに埋め込む以上、実際に `gh issue create` の heredoc（`## 対応時の指示`
+# セクション）の中にあることを確認する。手順書の説明文にだけ書いて heredoc から漏れる
+# 再発を防ぐ（#194と同種の「別ファイルに書いたつもりが本来の適用箇所から漏れる」失敗）。
+RG197_CLAUDE_BODY_REGION="$(sed -n '/^gh issue create --label "task,review"/,/^BODY$/p' "${REPO_ROOT}/skills/run/references/review.md")"
+if echo "$RG197_CLAUDE_BODY_REGION" | grep -Fq "$RG197_INVARIANT_PHRASE"; then
+  pass "skills/run/references/review.md: 性質の言語化指示がissue本文のheredocの中にある（#197）"
+else
+  fail "skills/run/references/review.md: 性質の言語化指示がissue本文のheredocの中にある（#197）" \
+    "$RG197_CLAUDE_BODY_REGION"
+fi
+
+RG197_CODEX_BODY_REGION="$(sed -n '/^gh issue create --label "task,review"/,/^BODY$/p' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md")"
+if echo "$RG197_CODEX_BODY_REGION" | grep -Fq "$RG197_INVARIANT_PHRASE"; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: 性質の言語化指示がissue本文のheredocの中にある（#197）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: 性質の言語化指示がissue本文のheredocの中にある（#197）" \
+    "$RG197_CODEX_BODY_REGION"
+fi
+
+RG197_CHECKLIST_PHRASE='元の問題と同じ性質の欠陥を別の場所に作っていないか'
+
+if grep -Fq "$RG197_CHECKLIST_PHRASE" "${REPO_ROOT}/core/references/review-checklist-correctness.md"; then
+  pass "core/references/review-checklist-correctness.md: 修正の妥当性チェック項目がある（#197）"
+else
+  fail "core/references/review-checklist-correctness.md: 修正の妥当性チェック項目がある（#197）"
+fi
+
+# core/references/*.md は evaluator が起動時に自分で読むファイルであり、生成物
+# （agents/evaluator.md・codex-agents/evaluator.toml）には束ねられない。フラット化ビュー
+# （EVALUATOR_ROLE_FLAT / AGENT_EVALUATOR_FLAT / CODEX_AGENT_EVALUATOR_FLAT。冒頭で
+# core/references/*.md を連結して作る）でも見えることを確認し、Claude/Codex 双方の
+# evaluator が同じ観点表を経由して同じチェックリストに到達できることを固定する。
+for RG197_FLAT_NAME in EVALUATOR_ROLE_FLAT AGENT_EVALUATOR_FLAT CODEX_AGENT_EVALUATOR_FLAT; do
+  RG197_FLAT_PATH="${!RG197_FLAT_NAME}"
+  if grep -Fq "$RG197_CHECKLIST_PHRASE" "$RG197_FLAT_PATH"; then
+    pass "${RG197_FLAT_NAME}: 修正の妥当性チェック項目に到達できる（#197）"
+  else
+    fail "${RG197_FLAT_NAME}: 修正の妥当性チェック項目に到達できる（#197）"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# heredoc本文にdev-workflow内部のissue番号を埋め込んでいないこと（issue #198）
+#
+# R2（指摘のissue化）が作成するreview issueテンプレートに、dev-workflow自身のissue番号
+# `#197` が heredoc 本文（`gh issue create --body` の中身）として埋め込まれ、そのまま
+# 駆動先プロジェクトのissue本文として作成される事故があった（#198）。dev-workflowは
+# 駆動先プロジェクトでSKILL.mdを実行するプラグインであり、駆動先リポジトリの`#197`は
+# 無関係なissueを指す。GitHubはこれをリンクとしてレンダリングしてしまう。
+#
+# これは#197（「修正が同じ性質の欠陥を別の場所に作り直す」問題）の修正自身が同じ失敗を
+# 犯した実例であるため、個別ケースの回帰テストではなく、`skills/`・`skills-codex/`配下の
+# 全heredoc本文を機械的に走査する不変条件テストとして固定する（#198「併せて検討すること」）。
+#
+# heredocの区切りは全ファイルで`cat <<'BODY'`〜`^BODY$`の1種類のみ（事前調査で確認済み）。
+# 判定対象はheredoc本文の中だけに限る。heredocの外側にある手順書側の説明文
+# （`### 指摘対応時に「性質」を言語化させる（#197）`等）は、駆動先issue本文には漏れないため
+# 対象外でよい（review.md「対応時の指示」節参照）。
+#
+# `#[0-9]+`（`#`の直後が数字）という固定issue番号のパターンだけを検査する。
+# プレースホルダ（`#[epic番号]` / `#[番号]` / `#XX` 等）は`#`の直後が`[`や`X`であり
+# 数字ではないため一致しない。`$ARGUMENTS`由来の動的な参照も数字を直接書かないため
+# 一致しない。誤検出ゼロであることは、既存の全heredoc（epic/task issueテンプレート、
+# スキップ済みタスクのコメント、PR本文）を対象に確認済み。
+# ---------------------------------------------------------------------------
+
+echo "== heredoc本文にdev-workflow内部のissue番号が埋め込まれていない（#198） =="
+
+RG198_LEAK_DETAIL=""
+for RG198_FILE in $(find "${REPO_ROOT}/skills" "${REPO_ROOT}/skills-codex" -name "*.md" | sort); do
+  RG198_BODY_REGION="$(awk '/cat <<.BODY./{inblk=1; next} inblk && /^BODY$/{inblk=0; next} inblk' "$RG198_FILE")"
+  [ -n "$RG198_BODY_REGION" ] || continue
+  RG198_HIT="$(printf '%s\n' "$RG198_BODY_REGION" | grep -noE '#[0-9]+' || true)"
+  if [ -n "$RG198_HIT" ]; then
+    RG198_LEAK_DETAIL="${RG198_LEAK_DETAIL}${RG198_FILE}: ${RG198_HIT}
+"
+  fi
+done
+
+if [ -z "$RG198_LEAK_DETAIL" ]; then
+  pass "skills/ skills-codex/: 全heredoc本文にdev-workflow内部のissue番号が埋め込まれていない（#198）"
+else
+  fail "skills/ skills-codex/: 全heredoc本文にdev-workflow内部のissue番号が埋め込まれていない（#198）" \
+    "$RG198_LEAK_DETAIL"
+fi
+unset RG198_FILE RG198_BODY_REGION RG198_HIT RG198_LEAK_DETAIL
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
