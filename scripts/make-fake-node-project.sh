@@ -36,18 +36,40 @@
 #     この数値だけは実プロジェクトでしか得られない
 #   - 実 workspace 構成での正確なディスク増加量（--workspace-files で目安は作れる）
 #
-# 使い方:
-#   bash scripts/make-fake-node-project.sh --dest /c/tmp/fake-node-app
-#   bash scripts/make-fake-node-project.sh --dest ... --packages 500 --workspace-files 200
-#   bash scripts/make-fake-node-project.sh --dest ... --with-cycle
-#   bash scripts/make-fake-node-project.sh --dest ... --verify
+# 使い方（#176 の測定は必ずコンテナ内で行う。理由は後述「なぜホストパスを使わないか」）:
+#   # 測定の前に必ず1回、mode が none でないことを確認する:
+#   bash scripts/sandbox-exec.sh --epic <epic> --print-plan
+#
+#   bash scripts/sandbox-exec.sh --epic <epic> \
+#       'bash scripts/make-fake-node-project.sh --dest /tmp/fake-node-app'
+#   bash scripts/sandbox-exec.sh --epic <epic> \
+#       'bash scripts/make-fake-node-project.sh --dest /tmp/fake-node-app --packages 500 --workspace-files 200'
+#   bash scripts/sandbox-exec.sh --epic <epic> \
+#       'bash scripts/make-fake-node-project.sh --dest /tmp/fake-node-app --with-cycle'
+#   bash scripts/sandbox-exec.sh --epic <epic> \
+#       'bash scripts/make-fake-node-project.sh --dest /tmp/fake-node-app --verify'
 #
 #   # 測定可能な組（ソース + レーン）を2コマンドで作る（#201）:
-#   bash scripts/make-fake-node-project.sh --dest <src>  --packages 500
-#   bash scripts/make-fake-node-project.sh --dest <lane> --as-lane
-#   # その後、レーンの作業ディレクトリを <lane> としてカレントに移り
-#   # share-prepared-dirs.sh --source <src> --dir "node_modules yarn.lock package.json"
-#   # を実行すると linked が観測できる
+#   bash scripts/sandbox-exec.sh --epic <epic> \
+#       'bash scripts/make-fake-node-project.sh --dest /tmp/fake-node-src  --packages 500'
+#   bash scripts/sandbox-exec.sh --epic <epic> \
+#       'bash scripts/make-fake-node-project.sh --dest /tmp/fake-node-lane --as-lane'
+#   # 続けて share-prepared-dirs.sh もコンテナ内で、レーンの作業ディレクトリ（<lane>）を
+#   # カレントディレクトリとして実行すると linked が観測できる:
+#   bash scripts/sandbox-exec.sh --epic <epic> \
+#       'cd /tmp/fake-node-lane && bash /workspace/scripts/share-prepared-dirs.sh \
+#          --source /tmp/fake-node-src --dir "node_modules yarn.lock package.json"'
+#
+# なぜホストパス（例: /c/tmp/fake-node-app）を --dest に使わないか（#202）:
+#   sandbox-exec.sh はカレントディレクトリからリポジトリを解決する。リポジトリ外かつ
+#   サンドボックス定義も見つからない場所（例: ホストの /c/tmp から呼び出した場合）は
+#   `mode=none` となり、`run_and_report sh -c "$CMD"` で**ホスト側 Git Bash 上でそのまま
+#   実行される**（scripts/sandbox-exec.sh:792-797）。#176 の主眼は「コンテナ内からの
+#   `ln -s` が Windows バインドマウント上でどうなるか」であり、ホスト実行の結果は
+#   その答えにならない。しかも `--verify` の出力だけではどちらで実行されたかを
+#   区別できない（誤った測定値が正しい形式のまま記録される）。
+#   **測定前に必ず `bash scripts/sandbox-exec.sh --epic <epic> --print-plan` を実行し、
+#   `mode` が `none` でないことを確認すること。`mode=none` のまま得た結果は無効である。**
 #
 # オプション:
 #   --dest <path>            生成先。必須。既存かつ空でなければ何もせず失敗する（後述の安全ルール）
@@ -278,8 +300,11 @@ printf 'fixture\tinvalid\n'
 {
   echo "警告: symlink が symlink として作成できていない（ホスト側 Git Bash が ln -s をコピーに落とした可能性）。"
   echo "この fixture では .bin / workspace の symlink が存在せず、#176 の測定対象そのものが欠ける。"
-  echo "対処: 生成先を空にしてから、コンテナ内で本スクリプトを実行する:"
-  echo "  bash scripts/sandbox-exec.sh --epic <epic> -- bash tests/fixtures/make-fake-node-project.sh --dest <コンテナ内パス>"
+  echo "対処: 生成先を空にしてから、コンテナ内で本スクリプトを実行する（先に --print-plan で"
+  echo "      mode が none でないことを確認すること。mode=none のままではこの警告と同じ状態が"
+  echo "      「コンテナ内で実行した」つもりのまま再現し、測定が無言ですり替わる）:"
+  echo "  bash scripts/sandbox-exec.sh --epic <epic> --print-plan"
+  echo "  bash scripts/sandbox-exec.sh --epic <epic> 'bash scripts/make-fake-node-project.sh --dest <コンテナ内パス>'"
   echo "または Git Bash 側で MSYS=winsymlinks:nativestrict を設定し、開発者モードを有効にして再実行する。"
 } >&2
 exit 0
