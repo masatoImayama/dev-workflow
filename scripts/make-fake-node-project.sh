@@ -107,8 +107,15 @@
 #   上書きや掃除を試みず、そのまま失敗する。後始末は利用者が明示的に行う。
 #
 # 終了コード:
-#   0 = 生成を完了した、または --verify で検査を完了した
-#       （fixture が測定に使えるかどうかは stdout 最終行の `fixture<TAB>valid|invalid` で表す）
+#   0 = 生成（通常 / --as-lane）を完了した、または --verify で検査を完了した。
+#       stdout 最終行の意味はモードで異なる（#205。生成モードと --verify では
+#       「valid/invalid」が答える問いが違うため、無理に1本の語彙に畳み込まない）:
+#         - 生成モード（通常 / --as-lane）: `fixture<TAB>valid|invalid`
+#           （symlink が本当に symlink として作れたか。ホスト側 Git Bash が
+#           `ln -s` をコピーに落とした場合などに invalid になる）
+#         - --verify: `fixture<TAB>checked`（.bin・workspace の状態や disk-kb 等、
+#           複数観点を個別の行で出しており単一の valid/invalid には畳み込めない。
+#           ただし node_modules 自体が丸ごと欠落している場合のみ `invalid` を出す）
 #   2 = 引数エラー（未知のオプション・--dest 未指定・生成先が空でない）
 #
 # 人間向けメッセージは stderr、機械可読な結果は stdout に出す
