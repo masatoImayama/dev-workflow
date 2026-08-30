@@ -6779,13 +6779,13 @@ DOC55_README="${REPO_ROOT}/README.md"
 DOC55_AGENT_GENERATOR="${REPO_ROOT}/agents/generator.md"
 DOC55_CODEX_AGENT_GENERATOR="${REPO_ROOT}/codex-agents/generator.toml"
 
-# --- 両 plugin.json のバージョンが 0.17.0 で一致している（#122 でマイナー更新） ---
+# --- 両 plugin.json のバージョンが 0.18.0 で一致している（#143 #173 #174 でマイナー更新） ---
 
 DOC55_CLAUDE_VERSION="$(grep -m1 '"version"' "$DOC55_CLAUDE_PLUGIN_JSON" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
 DOC55_CODEX_VERSION="$(grep -m1 '"version"' "$DOC55_CODEX_PLUGIN_JSON" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
 
-assert_eq ".claude-plugin/plugin.json のバージョンが0.17.0である" "0.17.0" "$DOC55_CLAUDE_VERSION"
-assert_eq ".codex-plugin/plugin.json のバージョンが0.17.0である" "0.17.0" "$DOC55_CODEX_VERSION"
+assert_eq ".claude-plugin/plugin.json のバージョンが0.18.0である" "0.18.0" "$DOC55_CLAUDE_VERSION"
+assert_eq ".codex-plugin/plugin.json のバージョンが0.18.0である" "0.18.0" "$DOC55_CODEX_VERSION"
 assert_eq "両plugin.jsonのバージョンが一致している" "$DOC55_CLAUDE_VERSION" "$DOC55_CODEX_VERSION"
 
 # --- core/instructions.md に watchdog の3点の記述がある ---
