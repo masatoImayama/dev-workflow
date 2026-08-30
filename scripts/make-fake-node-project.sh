@@ -90,6 +90,8 @@ if [ "$VERIFY" -eq 1 ]; then
     printf 'fixture\tinvalid\n'
     exit 0
   fi
+  # shellcheck disable=SC2012  # share-prepared-dirs.sh の完全性検証が使う `ls -A | wc -l` と
+  # 同じ数え方を意図的に再現するため（find を使うと件数の数え方がずれる）。
   printf 'entries-toplevel\t%s\n' "$(ls -A "$NM" 2>/dev/null | wc -l | tr -d ' ')"
   # .bin 配下の各エントリが symlink のままか実ファイルかを1件ずつ出す。
   # コピー・フォールバックが `-L` で成立したなら realfile になっているはずで、symlink の
@@ -113,6 +115,8 @@ if [ "$VERIFY" -eq 1 ]; then
   if [ -L "$WS" ]; then
     printf 'workspace\tsymlink\t%s\n' "$(readlink "$WS")"
   elif [ -d "$WS" ]; then
+    # shellcheck disable=SC2012  # share-prepared-dirs.sh の完全性検証が使う `ls -A | wc -l` と
+    # 同じ数え方を意図的に再現するため（find を使うと件数の数え方がずれる）。
     printf 'workspace\tdirectory\t%s\n' "$(ls -A "$WS" 2>/dev/null | wc -l | tr -d ' ')"
   else
     printf 'workspace\tmissing\t-\n'
@@ -203,6 +207,8 @@ fi
 # 測定そのものが無効になる。
 printf 'dest\t%s\n' "$DEST"
 printf 'packages\t%s\n' "$PACKAGES"
+# shellcheck disable=SC2012  # share-prepared-dirs.sh の完全性検証が使う `ls -A | wc -l` と
+# 同じ数え方を意図的に再現するため（find を使うと件数の数え方がずれる）。
 printf 'entries-toplevel\t%s\n' "$(ls -A "$NM" | wc -l | tr -d ' ')"
 printf 'workspace-files\t%s\n' "$WORKSPACE_FILES"
 printf 'disk-kb\t%s\n' "$(du -sk "$NM" 2>/dev/null | cut -f1)"
