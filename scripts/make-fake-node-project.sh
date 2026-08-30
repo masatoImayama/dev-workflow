@@ -5,13 +5,28 @@
 # 実 Node.js/yarn プロジェクトが手元に無いために止まっている（ADR-0007 / ADR-0008 が
 # 「`ln -s` が実際に失敗する状態そのものを再現できていない」と繰り返し記録している）。
 #
-# しかし share-prepared-dirs.sh が分岐に使うのは `node_modules` の**構造**だけであり、
-# 中身が実在のパッケージかどうかは一切見ていない。使うのは次の4点である:
+# しかし share-prepared-dirs.sh が**ソース側**（--source）の分岐に使うのは `node_modules` の
+# **構造**だけであり、中身が実在のパッケージかどうかは一切見ていない。ソース側で使うのは
+# 次の4点である:
 #
 #   1. 直下エントリ数           -> コピー完全性検証（`ls -A` の件数一致）が実データ量で通るか
 #   2. ファイルへの symlink     -> `.bin/*`。`-L` 無しの `cp -a` が部分失敗する原因（#178）
 #   3. ディレクトリへの symlink -> yarn workspace 相当。`-L` でディスクが膨らむ原因
 #   4. 深い階層・循環 symlink   -> COPY_CYCLE_GUARD_CAP（80）が発火するか（#182 / #185）
+#
+# ただし linked / exists / fingerprint-mismatch のどれになるかを最終的に決めるのは
+# **レーン側の状態**である（share-prepared-dirs.sh の判定順序）。実際に分岐を決める要因は
+# 主に次の2つで、いずれもソース側の構造とは独立している（#201）:
+#   - フィンガープリント照合（share-prepared-dirs.sh:590）はレーン側にも同一の
+#     `package.json` / `yarn.lock` が存在し内容が一致することを要求する。欠けたり
+#     不一致なら fingerprint-mismatch で確定し、`ln -s` にも `cp` にも到達しない
+#   - 判定順序2（share-prepared-dirs.sh:646）はレーン側の `node_modules` が既に
+#     「非空の実体」なら exists で確定する。本スクリプトが作る node_modules は
+#     `--packages 0` でも `.bin` / eslint / typescript / jest / `@fake` を無条件に
+#     作るため、通常生成した2つを src / lane にそのまま据えると**必ず exists** になり、
+#     linked / copied には到達しない
+# そのため測定にはソース用とレーン用を別々に用意する必要があり、レーン用には
+# 通常生成ではなく後述の `--as-lane` を使う。
 #
 # 本スクリプトはこの4点だけを持つ偽プロジェクトを数十秒で作る。`yarn install` の20〜40分を
 # 待たずに linked / copied / link-failed / copy-cycle-guard のどれが出るかを何度でも試せる。
@@ -22,10 +37,17 @@
 #   - 実 workspace 構成での正確なディスク増加量（--workspace-files で目安は作れる）
 #
 # 使い方:
-#   bash tests/fixtures/make-fake-node-project.sh --dest /c/tmp/fake-node-app
-#   bash tests/fixtures/make-fake-node-project.sh --dest ... --packages 500 --workspace-files 200
-#   bash tests/fixtures/make-fake-node-project.sh --dest ... --with-cycle
-#   bash tests/fixtures/make-fake-node-project.sh --dest ... --verify
+#   bash scripts/make-fake-node-project.sh --dest /c/tmp/fake-node-app
+#   bash scripts/make-fake-node-project.sh --dest ... --packages 500 --workspace-files 200
+#   bash scripts/make-fake-node-project.sh --dest ... --with-cycle
+#   bash scripts/make-fake-node-project.sh --dest ... --verify
+#
+#   # 測定可能な組（ソース + レーン）を2コマンドで作る（#201）:
+#   bash scripts/make-fake-node-project.sh --dest <src>  --packages 500
+#   bash scripts/make-fake-node-project.sh --dest <lane> --as-lane
+#   # その後、レーンの作業ディレクトリを <lane> としてカレントに移り
+#   # share-prepared-dirs.sh --source <src> --dir "node_modules yarn.lock package.json"
+#   # を実行すると linked が観測できる
 #
 # オプション:
 #   --dest <path>            生成先。必須。既存かつ空でなければ何もせず失敗する（後述の安全ルール）
@@ -35,6 +57,12 @@
 #   --with-cycle             循環シンボリックリンクを1本仕込む（COPY_CYCLE_GUARD_CAP の発火確認用）。
 #                            既定では作らない。**通常の測定では付けないこと**（ガードが発火すると
 #                            そのエントリは copy-failed で確定し、コピー経路の測定にならない）
+#   --as-lane                レーン側の状態を模す（#201）。`node_modules` は一切作らず、
+#                            通常生成と**同一内容**の `package.json` / `yarn.lock` だけを置く。
+#                            これにより share-prepared-dirs.sh のフィンガープリント照合は一致し、
+#                            レーン側 `node_modules` は不在（非空の実体ではない）ので判定順序2の
+#                            exists にも該当せず、`ln -s` の分岐まで到達できる。
+#                            --packages / --workspace-files / --with-cycle は無視される
 #   --verify                 生成せず、--dest の中身を検査して機械可読な結果を出す
 #
 # 安全ルール（share-prepared-dirs.sh の冒頭コメントと揃える）:
@@ -55,6 +83,7 @@ PACKAGES=300
 WORKSPACE_FILES=50
 WITH_CYCLE=0
 VERIFY=0
+AS_LANE=0
 
 die() { printf '%s\n' "$*" >&2; exit 2; }
 
@@ -64,6 +93,7 @@ while [ $# -gt 0 ]; do
     --packages)        [ $# -ge 2 ] || die "--packages には値が必要"; PACKAGES="$2"; shift 2 ;;
     --workspace-files) [ $# -ge 2 ] || die "--workspace-files には値が必要"; WORKSPACE_FILES="$2"; shift 2 ;;
     --with-cycle)      WITH_CYCLE=1; shift ;;
+    --as-lane)         AS_LANE=1; shift ;;
     --verify)          VERIFY=1; shift ;;
     *) die "未知のオプション: $1（黙って無視しない）" ;;
   esac
@@ -152,6 +182,18 @@ cat > "$DEST/yarn.lock" <<'LOCK'
 # THIS IS A FAKE LOCKFILE -- dev-workflow issue #176 fixture
 # yarn lockfile v1
 LOCK
+
+# --as-lane: レーン側の状態だけを作って終わる（#201）。node_modules を一切作らないため、
+# share-prepared-dirs.sh の判定順序2（レーン側が非空の実体なら exists）に該当せず、
+# 直上で書いたマニフェストが --dest（通常生成）側と同一内容なのでフィンガープリント照合も
+# 一致し、`ln -s` の分岐まで到達できる。
+if [ "$AS_LANE" -eq 1 ]; then
+  printf 'dest\t%s\n' "$DEST"
+  printf 'mode\tlane\n'
+  printf 'node-modules\tabsent\n'
+  printf 'fixture\tvalid\n'
+  exit 0
+fi
 
 # 1. 直下エントリ数を稼ぐダミーパッケージ。コピー完全性検証（ソースと一時ディレクトリの
 #    `ls -A` 件数一致）が実データ量で通るかを見るための重り。
