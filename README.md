@@ -464,8 +464,13 @@ main（保護: 人間のみマージ可）
   `git merge --ff-only "$WAVE_BASE"` で自分の HEAD を明示的に合わせる。**`git reset --hard` は
   使わない**（一般的な安全設定でブロックされる代表的なコマンドであり、実際に本Epicのウェーブ2で
   全レーンがこれにより着手不能になって停止した。`merge --ff-only` は破壊的でなくブロックされ
-  にくいうえ、isolation worktreeの分岐元はWAVE_BASEの祖先であるためfast-forwardは必ず成功する）
-  （`core/roles/generator.md`「渡されたベースにHEADを合わせる」参照）
+  にくいうえ、メインリポのHEADがWAVE_BASEの祖先である限りfast-forwardは成功する。Epicブランチを
+  切った後にデフォルトブランチが進むとこの前提は崩れうるため、generatorはmergeの前に
+  `git merge-base --is-ancestor HEAD "$WAVE_BASE"` で可否を事前判定して証跡に残し、失敗理由が
+  「分岐元のずれ」か「作業ツリーの汚れ」かを停止報告から判別できるようにする）
+  （`core/roles/generator.md`「渡されたベースにHEADを合わせる」参照）。
+  **v0.17.0 以前はここが `git reset --hard` だったため、`permissions.deny` のある環境では
+  ウェーブ2以降で全レーンが着手不能になる。v0.18.0 以降へ更新すること**
 - レーン（generator の isolation worktree）は wave ブランチへ merge-base 検証つきで取り込まれ、**wave ブランチ上でウェーブ末の取り込み検証（merge-base完全一致検証・可読性ガード）を1回だけ通過してから** Epic ブランチへ `--ff-only` で進む。**プロジェクトの全テストはここでは走らせない**（Epicにつき1回のEpic統合ゲートに集約する。#144）
 - **Epic ブランチにはウェーブ末の取り込み検証を通過したコミットが載る。** プロジェクトの全テストはEpic統合ゲート（Epicにつき1回）で検証するため、Epicブランチに「フルスイート未通過のコミット」が一時的に載りうる（従来の不変条件「Epicブランチには統合ゲートを通ったコミットだけが載る」からの変更。トレードオフは上記「機械的ゲートの三段構成」参照）
 - **Epic ブランチへの force push は行わない。wave ブランチは origin へ push しない**（ローカルの一時ブランチ）

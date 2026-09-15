@@ -17,9 +17,16 @@
 #         （task ラベル付き closed のみ充足済み。それ以外は unknown-dep として警告し無視する）。
 #
 #         Epic 混入対策: 本文の「- Epic: #N」行（`skills/epic/SKILL.md` の Task issue テンプレート、
-#         `skills/run/SKILL.md` の Review issue テンプレートが書く行）を見て、N が指定 Epic と
-#         異なるタスクだけを除外する。行が無い
-#         （旧形式の Task issue）場合はフェイルオープンで含める。`gh issue list --search` は
+#         `skills/run/SKILL.md` の Review issue テンプレートが書く行）を見て、指定 Epic の
+#         タスクだけを残す。判定は「- Epic: 行の有無」で分岐する:
+#           - 行が無い（旧形式の Task issue）        -> 判定不能。フェイルオープンで含める
+#           - 行があり #<指定Epic> を含む            -> 含める
+#           - 行があり別の #N を含む                 -> 除外する
+#           - 行があるが issue 番号を含まない
+#             （「- Epic: なし（単発タスク）」等）   -> 除外する。これは「判定不能」ではなく
+#             「Epic に属さない」という明示の宣言であり、含めると無関係な実装が Epic ブランチに
+#             載る（Task #208 で実データから発覚）
+#         `gh issue list --search` は
 #         数値・記号をトークン化して "Epic: #3" が "#34" 等にもマッチする誤検出を起こすため
 #         （Task #39 対応時に実データで確認済み）、本文の完全一致抽出のみを信頼する。
 #
@@ -155,10 +162,15 @@ load_from_gh() {
   local num deps_line epic_line epic_in_line
   while IFS=$'\x1f' read -r num deps_line epic_line; do
     [ -n "$num" ] || continue
-    # 本文の「- Epic: #N」行から N を取り出す（無ければ空文字＝フェイルオープンで含める）。
-    epic_in_line="$(printf '%s' "$epic_line" | grep -oE '#[0-9]+' | head -1 | tr -d '#')"
-    if [ -n "$epic_in_line" ] && [ "$epic_in_line" != "$EPIC" ]; then
-      continue
+    # 本文の「- Epic:」行の**有無**で分岐する。行が無い（旧形式）ときだけフェイルオープンで含める。
+    # 行があるなら、そこから取り出した #N が指定 Epic と一致する場合だけ含める。
+    # 「- Epic: なし（単発タスク）」のように issue 番号を持たない宣言は「判定不能」ではなく
+    # 「Epic に属さないと明記されている」ため除外する（Task #208 で実データから発覚）。
+    if [ -n "$epic_line" ]; then
+      epic_in_line="$(printf '%s' "$epic_line" | grep -oE '#[0-9]+' | head -1 | tr -d '#')"
+      if [ "$epic_in_line" != "$EPIC" ]; then
+        continue
+      fi
     fi
     register_task "$num" "open" "$deps_line"
   done < <(gh issue list --label task --state open --json number,body --limit 200 \
