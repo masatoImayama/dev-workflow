@@ -104,9 +104,14 @@ run は1レーンに**複数のタスクを割り当てることがある**（`#
   deny により着手不能になって停止した**（deny はプロジェクト側の allow で上書きできない）
 - **`git merge --ff-only <WAVE_BASE>` を第一手段とする。** 破壊的操作ではないため一般的な
   deny 設定の対象になりにくい。レーンの isolation worktree はハーネスによってメインリポの
-  HEAD から分岐して作られ、`WAVE_BASE` は必ずその子孫（Epic ブランチ上のコミット）であるため、
-  **fast-forward は必ず成功する**（手順1で作業ツリーが空であることを確認済みなら、コンフリクトの
-  余地は無い）。**fast-forward が失敗した場合は自力で直そうとせず、着手せずに報告して停止する**
+  HEAD（通常はデフォルトブランチ）から分岐して作られる。**メインリポの HEAD が `WAVE_BASE` の
+  祖先である限り fast-forward は成功する**（手順1で作業ツリーが空であることを確認済みなら、
+  コンフリクトの余地は無い）。ただしこれは「必ず」ではない。**Epic ブランチを切った後に
+  デフォルトブランチが進むと前提が崩れ**、自分の HEAD が `WAVE_BASE` の祖先でなくなって
+  `Not possible to fast-forward` で失敗する。そのため手順2の前に
+  `git merge-base --is-ancestor HEAD "<WAVE_BASE>"` で**事前判定を証跡に残す**
+  （失敗理由が「分岐元のずれ」か「作業ツリーの汚れ」かを、報告を読む側が機械的に判別できる）。
+  **fast-forward が失敗した場合は自力で直そうとせず、着手せずに報告して停止する**
   （誤ったベースの上で実装を続けるより安全）
 
 **証跡はファイルに書き出し、報告にはパスと1行の判定だけを載せる**（Task #156。
@@ -124,8 +129,12 @@ BASE_EVIDENCE_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
 #    空でなければ実装を始めず、$BASE_EVIDENCE_FILE のパスを添えて報告し停止する
 #    （安全弁。作業ツリーが汚れた状態のまま先へ進まない）
 
-# 2) HEAD を WAVE_BASE に合わせる（fetch/checkout/pull ではない。ネットワーク不要。
-#    破壊的でないため reset --hard より安全。失敗したら着手せず報告して停止する）
+# 2a) fast-forward が可能かを事前判定して証跡に残す（FF_IMPOSSIBLE_BASE_DIVERGED なら
+#     ハーネスが切った分岐元が WAVE_BASE から分岐している＝作業ツリーの汚れではない）
+{ echo '$ git merge-base --is-ancestor HEAD "<WAVE_BASE>"'; git merge-base --is-ancestor HEAD "<WAVE_BASE>" && echo FF_POSSIBLE || echo FF_IMPOSSIBLE_BASE_DIVERGED; } | tee -a "$BASE_EVIDENCE_FILE"
+
+# 2b) HEAD を WAVE_BASE に合わせる（fetch/checkout/pull ではない。ネットワーク不要。
+#     破壊的でないため reset --hard より安全。失敗したら着手せず報告して停止する）
 { echo '$ git merge --ff-only "<WAVE_BASE>"'; git merge --ff-only "<WAVE_BASE>"; } | tee -a "$BASE_EVIDENCE_FILE"
 
 # 3) 検証する
@@ -142,7 +151,7 @@ BASE_EVIDENCE_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-lane-evidence.XXXXXX")"
 ことは無い。それでも手順を1回に限定するのは、手順1「作業ツリーが空であること」の確認を
 コミット後の状態で走らせて誤った停止判定をしないためである）。
 
-手順3の検証に失敗した場合、**自力で直そうとせず、`$BASE_EVIDENCE_FILE` のパスを添えて
+手順3（検証）に失敗した場合、**自力で直そうとせず、`$BASE_EVIDENCE_FILE` のパスを添えて
 報告し停止する。** 誤ったベースの上で実装を続けると、先行タスクの変更を打ち消す差分ができる。
 
 完了報告には手順1〜4の実出力を貼らず、`ベース検証: OK evidence=$BASE_EVIDENCE_FILE`

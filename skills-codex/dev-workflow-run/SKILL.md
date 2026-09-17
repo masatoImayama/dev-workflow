@@ -311,17 +311,20 @@ Task #<番号> を実装してください。
   1) `{ echo '$ git status --short --untracked-files=all'; git status --short --untracked-files=all; } | tee -a "$BASE_EVIDENCE_FILE"`
      （空であることを確認。`--untracked-files=all` で `status.showUntrackedFiles=no` のような
      ローカル設定による空振りを防ぐ（#195）。空でなければ実装を始めず、`$BASE_EVIDENCE_FILE` のパスを添えて報告し停止すること）
-  2) `{ echo '$ git merge --ff-only <WAVE_BASE>'; git merge --ff-only <WAVE_BASE>; } | tee -a "$BASE_EVIDENCE_FILE"`
+  2) `{ echo '$ git merge-base --is-ancestor HEAD <WAVE_BASE>'; git merge-base --is-ancestor HEAD <WAVE_BASE> && echo FF_POSSIBLE || echo FF_IMPOSSIBLE_BASE_DIVERGED; } | tee -a "$BASE_EVIDENCE_FILE"`
+     （fast-forwardが可能かの事前判定。`FF_IMPOSSIBLE_BASE_DIVERGED` なら、ハーネスが切った
+     分岐元がWAVE_BASEから分岐している＝作業ツリーの汚れではない、と停止報告から判別できる）
+  3) `{ echo '$ git merge --ff-only <WAVE_BASE>'; git merge --ff-only <WAVE_BASE>; } | tee -a "$BASE_EVIDENCE_FILE"`
      （HEADをWAVE_BASEに合わせる。fetch/checkout/pullではないためネットワーク不要。
-     `git reset --hard` は一般的な安全設定でブロックされるため使わない。既に WAVE_BASE の
-     子孫のはずなので通常はno-opになるが、失敗した場合は自力で直そうとせず報告し停止すること）
-  3) `{ echo '$ git merge-base --is-ancestor <WAVE_BASE> HEAD && echo BASE_OK'; git merge-base --is-ancestor <WAVE_BASE> HEAD && echo BASE_OK; } | tee -a "$BASE_EVIDENCE_FILE"`
+     `git reset --hard` は一般的な安全設定でブロックされるため使わない。メインリポのHEADが
+     WAVE_BASEの祖先である限り成功するが、失敗した場合は自力で直そうとせず報告し停止すること）
+  4) `{ echo '$ git merge-base --is-ancestor <WAVE_BASE> HEAD && echo BASE_OK'; git merge-base --is-ancestor <WAVE_BASE> HEAD && echo BASE_OK; } | tee -a "$BASE_EVIDENCE_FILE"`
      （偽なら実装を始めず、`$BASE_EVIDENCE_FILE` のパスを添えて報告し停止すること）
-  4) `{ echo '$ git log --oneline -1'; git log --oneline -1; } | tee -a "$BASE_EVIDENCE_FILE"`
+  5) `{ echo '$ git log --oneline -1'; git log --oneline -1; } | tee -a "$BASE_EVIDENCE_FILE"`
      （実際のHEADが証跡に残る）
   報告には `ベース検証: [OK|NG] evidence=[BASE_EVIDENCE_FILEのパス]` の1行だけを書くこと
 - **`git fetch` / `git checkout` / `git pull` / `git reset --hard` は実行しないこと。** 同期は
-  run が Epic 専用 worktree で既に済ませている。手順2の `git merge --ff-only` のみが例外として
+  run が Epic 専用 worktree で既に済ませている。手順3の `git merge --ff-only` のみが例外として
   許可されている
 - 作業ディレクトリ: <EPIC_WT>（ここから移動しないこと）
 - **サンドボックスに渡すコマンドの中で `cd` して作業ディレクトリを変えないこと。**

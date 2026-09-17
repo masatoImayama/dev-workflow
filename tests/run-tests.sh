@@ -3456,6 +3456,7 @@ case "$*" in
     printf '100%s%s- Epic: #14\n' "$US" "$US"    # 指定Epicと一致 -> 含める
     printf '200%s%s- Epic: #3\n' "$US" "$US"     # 別Epic -> 除外する
     printf '300%s%s\n' "$US" "$US"               # Epic行が無い旧形式 -> フェイルオープンで含める
+    printf '400%s%s- Epic: なし（単発タスク）\n' "$US" "$US"  # Epicに属さないと明記 -> 除外する（#208）
     ;;
 esac
 FAKE_GH
@@ -3488,6 +3489,15 @@ if printf '%s\n' "$PW_GH_OUTPUT" | grep -q '^task	300	'; then
   pass "gh モード: Epic行が無い #300 はフェイルオープンで含まれる"
 else
   fail "gh モード: Epic行が無い #300 はフェイルオープンで含まれる" "output=[${PW_GH_OUTPUT}]"
+fi
+
+# --- #208: 「- Epic: なし（単発タスク）」は「判定不能」ではなく「Epicに属さない」という
+#     明示の宣言であり、フェイルオープンの対象にしない。実運用で、この宣言を持つ単発タスクが
+#     別Epicのウェーブ1に取り込まれ、無関係な実装がEpicブランチに載りかけた ---
+if printf '%s\n' "$PW_GH_OUTPUT" | grep -q '^task	400	'; then
+  fail "gh モード: 「- Epic: なし（単発タスク）」の #400 は除外される（#208）" "output=[${PW_GH_OUTPUT}]"
+else
+  pass "gh モード: 「- Epic: なし（単発タスク）」の #400 は除外される（#208）"
 fi
 
 # ---------------------------------------------------------------------------
@@ -8517,8 +8527,13 @@ fi
 # Task #152 で `git merge --ff-only <WAVE_BASE>` に変更した。`git reset --hard` は一般的な
 # 安全設定（permission deny）でブロックされる代表的なコマンドであり、実際に本Epicのウェーブ2で
 # 全3レーンがこれにより着手不能になって停止した実績があるため（`merge --ff-only` は破壊的でなく
-# ブロックされにくいうえ、isolation worktreeの分岐元はWAVE_BASEの祖先であるためfast-forwardは
-# 必ず成功する）。
+# ブロックされにくいうえ、メインリポのHEADがWAVE_BASEの祖先である限りfast-forwardは成功する）。
+#
+# さらに Task #209 で、merge の前に `git merge-base --is-ancestor HEAD <WAVE_BASE>` による
+# FF可否の事前判定（FF_POSSIBLE / FF_IMPOSSIBLE_BASE_DIVERGED）を挟むようにした。Epicブランチを
+# 切った後にデフォルトブランチが進むと「分岐元はWAVE_BASEの祖先」という前提は崩れうるため、
+# 「必ず成功する」とは書けない。事前判定を証跡に残すことで、停止報告を読む側が失敗理由を
+# 「分岐元のずれ」と「作業ツリーの汚れ」に切り分けられる。
 # ---------------------------------------------------------------------------
 
 echo ""
@@ -8554,9 +8569,9 @@ assert_order() {
 # --- skills/run/SKILL.md: Step 3 プロンプト雛形に4手順がこの順で現れる ---
 RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$RUN_SKILL_FLAT")"
 
-assert_order "SKILL.md: Step 3 雛形に git status --short → git merge --ff-only → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89）" \
+assert_order "SKILL.md: Step 3 雛形に git status --short → FF可否の事前判定 → git merge --ff-only → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89, #209）" \
   "$RS_STEP3" \
-  "git status --short" "git merge --ff-only" "git merge-base --is-ancestor" "git log --oneline -1"
+  "git status --short" "FF_POSSIBLE" "git merge --ff-only" "BASE_OK" "git log --oneline -1"
 
 case "$RS_STEP3" in
   *'あなたの isolation worktree は WAVE_BASE から分岐している'*)
@@ -8576,9 +8591,9 @@ esac
 # --- skills-codex/dev-workflow-run/SKILL.md: Step 3 にも同じ4手順がこの順で現れる ---
 CRS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md")"
 
-assert_order "SKILL.md(codex): Step 3 に git status --short → git merge --ff-only → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89）" \
+assert_order "SKILL.md(codex): Step 3 に git status --short → FF可否の事前判定 → git merge --ff-only → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89, #209）" \
   "$CRS_STEP3" \
-  "git status --short" "git merge --ff-only" "git merge-base --is-ancestor" "git log --oneline -1"
+  "git status --short" "FF_POSSIBLE" "git merge --ff-only" "BASE_OK" "git log --oneline -1"
 
 case "$CRS_STEP3" in
   *'git fetch'*'git checkout'*'git pull'*'実行しないこと'*)
@@ -8601,9 +8616,29 @@ fi
 # （同じ文字列を含む）があるため、節全体を対象にすると散文側の言及に引きずられて誤検知する。
 GEN_STEP0_FENCE="$(printf '%s\n' "$GEN_STEP0" | awk '/^```bash/{f=1;next} /^```/{f=0} f')"
 
-assert_order "core/roles/generator.md: 「0. 」節のコマンド列に git status --short → git merge --ff-only → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89）" \
+assert_order "core/roles/generator.md: 「0. 」節のコマンド列に git status --short → FF可否の事前判定 → git merge --ff-only → git merge-base --is-ancestor → git log --oneline -1 がこの順で現れる（#89, #209）" \
   "$GEN_STEP0_FENCE" \
-  "git status --short" "git merge --ff-only" "git merge-base --is-ancestor" "git log --oneline -1"
+  "git status --short" "FF_POSSIBLE" "git merge --ff-only" "BASE_OK" "git log --oneline -1"
+
+# --- #209: FF可否の事前判定が各ファイルに規定されている ---
+for h209_f in "skills/run/SKILL.md" "skills-codex/dev-workflow-run/SKILL.md" \
+              "core/roles/generator.md" "agents/generator.md"; do
+  h209_path="${REPO_ROOT}/${h209_f}"
+  if grep -Fq 'FF_IMPOSSIBLE_BASE_DIVERGED' "$h209_path"; then
+    pass "${h209_f}: FF可否の事前判定（FF_IMPOSSIBLE_BASE_DIVERGED）が規定されている（#209）"
+  else
+    fail "${h209_f}: FF可否の事前判定（FF_IMPOSSIBLE_BASE_DIVERGED）が規定されている（#209）" \
+      "merge --ff-only の前に git merge-base --is-ancestor HEAD <WAVE_BASE> を入れること"
+  fi
+  # 「fast-forwardは必ず成功する」という成立しない断定が残っていないこと
+  if grep -Fq -e 'fast-forwardは必ず成功する' -e 'fast-forward は必ず成功する' "$h209_path"; then
+    fail "${h209_f}: 「fast-forwardは必ず成功する」という断定が残っていない（#209）" \
+      "$(grep -nF -e 'fast-forwardは必ず成功する' -e 'fast-forward は必ず成功する' "$h209_path")"
+  else
+    pass "${h209_f}: 「fast-forwardは必ず成功する」という断定が残っていない（#209）"
+  fi
+done
+unset h209_f h209_path
 
 case "$GEN_STEP0" in
   *'実装着手前に'*'1回だけ'*)
@@ -9476,9 +9511,9 @@ esac
 # --- core/roles/generator.md: #89 が入れた「0. 」節（ベース合わせ）が引き続き直後に存在し、壊れていない ---
 GEN_STEP0_H2="$(awk '/^### 0\. /{f=1} /^### 1\. /{f=0} f' "${REPO_ROOT}/core/roles/generator.md")"
 
-assert_order "core/roles/generator.md: H2向け編集後も「0. 」節のコマンド列の順序（#89）が保たれている（#94）" \
+assert_order "core/roles/generator.md: H2向け編集後も「0. 」節のコマンド列の順序（#89, #209）が保たれている（#94）" \
   "$(printf '%s\n' "$GEN_STEP0_H2" | awk '/^```bash/{f=1;next} /^```/{f=0} f')" \
-  "git status --short" "git merge --ff-only" "git merge-base --is-ancestor" "git log --oneline -1"
+  "git status --short" "FF_POSSIBLE" "git merge --ff-only" "BASE_OK" "git log --oneline -1"
 
 # --- README.md: 「この1回の準備がウェーブ・レーンをまたいで効く」が消えている ---
 if grep -Fq -- 'この1回の準備がウェーブ・レーンをまたいで効く' "${REPO_ROOT}/README.md"; then
