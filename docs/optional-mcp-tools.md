@@ -388,6 +388,37 @@ context7はツールが2つしか無いため、サーバー単位の限定で�
 まとめると、絞り込みの**粒度**（ツール単位 vs サーバー単位）はCLI間で異なるが、
 「generatorにのみcontext7が使える」という**結果**は両CLIで一致する。
 
+## 導入コマンド化: `scripts/install-optional-mcp.sh`（#219）
+
+上記「対象ツール」節の導入手順は文書に記載されているだけで、実行するスクリプトが無く、
+利用者が文書を探して手で叩く必要があった。`scripts/install-optional-mcp.sh` はこの手作業を
+1コマンドにまとめる。パッケージ名・導入コマンドの正本は引き続きこの文書であり、
+スクリプト側はハードコードした値を使う（`scripts/doctor.sh` と同じ方針）。
+
+```bash
+bash scripts/install-optional-mcp.sh                                  # dry-run（既定）。何もインストールしない
+bash scripts/install-optional-mcp.sh --apply                          # 実際に導入する
+bash scripts/install-optional-mcp.sh --apply --only context7          # 対象を絞る
+```
+
+**利用者の環境に無断でパッケージを入れない**（Epic #217 の D2）という要件のとおり、既定は
+dry-run であり、`--apply` を明示しない限り何もインストールしない。導入前に Python 3.10+ /
+npm 等の前提を確認し、無ければ導入を試みず不足を表示して終了する（D6: ネットワークが
+無い環境でも失敗しない）。導入後は `command -v` で PATH 解決を検証し、通らなければ
+その旨を明示する（`pip install --user` で PATH が通らない典型例があるため）。
+
+**`code-review-graph install --platform claude-code` は使わない判断をした。** dev-workflow は
+`.claude-plugin/plugin.json` の `mcpServers.code-review-graph` で起動コマンド
+（`code-review-graph serve`）を既に宣言済み（上記「Phase 4」節）であり、
+`install --platform claude-code` はMCP設定を自動生成するコマンドである。本タスク（#219）の
+作業環境にはネットワーク接続が無く、上流ソースで実際の出力ファイル・冪等性（dev-workflow側の
+宣言と衝突しないか）を確認できなかった。上記「設計上の注意」に記載された
+「不要なら `pip install` と `build` だけでよい可能性がある」という代替案に従い、確認できない
+コマンドは安全側（実行しない）に倒し、`scripts/install-optional-mcp.sh` は `pip install
+code-review-graph` のみを行う。グラフ構築（`code-review-graph build`）は Epic issue 本文の
+`## 準備コマンド` 節で run が Epic 開始時に1回だけ実行する既存の仕組み（上記「グラフ構築は
+Epic 開始時に1回（#75）」節）に任せ、本スクリプトでは行わない。
+
 ## Phase 5（#76）: 効果測定のベースラインと「外す判断基準」
 
 3つの任意依存ツール（ponytail / context7 / code-review-graph）を導入する目的は

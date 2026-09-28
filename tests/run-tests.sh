@@ -16813,6 +16813,295 @@ assert_eq "doctor.sh: .git/info/exclude を書き換えない（衛生チェッ�
   "$DOCTOR_SIDEEFFECT_EXCLUDE_BEFORE" "$DOCTOR_SIDEEFFECT_EXCLUDE_AFTER"
 
 # ---------------------------------------------------------------------------
+# scripts/install-optional-mcp.sh（任意MCPの導入。既定 dry-run。Task #219）
+#
+# 実 npm / pip / python3 には一切触れず、スタブに差し替えて検証する。
+# 依存スクリプトを持たない単体スクリプトのため、doctor.sh のような一時リポジトリへの
+# 複製は不要で、REPO_ROOT のスクリプトを直接実行する。
+# ---------------------------------------------------------------------------
+
+echo "== scripts/install-optional-mcp.sh（任意MCPの導入・#219） =="
+
+MCP_INSTALL_SCRIPT="${REPO_ROOT}/scripts/install-optional-mcp.sh"
+
+make_mcp_prereq_stub_bin_dir() {
+  # 前提コマンド（npm / python3 / pip）が「揃っている」と判定させるための最小スタブ。
+  # パッケージを実際に入れたりはしない（--apply の成功系は専用のスタブで別途検証する）。
+  local dir
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-mcp-prereq-bin.XXXXXX")"
+  cat > "${dir}/npm" <<'SH'
+#!/bin/bash
+exit 0
+SH
+  chmod +x "${dir}/npm"
+  cat > "${dir}/python3" <<'SH'
+#!/bin/bash
+exit 0
+SH
+  chmod +x "${dir}/python3"
+  cat > "${dir}/pip" <<'SH'
+#!/bin/bash
+exit 0
+SH
+  chmod +x "${dir}/pip"
+  printf '%s' "$dir"
+}
+
+# gh/docker と同じ作法（doctor.sh のテスト参照）: 実際に存在するコマンドのディレクトリだけを
+# PATH から除外する（ベンダー固有パスを決め打ちしない）。
+MCP_REAL_NPM_DIR="$(dirname "$(command -v npm 2>/dev/null || true)")"
+MCP_REAL_PYTHON3_DIR="$(dirname "$(command -v python3 2>/dev/null || true)")"
+MCP_REAL_PYTHON_DIR="$(dirname "$(command -v python 2>/dev/null || true)")"
+MCP_REAL_PIP_DIR="$(dirname "$(command -v pip 2>/dev/null || true)")"
+MCP_REAL_PIP3_DIR="$(dirname "$(command -v pip3 2>/dev/null || true)")"
+MCP_REAL_PIPX_DIR="$(dirname "$(command -v pipx 2>/dev/null || true)")"
+MCP_REAL_UVX_DIR="$(dirname "$(command -v uvx 2>/dev/null || true)")"
+MCP_PATH_WITHOUT_PREREQS="$(printf '%s' "$PATH" | tr ':' '\n' \
+  | grep -vFx "$MCP_REAL_NPM_DIR" | grep -vFx "$MCP_REAL_PYTHON3_DIR" \
+  | grep -vFx "$MCP_REAL_PYTHON_DIR" | grep -vFx "$MCP_REAL_PIP_DIR" \
+  | grep -vFx "$MCP_REAL_PIP3_DIR" | grep -vFx "$MCP_REAL_PIPX_DIR" \
+  | grep -vFx "$MCP_REAL_UVX_DIR" \
+  | tr '\n' ':' | sed 's/:$//')"
+
+# --- ケース1: 引数なし（dry-run）。前提は揃っているが未導入 -> 何もインストールせず、
+#     両対象の導入予定コマンドを表示する（完了条件1） ---
+MCP_PREREQ_BIN="$(make_mcp_prereq_stub_bin_dir)"
+MCP_DRYRUN_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+MCP_DRYRUN_EXIT=0
+PATH="${MCP_PREREQ_BIN}:${PATH}" bash "$MCP_INSTALL_SCRIPT" > "$MCP_DRYRUN_OUT" 2>&1 \
+  || MCP_DRYRUN_EXIT=$?
+
+assert_exit_code "install-optional-mcp.sh: 引数なし（dry-run）は exit 0（#219）" 0 "$MCP_DRYRUN_EXIT"
+
+case "$(cat "$MCP_DRYRUN_OUT")" in
+  *"[dry-run]"*"npm install -g @upstash/context7-mcp"*) \
+    pass "install-optional-mcp.sh: dry-runでcontext7の導入予定コマンドが表示される（#219）" ;;
+  *) fail "install-optional-mcp.sh: dry-runでcontext7の導入予定コマンドが表示される（#219）" \
+    "$(cat "$MCP_DRYRUN_OUT")" ;;
+esac
+
+case "$(cat "$MCP_DRYRUN_OUT")" in
+  *"[dry-run]"*"pip install code-review-graph"*) \
+    pass "install-optional-mcp.sh: dry-runでcode-review-graphの導入予定コマンドが表示される（#219）" ;;
+  *) fail "install-optional-mcp.sh: dry-runでcode-review-graphの導入予定コマンドが表示される（#219）" \
+    "$(cat "$MCP_DRYRUN_OUT")" ;;
+esac
+
+case "$(cat "$MCP_DRYRUN_OUT")" in
+  *"[導入中]"*) fail "install-optional-mcp.sh: dry-runでは実際に導入コマンドを実行しない（#219）" \
+    "$(cat "$MCP_DRYRUN_OUT")" ;;
+  *) pass "install-optional-mcp.sh: dry-runでは実際に導入コマンドを実行しない（#219）" ;;
+esac
+
+# --- ケース2: --only で対象を絞れる（完了条件3） ---
+MCP_ONLY_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+PATH="${MCP_PREREQ_BIN}:${PATH}" bash "$MCP_INSTALL_SCRIPT" --only context7 > "$MCP_ONLY_OUT" 2>&1
+
+case "$(cat "$MCP_ONLY_OUT")" in
+  *"code-review-graph"*) fail "install-optional-mcp.sh: --only context7 はcode-review-graphに触れない（#219）" \
+    "$(cat "$MCP_ONLY_OUT")" ;;
+  *) pass "install-optional-mcp.sh: --only context7 はcode-review-graphに触れない（#219）" ;;
+esac
+
+case "$(cat "$MCP_ONLY_OUT")" in
+  *"context7"*) pass "install-optional-mcp.sh: --only context7 はcontext7のみ表示する（#219）" ;;
+  *) fail "install-optional-mcp.sh: --only context7 はcontext7のみ表示する（#219）" \
+    "$(cat "$MCP_ONLY_OUT")" ;;
+esac
+
+# --- ケース3: 前提不足の環境では --apply でも導入を試みず、不足を表示してexit 2になる
+#     （完了条件4）。dry-runでも同様に不足を表示する（何も実行しないため exit 0のまま） ---
+MCP_MISSING_APPLY_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+MCP_MISSING_APPLY_EXIT=0
+PATH="$MCP_PATH_WITHOUT_PREREQS" bash "$MCP_INSTALL_SCRIPT" --apply > "$MCP_MISSING_APPLY_OUT" 2>&1 \
+  || MCP_MISSING_APPLY_EXIT=$?
+
+assert_exit_code "install-optional-mcp.sh: 前提不足の環境で --apply は exit 2（#219）" 2 "$MCP_MISSING_APPLY_EXIT"
+
+for msg in "npm が見つかりません" "Python 3.10+ が見つかりません" "pip/pipx/uvx のいずれも見つかりません"; do
+  if grep -qF "$msg" "$MCP_MISSING_APPLY_OUT"; then
+    pass "install-optional-mcp.sh: 前提不足メッセージ「${msg}」が表示される（#219）"
+  else
+    fail "install-optional-mcp.sh: 前提不足メッセージ「${msg}」が表示される（#219）" "$(cat "$MCP_MISSING_APPLY_OUT")"
+  fi
+done
+unset msg
+
+case "$(cat "$MCP_MISSING_APPLY_OUT")" in
+  *"[導入中]"*) fail "install-optional-mcp.sh: 前提不足なら導入を試みない（#219）" \
+    "$(cat "$MCP_MISSING_APPLY_OUT")" ;;
+  *) pass "install-optional-mcp.sh: 前提不足なら導入を試みない（#219）" ;;
+esac
+
+MCP_MISSING_DRYRUN_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+MCP_MISSING_DRYRUN_EXIT=0
+PATH="$MCP_PATH_WITHOUT_PREREQS" bash "$MCP_INSTALL_SCRIPT" > "$MCP_MISSING_DRYRUN_OUT" 2>&1 \
+  || MCP_MISSING_DRYRUN_EXIT=$?
+assert_exit_code "install-optional-mcp.sh: 前提不足でもdry-runはexit 0（#219）" 0 "$MCP_MISSING_DRYRUN_EXIT"
+
+# --- ケース4: --apply で導入に成功する。導入後 command -v でPATH解決を検証し、
+#     解決できれば[OK]と表示する（完了条件2・6）。2回目の実行では再導入せず
+#     冪等になる（完了条件5。npm/pipの呼び出し回数で検証する） ---
+MCP_APPLY_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-mcp-apply-bin.XXXXXX")"
+MCP_APPLY_TARGET="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-mcp-apply-target.XXXXXX")"
+MCP_APPLY_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-apply-log.XXXXXX")"
+
+cat > "${MCP_APPLY_BIN}/npm" <<SH
+#!/bin/bash
+echo "npm \$*" >> "${MCP_APPLY_LOG}"
+if [ "\$1" = "install" ] && [ "\$2" = "-g" ] && [ "\$3" = "@upstash/context7-mcp" ]; then
+  printf '#!/bin/bash\nexit 0\n' > "${MCP_APPLY_TARGET}/context7-mcp"
+  chmod +x "${MCP_APPLY_TARGET}/context7-mcp"
+  exit 0
+fi
+exit 1
+SH
+chmod +x "${MCP_APPLY_BIN}/npm"
+
+cat > "${MCP_APPLY_BIN}/python3" <<'SH'
+#!/bin/bash
+exit 0
+SH
+chmod +x "${MCP_APPLY_BIN}/python3"
+
+cat > "${MCP_APPLY_BIN}/pip" <<SH
+#!/bin/bash
+echo "pip \$*" >> "${MCP_APPLY_LOG}"
+if [ "\$1" = "install" ] && [ "\$2" = "code-review-graph" ]; then
+  printf '#!/bin/bash\nexit 0\n' > "${MCP_APPLY_TARGET}/code-review-graph"
+  chmod +x "${MCP_APPLY_TARGET}/code-review-graph"
+  exit 0
+fi
+exit 1
+SH
+chmod +x "${MCP_APPLY_BIN}/pip"
+
+MCP_APPLY_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+MCP_APPLY_EXIT=0
+PATH="${MCP_APPLY_BIN}:${MCP_APPLY_TARGET}:${PATH}" bash "$MCP_INSTALL_SCRIPT" --apply \
+  > "$MCP_APPLY_OUT" 2>&1 || MCP_APPLY_EXIT=$?
+
+assert_exit_code "install-optional-mcp.sh: --apply で導入成功ならexit 0（#219）" 0 "$MCP_APPLY_EXIT"
+
+case "$(cat "$MCP_APPLY_OUT")" in
+  *"[OK]"*"context7"*"PATHで解決できました"*) \
+    pass "install-optional-mcp.sh: context7導入後にPATH解決を検証しOKと表示する（#219）" ;;
+  *) fail "install-optional-mcp.sh: context7導入後にPATH解決を検証しOKと表示する（#219）" \
+    "$(cat "$MCP_APPLY_OUT")" ;;
+esac
+
+case "$(cat "$MCP_APPLY_OUT")" in
+  *"[OK]"*"code-review-graph"*"PATHで解決できました"*) \
+    pass "install-optional-mcp.sh: code-review-graph導入後にPATH解決を検証しOKと表示する（#219）" ;;
+  *) fail "install-optional-mcp.sh: code-review-graph導入後にPATH解決を検証しOKと表示する（#219）" \
+    "$(cat "$MCP_APPLY_OUT")" ;;
+esac
+
+MCP_APPLY_LOG_LINES_1="$(wc -l < "$MCP_APPLY_LOG" | tr -d ' ')"
+
+# 2回目の実行（既に導入済み）。再導入コマンドを呼ばず、冪等であること。
+MCP_APPLY_OUT2="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+PATH="${MCP_APPLY_BIN}:${MCP_APPLY_TARGET}:${PATH}" bash "$MCP_INSTALL_SCRIPT" --apply \
+  > "$MCP_APPLY_OUT2" 2>&1
+
+case "$(cat "$MCP_APPLY_OUT2")" in
+  *"[OK]"*"context7"*"既に導入済みです"*) \
+    pass "install-optional-mcp.sh: 導入済み環境で再実行しても既導入と表示する（冪等・#219）" ;;
+  *) fail "install-optional-mcp.sh: 導入済み環境で再実行しても既導入と表示する（冪等・#219）" \
+    "$(cat "$MCP_APPLY_OUT2")" ;;
+esac
+
+MCP_APPLY_LOG_LINES_2="$(wc -l < "$MCP_APPLY_LOG" | tr -d ' ')"
+assert_eq "install-optional-mcp.sh: 導入済みなら2回目はnpm/pipを再度呼ばない（冪等・#219）" \
+  "$MCP_APPLY_LOG_LINES_1" "$MCP_APPLY_LOG_LINES_2"
+
+# --- ケース5: 導入コマンドが失敗しても異常終了せず、NGと表示してexit 2になる
+#     （ネットワーク不通を模擬。完了条件7） ---
+MCP_FAIL_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-mcp-fail-bin.XXXXXX")"
+cat > "${MCP_FAIL_BIN}/npm" <<'SH'
+#!/bin/bash
+echo "network error" >&2
+exit 1
+SH
+chmod +x "${MCP_FAIL_BIN}/npm"
+
+MCP_FAIL_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+MCP_FAIL_EXIT=0
+PATH="${MCP_FAIL_BIN}:${PATH}" bash "$MCP_INSTALL_SCRIPT" --apply --only context7 \
+  > "$MCP_FAIL_OUT" 2>&1 || MCP_FAIL_EXIT=$?
+
+assert_exit_code "install-optional-mcp.sh: 導入コマンド失敗時はexit 2（異常終了しない・#219）" 2 "$MCP_FAIL_EXIT"
+
+case "$(cat "$MCP_FAIL_OUT")" in
+  *"[NG]"*"導入コマンドが失敗しました"*) \
+    pass "install-optional-mcp.sh: 導入コマンド失敗時にNGメッセージが出る（#219）" ;;
+  *) fail "install-optional-mcp.sh: 導入コマンド失敗時にNGメッセージが出る（#219）" \
+    "$(cat "$MCP_FAIL_OUT")" ;;
+esac
+
+# --- ケース6: 導入コマンドは成功したがPATH解決できない場合、その旨を明示してexit 2になる
+#     （完了条件6。pip install --user 相当の典型例） ---
+MCP_UNRESOLVED_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-mcp-unresolved-bin.XXXXXX")"
+cat > "${MCP_UNRESOLVED_BIN}/npm" <<'SH'
+#!/bin/bash
+exit 0
+SH
+chmod +x "${MCP_UNRESOLVED_BIN}/npm"
+
+MCP_UNRESOLVED_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+MCP_UNRESOLVED_EXIT=0
+PATH="${MCP_UNRESOLVED_BIN}:${PATH}" bash "$MCP_INSTALL_SCRIPT" --apply --only context7 \
+  > "$MCP_UNRESOLVED_OUT" 2>&1 || MCP_UNRESOLVED_EXIT=$?
+
+assert_exit_code "install-optional-mcp.sh: 導入後もPATH解決できなければexit 2（#219）" 2 "$MCP_UNRESOLVED_EXIT"
+
+case "$(cat "$MCP_UNRESOLVED_OUT")" in
+  *"[警告]"*"context7-mcp"*"解決できません"*) \
+    pass "install-optional-mcp.sh: 導入後もPATH解決できない旨を明示する（#219）" ;;
+  *) fail "install-optional-mcp.sh: 導入後もPATH解決できない旨を明示する（#219）" \
+    "$(cat "$MCP_UNRESOLVED_OUT")" ;;
+esac
+
+# --- ケース7: 引数バリデーション ---
+MCP_BADONLY_EXIT=0
+bash "$MCP_INSTALL_SCRIPT" --only bogus >/dev/null 2>&1 || MCP_BADONLY_EXIT=$?
+assert_exit_code "install-optional-mcp.sh: --only に不正な値はexit 1（#219）" 1 "$MCP_BADONLY_EXIT"
+
+MCP_BADFLAG_EXIT=0
+bash "$MCP_INSTALL_SCRIPT" --no-such-flag >/dev/null 2>&1 || MCP_BADFLAG_EXIT=$?
+assert_exit_code "install-optional-mcp.sh: 不明な引数はexit 1（#219）" 1 "$MCP_BADFLAG_EXIT"
+
+MCP_HELP_OUT="$(bash "$MCP_INSTALL_SCRIPT" --help 2>&1)"
+MCP_HELP_EXIT=0
+bash "$MCP_INSTALL_SCRIPT" --help >/dev/null 2>&1 || MCP_HELP_EXIT=$?
+assert_exit_code "install-optional-mcp.sh: --help はexit 0（#219）" 0 "$MCP_HELP_EXIT"
+case "$MCP_HELP_OUT" in
+  *"使い方"*) pass "install-optional-mcp.sh: --help に使い方が表示される（#219）" ;;
+  *) fail "install-optional-mcp.sh: --help に使い方が表示される（#219）" "$MCP_HELP_OUT" ;;
+esac
+
+# --- ケース8（完了条件8）: `code-review-graph install --platform claude-code` を使わない
+#     判断とその根拠が、スクリプト・文書のいずれにも記録されている（静的検査）。
+#     ヘッダコメントには判断根拠として文字列そのものへの言及があるため、ファイル全体では
+#     なく実際の導入処理（install_code_review_graph 関数の本体）だけを見て、そこに
+#     呼び出しが紛れ込んでいないことを確認する ---
+MCP_INSTALL_FUNC_BODY="$(sed -n '/^install_code_review_graph()/,/^}/p' "$MCP_INSTALL_SCRIPT")"
+if printf '%s' "$MCP_INSTALL_FUNC_BODY" | grep -qF "install --platform claude-code"; then
+  fail "install-optional-mcp.sh: code-review-graph install --platform claude-codeを実行しない（#219）" \
+    "install_code_review_graph() 関数内に 'install --platform claude-code' の呼び出しが見つかりました: ${MCP_INSTALL_FUNC_BODY}"
+else
+  pass "install-optional-mcp.sh: code-review-graph install --platform claude-codeを実行しない（#219）"
+fi
+
+if grep -qF "install --platform claude-code" "${REPO_ROOT}/docs/optional-mcp-tools.md" \
+  && grep -qF "install-optional-mcp.sh" "${REPO_ROOT}/docs/optional-mcp-tools.md"; then
+  pass "install-optional-mcp.sh: 判断根拠がdocs/optional-mcp-tools.mdに記録されている（#219）"
+else
+  fail "install-optional-mcp.sh: 判断根拠がdocs/optional-mcp-tools.mdに記録されている（#219）" \
+    "docs/optional-mcp-tools.md に 'install --platform claude-code' への言及と 'install-optional-mcp.sh' への参照の両方が必要です"
+fi
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
