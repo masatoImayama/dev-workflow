@@ -12656,6 +12656,120 @@ assert_eq "規約パス: worktreeから呼んでもイメージタグ(hash含む
 # 対象になっているため、ここでの追加テストは不要。
 
 # ---------------------------------------------------------------------------
+# sandbox-exec.sh --init: サンドボックス定義の雛形を規約パスに生成する（Task #220）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== sandbox-exec.sh --init（雛形生成、#220） =="
+
+INIT220_REPO="$(make_temp_repo)"
+copy_sandbox_scripts_no_dockerfile "$INIT220_REPO"
+INIT220_NAME="$(basename "$INIT220_REPO")"
+INIT220_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-init220-home.XXXXXX")"
+
+# --init 実行前は mode=none であることを確認する（前提条件）
+INIT220_BEFORE="$(
+  cd "$INIT220_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$INIT220_HOME" bash scripts/sandbox-exec.sh --print-plan
+)"
+assert_eq "--init 前提: 生成前は mode=none（#220）" \
+  "none" "$(plan_value mode "$INIT220_BEFORE")"
+
+INIT220_STATUS_BEFORE="$(git -C "$INIT220_REPO" status --short --untracked-files=all)"
+
+INIT220_OUT="$(
+  cd "$INIT220_REPO" || exit 1
+  DOCKER_CALLED_MARKER="$DOCKER_CALLED_MARKER" PATH="${FAKE_BIN_DIR}:${PATH}" \
+    DEV_WORKFLOW_SANDBOX_HOME="$INIT220_HOME" bash scripts/sandbox-exec.sh --init
+)"
+INIT220_EXIT=$?
+
+INIT220_DOCKERFILE="${INIT220_HOME}/${INIT220_NAME}/Dockerfile.dev"
+INIT220_COMPOSE="${INIT220_HOME}/${INIT220_NAME}/docker-compose.dev.yml"
+
+assert_exit_code "--init は exit 0 で終わる（#220）" 0 "$INIT220_EXIT"
+
+assert_eq "--init: 規約パスにDockerfile.devを生成する（完了条件、#220）" \
+  "yes" "$([ -f "$INIT220_DOCKERFILE" ] && echo yes || echo no)"
+assert_eq "--init: 規約パスにdocker-compose.dev.ymlを生成する（完了条件、#220）" \
+  "yes" "$([ -f "$INIT220_COMPOSE" ] && echo yes || echo no)"
+
+if [ -f "$DOCKER_CALLED_MARKER" ]; then
+  fail "--init は docker を起動しない（#220）" "docker が呼ばれました: $(cat "$DOCKER_CALLED_MARKER")"
+else
+  pass "--init は docker を起動しない（#220）"
+fi
+
+# 生成された compose が要求仕様（app / .:/workspace / sleep infinity）を満たす
+case "$(cat "$INIT220_COMPOSE")" in
+  *'app:'*'.:/workspace'*'sleep'*'infinity'*)
+    pass "--init: 生成されたcomposeが要求仕様（app/.:/workspace/sleep infinity）を満たす（完了条件、#220）" ;;
+  *)
+    fail "--init: 生成されたcomposeが要求仕様（app/.:/workspace/sleep infinity）を満たす（完了条件、#220）" \
+      "$(cat "$INIT220_COMPOSE")" ;;
+esac
+
+# 説明コメント自体が要求仕様の文言（container_name / 8080:8080）に触れているため、
+# コメント行（先頭が#）を除いた実体だけを対象に判定する。
+INIT220_COMPOSE_BODY="$(grep -v '^[[:space:]]*#' "$INIT220_COMPOSE")"
+
+if printf '%s\n' "$INIT220_COMPOSE_BODY" | grep -q 'container_name'; then
+  fail "--init: 生成されたcomposeにcontainer_nameが無い（完了条件、#220）" "$(cat "$INIT220_COMPOSE")"
+else
+  pass "--init: 生成されたcomposeにcontainer_nameが無い（完了条件、#220）"
+fi
+
+if printf '%s\n' "$INIT220_COMPOSE_BODY" | grep -Eq '"[0-9]+:[0-9]+"'; then
+  fail "--init: 生成されたcomposeに固定ホストポートが無い（完了条件、#220）" "$(cat "$INIT220_COMPOSE")"
+else
+  pass "--init: 生成されたcomposeに固定ホストポートが無い（完了条件、#220）"
+fi
+
+# 生成直後の --print-plan 相当出力で mode=none が解消したことを確認できる（完了条件）
+case "$INIT220_OUT" in
+  *'mode=dockerfile'*)
+    pass "--init: 生成直後にmode=noneが解消したことを確認できる（完了条件、#220）" ;;
+  *)
+    fail "--init: 生成直後にmode=noneが解消したことを確認できる（完了条件、#220）" "output=[${INIT220_OUT}]" ;;
+esac
+
+# 既存ファイルを上書きしない（2回目実行。完了条件）
+printf 'unchanged\n' > "$INIT220_DOCKERFILE"
+INIT220_OUT2="$(
+  cd "$INIT220_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$INIT220_HOME" bash scripts/sandbox-exec.sh --init
+)"
+
+assert_eq "--init: 既存ファイルを上書きしない（完了条件、#220）" \
+  "unchanged" "$(cat "$INIT220_DOCKERFILE")"
+
+case "$INIT220_OUT2" in
+  *"既存: ${INIT220_DOCKERFILE}"*)
+    pass "--init: 既存ファイルのパスを表示する（完了条件、#220）" ;;
+  *)
+    fail "--init: 既存ファイルのパスを表示する（完了条件、#220）" "output=[${INIT220_OUT2}]" ;;
+esac
+
+# 駆動先リポジトリの作業ツリーが変更されない（既定動作。完了条件）
+INIT220_STATUS_AFTER="$(git -C "$INIT220_REPO" status --short --untracked-files=all)"
+assert_eq "--init: 駆動先リポジトリの作業ツリーが変更されない（完了条件、#220）" \
+  "$INIT220_STATUS_BEFORE" "$INIT220_STATUS_AFTER"
+
+# CLI契約（--init）が sandbox-exec.sh のオプション解析に存在する
+if grep -Fq -- '--init' "${REPO_ROOT}/scripts/sandbox-exec.sh"; then
+  pass "scripts/sandbox-exec.sh: --init オプションが実装されている（#220）"
+else
+  fail "scripts/sandbox-exec.sh: --init オプションが実装されている（#220）"
+fi
+
+# skills/run/SKILL.md の mode=none 案内に --init への言及がある（完了条件6）
+if grep -Fq -- 'sandbox-exec.sh --init' "${REPO_ROOT}/skills/run/SKILL.md"; then
+  pass "skills/run/SKILL.md: mode=none案内にsandbox-exec.sh --initへの言及がある（完了条件、#220）"
+else
+  fail "skills/run/SKILL.md: mode=none案内にsandbox-exec.sh --initへの言及がある（完了条件、#220）"
+fi
+
+# ---------------------------------------------------------------------------
 # skills/run/SKILL.md・skills-codex/dev-workflow-run/SKILL.md:
 # mode=none 時の案内が供給経路3択になっている（Task #128）
 # ---------------------------------------------------------------------------
