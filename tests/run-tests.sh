@@ -16476,6 +16476,200 @@ fi
 unset RG198_FILE RG198_BODY_REGION RG198_HIT RG198_LEAK_DETAIL
 
 # ---------------------------------------------------------------------------
+# --detach/--wait: 長時間コマンドの切り離し実行と待機（issue #214）
+#
+# Docker を使わない mode=none（Dockerfile.dev も docker-compose.dev.yml も置かない）で、
+# 実コマンドをホスト側で切り離し実行し、マーカー・ログ・終了コードの伝播を検証する
+# （このファイル冒頭の方針どおり Docker は一切呼び出さない）。
+# ---------------------------------------------------------------------------
+
+echo "== --detach/--wait（issue #214） =="
+
+DETACH_REPO="$(make_temp_repo)"
+copy_sandbox_scripts_no_dockerfile "$DETACH_REPO"
+DETACH_HOME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-detachhome.XXXXXX")"
+DETACH_DIR_BASE="${DETACH_HOME_DIR}/$(basename "$DETACH_REPO")-epic214a"
+
+# --- ケース1: --detach は即座に返る（長時間コマンドの完了を待たない） ---
+DETACH1_START=$(date +%s)
+DETACH1_OUTPUT="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" \
+    bash scripts/sandbox-exec.sh --epic epic214a --detach --handle case1 'sleep 3 && echo hello-from-detach'
+)"
+DETACH1_LAUNCH_EXIT=$?
+DETACH1_END=$(date +%s)
+DETACH1_ELAPSED=$((DETACH1_END - DETACH1_START))
+
+assert_exit_code "--detach: 起動コマンド自体は成功（exit 0）で返る" 0 "$DETACH1_LAUNCH_EXIT"
+
+if [ "$DETACH1_ELAPSED" -lt 3 ]; then
+  pass "--detach: 3秒かかるコマンドでも呼び出しは即座に返る（経過${DETACH1_ELAPSED}秒）"
+else
+  fail "--detach: 3秒かかるコマンドでも呼び出しは即座に返る" \
+    "経過=${DETACH1_ELAPSED}秒（3秒以上＝前景実行になっている）"
+fi
+
+case "$DETACH1_OUTPUT" in
+  *"handle=case1"*) pass "--detach: 出力にhandle名が含まれる" ;;
+  *) fail "--detach: 出力にhandle名が含まれる" "output=[${DETACH1_OUTPUT}]" ;;
+esac
+
+# --- ケース2: 実行中はrunningマーカーのみが存在し、exit_codeはまだ無い（区別できる） ---
+DETACH1_DIR="${DETACH_DIR_BASE}/case1"
+if [ -f "${DETACH1_DIR}/running" ] && [ ! -f "${DETACH1_DIR}/exit_code" ]; then
+  pass "--detach: 実行中はrunningマーカーのみが存在する（exit_codeはまだ無い＝実行中/完了を区別できる）"
+else
+  fail "--detach: 実行中はrunningマーカーのみが存在する" \
+    "running=$([ -f "${DETACH1_DIR}/running" ] && echo yes || echo no) exit_code=$([ -f "${DETACH1_DIR}/exit_code" ] && echo yes || echo no)"
+fi
+
+# --- ケース3: --wait は完了まで待ち、コマンドの終了コード（成功）をそのまま返す ---
+DETACH1_WAIT_OUTPUT="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    bash scripts/sandbox-exec.sh --epic epic214a --wait --handle case1
+)"
+DETACH1_WAIT_EXIT=$?
+assert_exit_code "--wait: 完了したコマンドの終了コード(0)をそのまま返す" 0 "$DETACH1_WAIT_EXIT"
+
+case "$DETACH1_WAIT_OUTPUT" in
+  *"hello-from-detach"*) pass "--wait: 完了後にコマンドのログ（標準出力）が読める" ;;
+  *) fail "--wait: 完了後にコマンドのログ（標準出力）が読める" "output=[${DETACH1_WAIT_OUTPUT}]" ;;
+esac
+
+if [ -f "${DETACH1_DIR}/exit_code" ] && [ ! -f "${DETACH1_DIR}/running" ]; then
+  pass "--wait後: 完了後はexit_codeのみが存在する（runningは消える＝実行中/完了を区別できる）"
+else
+  fail "--wait後: 完了後はexit_codeのみが存在する" \
+    "running=$([ -f "${DETACH1_DIR}/running" ] && echo yes || echo no) exit_code=$([ -f "${DETACH1_DIR}/exit_code" ] && echo yes || echo no)"
+fi
+
+# --- ケース4: 失敗したコマンドの終了コードもそのまま返る ---
+(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" \
+    bash scripts/sandbox-exec.sh --epic epic214a --detach --handle case4 'exit 7'
+) >/dev/null 2>&1
+
+DETACH4_WAIT_EXIT=0
+(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    bash scripts/sandbox-exec.sh --epic epic214a --wait --handle case4
+) >/dev/null 2>&1 || DETACH4_WAIT_EXIT=$?
+assert_exit_code "--wait: 失敗したコマンドの終了コード(7)もそのまま返る" 7 "$DETACH4_WAIT_EXIT"
+
+# --- ケース5: 未検出のハンドルを --wait すると即座にエラーで停止する（ハングしない） ---
+DETACH5_STDERR="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" \
+    bash scripts/sandbox-exec.sh --epic epic214a --wait --handle never-detached 2>&1 1>/dev/null
+)"
+DETACH5_EXIT=$?
+if [ "$DETACH5_EXIT" -ne 0 ]; then
+  pass "--wait: 未検出のハンドルは非0で終了する"
+else
+  fail "--wait: 未検出のハンドルは非0で終了する" "exit=0"
+fi
+case "$DETACH5_STDERR" in
+  *"never-detached"*) pass "--wait: 未検出のハンドルのエラーにハンドル名が含まれる" ;;
+  *) fail "--wait: 未検出のハンドルのエラーにハンドル名が含まれる" "stderr=[${DETACH5_STDERR}]" ;;
+esac
+
+# --- ケース6: --detach を付けない既定の前景実行は変わらない（後方互換） ---
+DETACH6_EXIT=0
+DETACH6_OUTPUT="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" \
+    bash scripts/sandbox-exec.sh --epic epic214a 'echo foreground && exit 3'
+)" || DETACH6_EXIT=$?
+assert_exit_code "--detachを付けない前景実行: コマンドの終了コードがそのまま返る（後方互換）" 3 "$DETACH6_EXIT"
+case "$DETACH6_OUTPUT" in
+  *"foreground"*) pass "--detachを付けない前景実行: 出力がそのまま呼び出し元に返る（後方互換）" ;;
+  *) fail "--detachを付けない前景実行: 出力がそのまま呼び出し元に返る（後方互換）" "output=[${DETACH6_OUTPUT}]" ;;
+esac
+
+if [ -d "${DETACH_DIR_BASE}/default" ]; then
+  fail "--detachを付けない前景実行: マーカーディレクトリを作らない" "作られています: ${DETACH_DIR_BASE}/default"
+else
+  pass "--detachを付けない前景実行: マーカーディレクトリを作らない"
+fi
+
+# --- ケース7: 同一ハンドルが実行中のまま再度 --detach すると多重起動を拒否する ---
+(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" \
+    bash scripts/sandbox-exec.sh --epic epic214a --detach --handle case7 'sleep 3'
+) >/dev/null 2>&1
+
+DETACH7_DUP_EXIT=0
+DETACH7_DUP_STDERR="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" \
+    bash scripts/sandbox-exec.sh --epic epic214a --detach --handle case7 'true' 2>&1 1>/dev/null
+)" || DETACH7_DUP_EXIT=$?
+if [ "$DETACH7_DUP_EXIT" -ne 0 ]; then
+  pass "--detach: 同一ハンドルが実行中なら多重起動を拒否する"
+else
+  fail "--detach: 同一ハンドルが実行中なら多重起動を拒否する" "exit=0"
+fi
+case "$DETACH7_DUP_STDERR" in
+  *"既に実行中です"*) pass "--detach: 多重起動拒否のエラーに理由が含まれる" ;;
+  *) fail "--detach: 多重起動拒否のエラーに理由が含まれる" "stderr=[${DETACH7_DUP_STDERR}]" ;;
+esac
+
+# 後片付け: case7 の完了を待ってからテストを終える
+# （バックグラウンドプロセスをぶら下げたままテストランナーを終わらせないため）
+(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    bash scripts/sandbox-exec.sh --epic epic214a --wait --handle case7
+) >/dev/null 2>&1 || true
+
+# --- ケース8: --detach の起動元プロセスが終了してもバックグラウンド実行は継続する ---
+# ケース1の --detach 呼び出し（サブシェル）は起動直後に終了している（ケース1で確認済み）。
+# その後、まったく別のプロセスとして発行した --wait 呼び出し（ケース3）が完了・終了コード
+# 取得までできたことは、バックグラウンド実行が起動元プロセスの生死に依存していないことの
+# 実証になっている。ここでは明示コメントのみ残す（重複テストを増やさない）。
+
+# --- ケース9: ハンドルを分ければ同一epicで複数の切り離し実行を並行させられる ---
+(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" \
+    bash scripts/sandbox-exec.sh --epic epic214a --detach --handle case9a 'echo nine-a'
+) >/dev/null 2>&1
+(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" \
+    bash scripts/sandbox-exec.sh --epic epic214a --detach --handle case9b 'echo nine-b'
+) >/dev/null 2>&1
+
+DETACH9A_OUT="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    bash scripts/sandbox-exec.sh --epic epic214a --wait --handle case9a
+)"
+DETACH9B_OUT="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    bash scripts/sandbox-exec.sh --epic epic214a --wait --handle case9b
+)"
+assert_eq "--handle: 別ハンドルの並行起動が互いに独立している（case9a）" "nine-a" "$DETACH9A_OUT"
+assert_eq "--handle: 別ハンドルの並行起動が互いに独立している（case9b）" "nine-b" "$DETACH9B_OUT"
+
+# --- ケース10: skills/run/SKILL.md のEpic統合ゲートが --detach/--wait を使う手順になっている ---
+RUN_SKILL_EPICGATE="$(awk '/^## Epic 統合ゲート/{f=1} f{print} f && /^## Epic一括レビュー/{exit}' \
+  "${REPO_ROOT}/skills/run/SKILL.md")"
+case "$RUN_SKILL_EPICGATE" in
+  *"sandbox-exec.sh"*"--detach"*"sandbox-exec.sh"*"--wait"*)
+    pass "skills/run/SKILL.md: Epic統合ゲートが --detach → --wait の順で使う手順になっている（#214）" ;;
+  *)
+    fail "skills/run/SKILL.md: Epic統合ゲートが --detach → --wait の順で使う手順になっている（#214）" \
+      "$RUN_SKILL_EPICGATE" ;;
+esac
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 

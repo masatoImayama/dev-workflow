@@ -892,11 +892,24 @@ git -C "$EPIC_WT" checkout "${EPIC_BRANCH}"
 cd "$EPIC_WT"
 EPIC_GATE_START_SEC=$(date +%s)   # 「Epic統合ゲート」フェーズの計測開始
 
-# 1) テスト（Docker sandbox内）— 1回にまとめる。落ちたら不合格
+# 1) テスト（Docker sandbox内）— 1回にまとめる。落ちたら不合格。
+# フルスイートは20〜35分に及ぶことがあり、前景実行のままだと実行系のタイムアウトで
+# 打ち切られる（issue #214。makimaki-sso Epic #1 で手組みのnohup/disown/ポーリングを
+# 6回組み直す事故があった）。--detach で切り離し起動し、--wait で完了を待つ。
+# --wait はそれ自体が完了マーカーをポーリングして返るので、run 側でポーリングループを
+# 新たに書く必要は無い（issue #140と同じ制約）。--wait は長時間かかりうるため、
+# Bashツールを run_in_background: true で呼び、通知を受けてから処理を続ける
+# （generatorと異なりrunはセッションが継続するため、issue #138の「通知待ちで停止しない」
+# 制約は適用されない。通知を待ってよい）。
 # 固定パスは複数ウェーブ・並列実行間で衝突しうるため mktemp で一意化する（issue #145）
 EPIC_GATE_TEST_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-epic-gate-test-output.XXXXXX")"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" '[全テストを走らせるコマンド]' \
-  2>&1 | tee "$EPIC_GATE_TEST_LOG"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" --detach \
+  --handle epic-gate '[全テストを走らせるコマンド]'
+# 上のBash呼び出しは即座に返る。続けて下のBash呼び出しを run_in_background: true で発行し、
+# 完了通知を待つ（sandbox-exec.shの--waitはコマンドの終了コードをそのまま返す契約なので、
+# 機械的ゲートの判定に使える）
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" --wait \
+  --handle epic-gate 2>&1 | tee "$EPIC_GATE_TEST_LOG"
 
 # 1b) SKIP件数はレーンの自己申告に依存せず、run自身がcount-skips.shで機械的に数える。
 #     0件でも必ず表示する（黙って省略しない）
