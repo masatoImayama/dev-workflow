@@ -111,7 +111,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 言語ごとのキャッシュ置き場。存在しないパスを指定しても docker が作るだけなので無害。
 # イメージが root 以外のユーザーで動く場合は DEV_WORKFLOW_CACHE_PATHS で上書きする。
-DEFAULT_CACHE_PATHS="/root/.cache/go-build /go/pkg/mod /root/.npm /root/.cache/yarn /root/.cargo/registry /root/.cache/pip"
+#
+# 対応（コンテナ内パス → 何のキャッシュか）。go/npm/yarn/cargo/pip は各ツールの既定の
+# キャッシュ置き場と一致しているため volume 化するだけで効くが、terraform だけは
+# TF_PLUGIN_CACHE_DIR 環境変数を明示的に設定しない限り plugin cache を使わない
+# （issue #213）。そのため terraform 用パスだけはコンテナ起動時に env でも渡す
+# （tf_plugin_cache_env_args を参照）。
+#   /root/.cache/go-build             go build のキャッシュ（GOCACHE の既定値と一致）
+#   /go/pkg/mod                       go module のキャッシュ（GOPATH/pkg/mod の既定値と一致）
+#   /root/.npm                        npm のキャッシュ（npm の既定値と一致）
+#   /root/.cache/yarn                 yarn のキャッシュ（yarn の既定値と一致）
+#   /root/.cargo/registry             cargo registry のキャッシュ（CARGO_HOME/registry の既定値と一致）
+#   /root/.cache/pip                  pip のキャッシュ（pip の既定値と一致）
+#   /root/.terraform.d/plugin-cache   terraform provider plugin のキャッシュ
+#                                     （TF_PLUGIN_CACHE_DIR で明示的に指す必要がある）
+TF_PLUGIN_CACHE_PATH="/root/.terraform.d/plugin-cache"
+DEFAULT_CACHE_PATHS="/root/.cache/go-build /go/pkg/mod /root/.npm /root/.cache/yarn /root/.cargo/registry /root/.cache/pip ${TF_PLUGIN_CACHE_PATH}"
 CACHE_PATHS="${DEV_WORKFLOW_CACHE_PATHS:-$DEFAULT_CACHE_PATHS}"
 COMPOSE_SERVICE="${DEV_WORKFLOW_COMPOSE_SERVICE:-app}"
 
@@ -256,6 +271,21 @@ cache_mount_args() {
   local path
   for path in $CACHE_PATHS; do
     printf ' -v %s:%s' "$(cache_volume_name "$path")" "$path"
+  done
+}
+
+# terraform だけは plugin cache を volume 化するだけでは使われない
+# （TF_PLUGIN_CACHE_DIR 環境変数が未設定だと terraform 自身が無視するため。issue #213）。
+# DEV_WORKFLOW_CACHE_PATHS で terraform 用パスを含まない値に上書きされた場合は、
+# volume が無い場所を指す env を渡しても無意味なので、CACHE_PATHS に実際に
+# 含まれている場合に限り env を渡す（volume と env の対応を保つ）。
+tf_plugin_cache_env_args() {
+  local path
+  for path in $CACHE_PATHS; do
+    if [ "$path" = "$TF_PLUGIN_CACHE_PATH" ]; then
+      printf ' -e TF_PLUGIN_CACHE_DIR=%s' "$TF_PLUGIN_CACHE_PATH"
+      return 0
+    fi
   done
 }
 
@@ -873,6 +903,7 @@ case "$DEV_WORKFLOW_SANDBOX_MODE" in
         --label "dev-workflow.epic=${EPIC}" \
         --label "dev-workflow.root=${HOST_ROOT}" \
         -v "${MOUNT_SOURCE}:/workspace" $(cache_mount_args) \
+        $(tf_plugin_cache_env_args) \
         -w /workspace "$DEV_WORKFLOW_SANDBOX_IMAGE" sleep infinity >/dev/null || {
           echo "ERROR: サンドボックスコンテナを起動できません: ${CONTAINER}" >&2
           exit 1

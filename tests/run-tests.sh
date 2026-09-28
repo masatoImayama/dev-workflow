@@ -330,6 +330,31 @@ case "$FIRST_CACHE_LINE" in
   *) fail "cache_volume の命名がリポジトリ単位である" "実際の1行目: ${FIRST_CACHE_LINE}" ;;
 esac
 
+# terraform の plugin cache が既定の cache_volume に含まれること（issue #213 完了条件1）。
+TF_CACHE_LINE="$(printf '%s\n' "$PRINT_PLAN_OUTPUT" | grep '^cache_volume=.*:/root/.terraform.d/plugin-cache$')"
+if [ -n "$TF_CACHE_LINE" ]; then
+  pass "cache_volume に terraform の plugin cache が既定で含まれる（issue #213）"
+else
+  fail "cache_volume に terraform の plugin cache が既定で含まれる（issue #213）" "cache_volume一覧:\n${PRINT_PLAN_OUTPUT}"
+fi
+
+# DEV_WORKFLOW_CACHE_PATHS で terraform を含まない値に上書きした場合、terraform 用の
+# cache_volume は出ない（issue #213 完了条件4: 上書きが従来どおり機能する）。
+TF_OVERRIDE_PLAN_OUTPUT="$(
+  cd "$PRINT_PLAN_REPO" || exit 1
+  DEV_WORKFLOW_CACHE_PATHS="/root/.cache/go-build" \
+    DOCKER_CALLED_MARKER="$DOCKER_CALLED_MARKER" PATH="${FAKE_BIN_DIR}:${PATH}" \
+    bash scripts/sandbox-exec.sh --print-plan
+)"
+TF_OVERRIDE_CACHE_COUNT="$(printf '%s\n' "$TF_OVERRIDE_PLAN_OUTPUT" | grep -c '^cache_volume=')"
+TF_OVERRIDE_TF_LINE="$(printf '%s\n' "$TF_OVERRIDE_PLAN_OUTPUT" | grep '^cache_volume=.*:/root/.terraform.d/plugin-cache$' || true)"
+if [ "$TF_OVERRIDE_CACHE_COUNT" = "1" ] && [ -z "$TF_OVERRIDE_TF_LINE" ]; then
+  pass "DEV_WORKFLOW_CACHE_PATHS でterraformを含まない値に上書きするとterraformのcache_volumeが出ない（issue #213）"
+else
+  fail "DEV_WORKFLOW_CACHE_PATHS でterraformを含まない値に上書きするとterraformのcache_volumeが出ない（issue #213）" \
+    "count=${TF_OVERRIDE_CACHE_COUNT} tf_line=[${TF_OVERRIDE_TF_LINE}]"
+fi
+
 # --epic 指定時にコンテナ名へ反映されることも、この段階の挙動として確認しておく。
 PRINT_PLAN_EPIC_OUTPUT="$(
   cd "$PRINT_PLAN_REPO" || exit 1
@@ -1301,6 +1326,15 @@ case "$IMG_A_RUN_LINE" in
     fail "イメージ未存在時: docker run に -v <mount_source>:/workspace が渡る（issue #30）" "run_line=[${IMG_A_RUN_LINE}]" ;;
 esac
 
+# terraform の plugin cache は volume 化するだけでは使われず、TF_PLUGIN_CACHE_DIR を
+# 明示的に env で渡す必要がある（issue #213 完了条件2）。
+case "$IMG_A_RUN_LINE" in
+  *"-e TF_PLUGIN_CACHE_DIR=/root/.terraform.d/plugin-cache"*)
+    pass "イメージ未存在時: docker run に -e TF_PLUGIN_CACHE_DIR=<path> が渡る（issue #213）" ;;
+  *)
+    fail "イメージ未存在時: docker run に -e TF_PLUGIN_CACHE_DIR=<path> が渡る（issue #213）" "run_line=[${IMG_A_RUN_LINE}]" ;;
+esac
+
 IMG_A_EXEC_WORKDIR="$(head -n1 "$IMG_TEST_EXEC_LOG")"
 assert_eq "イメージ未存在時: docker exec に解決済み workdir が -w で渡る（issue #30）" \
   "$IMG_WORKDIR" "$IMG_A_EXEC_WORKDIR"
@@ -1312,6 +1346,44 @@ assert_exit_code "イメージ存在時: 実行全体が成功する" 0 "$IMG_B_
 
 IMG_B_BUILD_COUNT="$(grep -c '^build ' "$IMG_TEST_LOG" || true)"
 assert_eq "イメージ存在時: docker build を呼ばない" "0" "$IMG_B_BUILD_COUNT"
+
+# --- DEV_WORKFLOW_CACHE_PATHS で terraform を含まない値に上書きした場合、
+#     docker run に -e TF_PLUGIN_CACHE_DIR が渡らない（issue #213 完了条件4） ---
+: > "$IMG_TEST_LOG"
+: > "$IMG_TEST_RM_LOG"
+: > "$IMG_TEST_RUN_LOG"
+: > "$IMG_TEST_EXEC_LOG"
+printf '0' > "$IMG_TEST_STATE_FILE"
+printf 'false\n' > "$IMG_TEST_RUNNING_FILE"
+
+IMG_TF_OVERRIDE_EXIT=0
+(
+  cd "$IMG_REPO" || exit 1
+  DEV_WORKFLOW_CACHE_PATHS="/root/.cache/go-build" \
+    DEV_WORKFLOW_STAMP_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-imgstamp.XXXXXX")" \
+    DW_IMG_LOG="$IMG_TEST_LOG" \
+    DW_IMG_RM_LOG="$IMG_TEST_RM_LOG" \
+    DW_IMG_RUN_LOG="$IMG_TEST_RUN_LOG" \
+    DW_IMG_EXEC_LOG="$IMG_TEST_EXEC_LOG" \
+    DW_IMG_CONTAINER_STATE="$IMG_TEST_STATE_FILE" \
+    DW_IMG_CONTAINER_RUNNING_STATE="$IMG_TEST_RUNNING_FILE" \
+    DW_IMG_CONTAINER_IMAGE_ID="" \
+    DW_IMG_CONTAINER_MOUNT="" \
+    DW_IMG_IMAGE_EXISTS=1 \
+    DW_IMG_IMAGE_ID="sha256:existing" \
+    PATH="${FAKE_DOCKER_IMAGE_DIR}:${PATH}" \
+    bash scripts/sandbox-exec.sh 'true'
+) >/dev/null 2>&1 || IMG_TF_OVERRIDE_EXIT=$?
+assert_exit_code "DEV_WORKFLOW_CACHE_PATHS上書き時: 実行全体が成功する（issue #213）" 0 "$IMG_TF_OVERRIDE_EXIT"
+
+IMG_TF_OVERRIDE_RUN_LINE="$(head -n1 "$IMG_TEST_RUN_LOG")"
+case "$IMG_TF_OVERRIDE_RUN_LINE" in
+  *"TF_PLUGIN_CACHE_DIR"*)
+    fail "DEV_WORKFLOW_CACHE_PATHSでterraformを含まない値に上書きするとTF_PLUGIN_CACHE_DIRが渡らない（issue #213）" \
+      "run_line=[${IMG_TF_OVERRIDE_RUN_LINE}]" ;;
+  *)
+    pass "DEV_WORKFLOW_CACHE_PATHSでterraformを含まない値に上書きするとTF_PLUGIN_CACHE_DIRが渡らない（issue #213）" ;;
+esac
 
 # --- --rebuild 指定時は存在してもビルドする ---
 IMG_C_EXIT=0
