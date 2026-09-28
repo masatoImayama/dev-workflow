@@ -105,6 +105,7 @@ if printf '%s\n' "$PLAN" | grep -q '^mode=none$'; then
   echo "次のいずれかで供給してください（1・2 は駆動先リポジトリを汚しません）:"
   echo "  1. 規約パスに置く（推奨）: ~/.claude/dev-workflow/sandbox/<リポジトリ名>/Dockerfile.dev"
   echo "     （または同ディレクトリの docker-compose.dev.yml）"
+  echo "     雛形を自動生成する場合: bash ${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh --init"
   echo "  2. 環境変数で渡す: DEV_WORKFLOW_DOCKERFILE / DEV_WORKFLOW_DOCKER_COMPOSE_FILE / DEV_WORKFLOW_DOCKER_IMAGE"
   echo "  3. リポジトリ直下に置いてコミットする（チームで run を共有する場合のみ）"
   exit 1

@@ -12852,6 +12852,19 @@ for f in "skills/run/SKILL.md" "skills-codex/dev-workflow-run/SKILL.md"; do
       fail "${f}: mode=none 案内に選択肢3（リポジトリ直下）がある（#128）" "$MN_BLOCK" ;;
   esac
 
+  # --- 両run スキルの mode=none 案内は記述が一致する
+  #     （docs/dev-workflow-multi-vendor-guide.md「両 run スキルの記述は一致する」）。
+  #     選択肢1（規約パス）配下の --init 案内もその一部であり、片方だけの追記で
+  #     乖離した実績がある（#223、起因タスク#220）。個別ファイルの回帰テストではなく、
+  #     この#128のループ（両ファイルを機械的に照合する仕組み）へ組み込み、
+  #     以後どちらのファイルに追記されても片方が漏れれば必ず検出できるようにする ---
+  case "$MN_BLOCK" in
+    *'sandbox-exec.sh --init'*)
+      pass "${f}: mode=none 案内の選択肢1に --init の案内がある（#223）" ;;
+    *)
+      fail "${f}: mode=none 案内の選択肢1に --init の案内がある（#223）" "$MN_BLOCK" ;;
+  esac
+
   MN_SYNTAX_TMP="$(mktemp "${TMPDIR:-/tmp}/dw-test-mode-none.XXXXXX")"
   {
     echo 'PLAN="mode=none"'
