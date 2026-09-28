@@ -16742,6 +16742,86 @@ case "$RUN_SKILL_EPICGATE" in
 esac
 
 # ---------------------------------------------------------------------------
+echo "== Task issueテンプレートの「## 対象ファイル」節の必須化（#215） =="
+
+# #216 でplan-waves.shが対象ファイルの重なり判定に使う「## 対象ファイル」節が、
+# テンプレート・役割定義側に規定されていることを固定する（「- 前提:」「- Epic:」と同じ思想）。
+
+DOC215_PLANNER_ROLE="${REPO_ROOT}/core/roles/planner.md"
+DOC215_EPIC_SKILL="${REPO_ROOT}/skills/epic/SKILL.md"
+DOC215_PLAN_SKILL="${REPO_ROOT}/skills/plan/SKILL.md"
+DOC215_AGENT_PLANNER="${REPO_ROOT}/agents/planner.md"
+DOC215_CODEX_AGENT_PLANNER="${REPO_ROOT}/codex-agents/planner.toml"
+
+# --- core/roles/planner.md: 必須化の節見出しと書式規定がある ---
+if grep -Fq '#### 対象ファイル宣言（`## 対象ファイル`）の必須化' "$DOC215_PLANNER_ROLE"; then
+  pass "core/roles/planner.md: 「## 対象ファイル」宣言の必須化の節がある（#215）"
+else
+  fail "core/roles/planner.md: 「## 対象ファイル」宣言の必須化の節がある（#215）"
+fi
+
+if grep -Fq 'リポジトリルートからの相対パス' "$DOC215_PLANNER_ROLE" && grep -Fq 'グロブ' "$DOC215_PLANNER_ROLE"; then
+  pass "core/roles/planner.md: 書式（相対パス・1行1ファイル・グロブ禁止）が明記されている（#215）"
+else
+  fail "core/roles/planner.md: 書式（相対パス・1行1ファイル・グロブ禁止）が明記されている（#215）"
+fi
+
+if grep -Fq '新規作成するファイルも列挙する' "$DOC215_PLANNER_ROLE"; then
+  pass "core/roles/planner.md: 新規作成ファイルも列挙する旨が明記されている（#215）"
+else
+  fail "core/roles/planner.md: 新規作成ファイルも列挙する旨が明記されている（#215）"
+fi
+
+if grep -Fq '宣言漏れ' "$DOC215_PLANNER_ROLE" && grep -Fq '同一サブバッチに同居させない' "$DOC215_PLANNER_ROLE"; then
+  pass "core/roles/planner.md: 欠落時は宣言漏れとして安全側に倒す旨が明記されている（#215）"
+else
+  fail "core/roles/planner.md: 欠落時は宣言漏れとして安全側に倒す旨が明記されている（#215）"
+fi
+
+if grep -Fq 'この宣言は実装前の見積もりであり' "$DOC215_PLANNER_ROLE" && grep -Fq '競合が起きない保証にはならない' "$DOC215_PLANNER_ROLE"; then
+  pass "core/roles/planner.md: 宣言は見積もりであり競合の保証ではない旨が明記されている（#215）"
+else
+  fail "core/roles/planner.md: 宣言は見積もりであり競合の保証ではない旨が明記されている（#215）"
+fi
+
+# --- skills/epic/SKILL.md: Task issueテンプレートの「## 対象ファイル」節が必須と明記され、
+#     テンプレート本体にも節がある ---
+if grep -Fq '`## 対象ファイル` 節も**必須**である' "$DOC215_EPIC_SKILL"; then
+  pass "skills/epic/SKILL.md: 「## 対象ファイル」節が必須と明記されている（#215）"
+else
+  fail "skills/epic/SKILL.md: 「## 対象ファイル」節が必須と明記されている（#215）"
+fi
+
+if grep -Fq '## 対象ファイル' "$DOC215_EPIC_SKILL"; then
+  pass "skills/epic/SKILL.md: Task issue本文テンプレートに「## 対象ファイル」節がある（#215）"
+else
+  fail "skills/epic/SKILL.md: Task issue本文テンプレートに「## 対象ファイル」節がある（#215）"
+fi
+
+# --- skills/plan/SKILL.md: Task issue要件に「## 対象ファイル」が明記されている ---
+if grep -Fq '`## 対象ファイル`' "$DOC215_PLAN_SKILL"; then
+  pass "skills/plan/SKILL.md: Task issue要件に「## 対象ファイル」が明記されている（#215）"
+else
+  fail "skills/plan/SKILL.md: Task issue要件に「## 対象ファイル」が明記されている（#215）"
+fi
+
+# --- core/roles/planner.md の追記はadapters/*/build.shの再生成対象であるため、
+#     生成物側にも同じ記述が反映されていることを固定する（生成漏れの検出） ---
+if [ -f "$DOC215_AGENT_PLANNER" ] && grep -Fq '#### 対象ファイル宣言（`## 対象ファイル`）の必須化' "$DOC215_AGENT_PLANNER"; then
+  pass "agents/planner.md: 正本（core/roles/planner.md）の「## 対象ファイル」追記内容が反映されている（#215）"
+else
+  fail "agents/planner.md: 正本（core/roles/planner.md）の「## 対象ファイル」追記内容が反映されている（#215）" \
+    "見つかりません: ${DOC215_AGENT_PLANNER}"
+fi
+
+if [ -f "$DOC215_CODEX_AGENT_PLANNER" ] && grep -Fq '対象ファイル宣言（`## 対象ファイル`）の必須化' "$DOC215_CODEX_AGENT_PLANNER"; then
+  pass "codex-agents/planner.toml: 正本の「## 対象ファイル」追記内容が反映されている（#215）"
+else
+  fail "codex-agents/planner.toml: 正本の「## 対象ファイル」追記内容が反映されている（#215）" \
+    "見つかりません: ${DOC215_CODEX_AGENT_PLANNER}"
+fi
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
