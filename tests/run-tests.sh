@@ -2457,6 +2457,46 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 検出時の警告から dev-workflow:setup への導線（Task #222）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== 検出時の警告から dev-workflow:setup への導線（#222） =="
+
+# --- 未導入通知に CONNECTION_CLOSED への言及と dev-workflow:setup への導線がある ---
+case "$OPT_TOOLS_NO_CONTEXT7_NOTICE" in
+  *"CONNECTION_CLOSED"*) pass "optional_tools_notice: CONNECTION_CLOSEDへの言及がある（#222）" ;;
+  *) fail "optional_tools_notice: CONNECTION_CLOSEDへの言及がある（#222）" \
+    "notice=[${OPT_TOOLS_NO_CONTEXT7_NOTICE}]" ;;
+esac
+
+case "$OPT_TOOLS_NO_CONTEXT7_NOTICE" in
+  *"dev-workflow:setup"*) pass "optional_tools_notice: dev-workflow:setupへの導線がある（#222）" ;;
+  *) fail "optional_tools_notice: dev-workflow:setupへの導線がある（#222）" \
+    "notice=[${OPT_TOOLS_NO_CONTEXT7_NOTICE}]" ;;
+esac
+
+# --- 警告のexit コードは従来どおり（任意依存の不在でexit 2にならない。上のOPT_TOOLS_FULL_EXITで既に検証済みだが、
+#     #222の完了条件として明示的に再掲する） ---
+assert_exit_code "検出時の警告を追加してもexit コードは従来どおり（任意依存の不在でexit 2にならない、#222）" \
+  0 "$OPT_TOOLS_FULL_EXIT"
+
+# --- docs/optional-mcp-tools.md に症状ベース（CONNECTION_CLOSED）の節がある ---
+DOC222_OPTIONAL_MCP_DOC="${REPO_ROOT}/docs/optional-mcp-tools.md"
+if grep -qF "CONNECTION_CLOSED" "$DOC222_OPTIONAL_MCP_DOC"; then
+  pass "docs/optional-mcp-tools.md: CONNECTION_CLOSEDの節がある（#222）"
+else
+  fail "docs/optional-mcp-tools.md: CONNECTION_CLOSEDの節がある（#222）"
+fi
+
+# --- README.mdのトラブルシューティングに該当行がある ---
+if grep -qF "CONNECTION_CLOSED" "${REPO_ROOT}/README.md"; then
+  pass "README.md: トラブルシューティングにCONNECTION_CLOSEDの記載がある（#222）"
+else
+  fail "README.md: トラブルシューティングにCONNECTION_CLOSEDの記載がある（#222）"
+fi
+
+# ---------------------------------------------------------------------------
 # check-readability.sh の非対話ハング修正（Task #10、Epic #3 仕様書 4.9）
 #
 # `--git` / `--staged` / ファイル引数が1つでもあれば stdin を一切読まない。

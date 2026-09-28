@@ -56,6 +56,8 @@ optional_tools_notice() {
     echo "    blast radius の算出を使わず、従来どおり Phase 単位に分割してレビューします。"
   fi
   echo "  導入方法は docs/optional-mcp-tools.md を参照してください。"
+  echo "  /plugin に CONNECTION_CLOSED と出るのはこれが原因の正常な挙動です（異常ではありません）。"
+  echo "  解消したい場合は dev-workflow:setup（または scripts/doctor.sh）を実行してください。"
 }
 
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then

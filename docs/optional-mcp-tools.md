@@ -258,6 +258,27 @@ mcp__plugin_<plugin-name>_<server-name>__<tool-name>
   セッション開始が最大約30秒（既定タイムアウト）遅れうる。これはセッションの起動そのものを妨げるもの
   ではなく、開始が遅れるだけで、一度きり（他のツール呼び出しの繰り返しをブロックするものではない）
 
+## `/plugin` に `CONNECTION_CLOSED` と出る場合
+
+```
+Failed to reconnect to plugin:dev-workflow:code-review-graph: CONNECTION_CLOSED
+Failed to reconnect to plugin:dev-workflow:context7: CONNECTION_CLOSED
+```
+
+`/plugin` の表示にこの2行が出るのは、**未導入の任意ツールに対して、この方式（上記「採用方式」の
+方式A: 宣言方式）が設計どおりに反応した結果**である。dev-workflow は
+`.claude-plugin/plugin.json` に `context7-mcp` / `code-review-graph` を「導入済み前提」で
+宣言しており、コマンドが `PATH` に無ければ Claude Code 側の接続がこの文言で失敗する。
+この表示自体はプラグイン側の実装であり、dev-workflow から変えられない。
+
+**異常ではない。** 未導入でも `context7` / `code-review-graph` は上記「任意依存であることの
+保証」のとおり dev-workflow の動作を妨げない。解消したい場合は次のいずれかを実行する:
+
+```bash
+/dev-workflow:setup            # 診断・導入をまとめて案内する
+bash scripts/doctor.sh         # 診断のみ
+```
+
 ## Phase 4: code-review-graph の結線（#73）
 
 上記「採用方式」（方式A: 宣言方式）に従い、code-review-graph を **evaluator にのみ**結線した。
