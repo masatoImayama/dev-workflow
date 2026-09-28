@@ -17102,6 +17102,93 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# skills/setup/SKILL.md: 診断・導入・整備を束ねるユーザー向けスキル（Task #221）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== skills/setup/SKILL.md（診断・導入・整備を束ねるユーザー向けスキル、#221） =="
+
+SETUP_SKILL="${REPO_ROOT}/skills/setup/SKILL.md"
+
+if [ -f "$SETUP_SKILL" ]; then
+  pass "skills/setup/SKILL.md: ファイルが存在する（#221）"
+else
+  fail "skills/setup/SKILL.md: ファイルが存在する（#221）"
+fi
+
+if grep -qF -- '---' "$SETUP_SKILL" && grep -qE '^name: setup$' "$SETUP_SKILL"; then
+  pass "skills/setup/SKILL.md: frontmatterにname: setupがある（#221）"
+else
+  fail "skills/setup/SKILL.md: frontmatterにname: setupがある（#221）"
+fi
+
+# --- 3スクリプトを呼び出す（判定・導入コマンドを再実装しない） ---
+for _setup_ref in 'scripts/doctor.sh' 'scripts/install-optional-mcp.sh' 'scripts/sandbox-exec.sh" --init'; do
+  if grep -qF -- "$_setup_ref" "$SETUP_SKILL"; then
+    pass "skills/setup/SKILL.md: ${_setup_ref} を呼び出している（#221）"
+  else
+    fail "skills/setup/SKILL.md: ${_setup_ref} を呼び出している（#221）"
+  fi
+done
+
+# --- 完了条件: 必須依存不足時は自動導入を試みず案内で停止する ---
+if grep -qF '自動導入は行わない' "$SETUP_SKILL"; then
+  pass "skills/setup/SKILL.md: 必須依存不足時に自動導入を試みない旨が明記されている（#221）"
+else
+  fail "skills/setup/SKILL.md: 必須依存不足時に自動導入を試みない旨が明記されている（#221）"
+fi
+
+# --- 完了条件: 任意MCPの導入が利用者の明示的な選択なしには実行されない（既定dry-run + --apply） ---
+case "$(cat "$SETUP_SKILL")" in
+  *'利用者が明示的に選んだ場合に限り'*'--apply'*)
+    pass "skills/setup/SKILL.md: 任意MCPの導入は利用者の明示的な選択がある場合に限る（#221）" ;;
+  *)
+    fail "skills/setup/SKILL.md: 任意MCPの導入は利用者の明示的な選択がある場合に限る（#221）" ;;
+esac
+
+# --- 完了条件: 「任意依存を入れない」という選択が正当な結末として記述されている ---
+if grep -qF '任意依存を入れない」という選択も正当な結末である' "$SETUP_SKILL"; then
+  pass "skills/setup/SKILL.md: 「任意依存を入れない」選択が正当な結末として記述されている（#221）"
+else
+  fail "skills/setup/SKILL.md: 「任意依存を入れない」選択が正当な結末として記述されている（#221）"
+fi
+
+# --- 完了条件: setupを実行していない環境でもrunが従来どおり動く（D5、runの前提にしない） ---
+if grep -qF 'setup は run の前提ではない' "$SETUP_SKILL"; then
+  pass "skills/setup/SKILL.md: setupがrunの前提ではないと明記されている（D5、#221）"
+else
+  fail "skills/setup/SKILL.md: setupがrunの前提ではないと明記されている（D5、#221）"
+fi
+
+# --- 完了条件: check-prerequisites.shを置き換えない ---
+if grep -qF 'check-prerequisites.sh' "$SETUP_SKILL" && grep -qF 'を置き換えない' "$SETUP_SKILL"; then
+  pass "skills/setup/SKILL.md: check-prerequisites.shを置き換えない旨が明記されている（#221）"
+else
+  fail "skills/setup/SKILL.md: check-prerequisites.shを置き換えない旨が明記されている（#221）"
+fi
+
+# --- 完了条件: plugin.jsonにスキルが登録され（keywordsにsetupが追加され）、JSONとして妥当 ---
+SETUP_CLAUDE_PLUGIN_JSON="${REPO_ROOT}/.claude-plugin/plugin.json"
+if _hj_json_syntax_ok "$SETUP_CLAUDE_PLUGIN_JSON"; then
+  pass ".claude-plugin/plugin.json: 変更後もJSON構文として妥当（括弧の対応が取れている）（#221）"
+else
+  fail ".claude-plugin/plugin.json: 変更後もJSON構文として妥当（括弧の対応が取れている）（#221）"
+fi
+
+if grep -qF '"setup"' "$SETUP_CLAUDE_PLUGIN_JSON"; then
+  pass ".claude-plugin/plugin.json: keywordsにsetupが追加されている（#221）"
+else
+  fail ".claude-plugin/plugin.json: keywordsにsetupが追加されている（#221）"
+fi
+
+# --- 完了条件: README.mdに導線がある ---
+if grep -qF '/dev-workflow:setup' "${REPO_ROOT}/README.md"; then
+  pass "README.md: /dev-workflow:setup への導線がある（#221）"
+else
+  fail "README.md: /dev-workflow:setup への導線がある（#221）"
+fi
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 

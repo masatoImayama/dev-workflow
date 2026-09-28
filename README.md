@@ -189,6 +189,15 @@ services:
 /dev-workflow:epic notifications
 ```
 
+### 環境セットアップ
+
+```
+/dev-workflow:setup
+```
+→ 新しいマシン・新しい駆動先リポジトリでの立ち上げに使う。診断（`scripts/doctor.sh`）→
+案内 → （明示的な同意があれば）任意MCPの導入・サンドボックス雛形の生成 → 再診断、の順に進める。
+**`/dev-workflow:run` の前提ではない**。setup を実行していなくても run は従来どおり動く。
+
 ### フィードバック
 
 ```
