@@ -29,8 +29,14 @@
 #   bash scripts/sandbox-exec.sh --reset-cache --force                # running でも強制的に削除する
 #   bash scripts/sandbox-exec.sh --rebuild 'make test'                # イメージを強制再ビルドしてから実行する
 #   bash scripts/sandbox-exec.sh --print-plan                        # docker に触れず解決結果を表示（ドライラン）
+#   bash scripts/sandbox-exec.sh --detach 'make test'                 # バックグラウンドで起動し即座に返る（ハンドル既定値: default）
+#   bash scripts/sandbox-exec.sh --detach --handle full-suite 'make test'  # 複数を並行させたい場合はハンドルを分ける
+#   bash scripts/sandbox-exec.sh --wait                               # 直近の --detach（既定ハンドル）の完了を待ち、終了コードをそのまま返す
+#   bash scripts/sandbox-exec.sh --wait --handle full-suite           # ハンドルを指定して完了を待つ
 #
 # 終了コードは実行したコマンドのものをそのまま返す（機械的ゲートの判定に使える）。
+# --wait も同様（完了したコマンドの終了コードをそのまま返す）。--detach 自体は「起動できたか」
+# （0=起動成功）を返すだけで、コマンド自体の終了コードは --wait で取得する。
 #
 # イメージの自動ビルドと再作成（仕様書 4.7 / 4.3 の 1）:
 #   dockerfile モードでは、イメージが存在しない、または --rebuild 指定時に
@@ -49,6 +55,8 @@
 #   DEV_WORKFLOW_COMPOSE_SERVICE  compose モードで exec するサービス名（既定: app）
 #   DEV_WORKFLOW_COMPOSE_WORKDIR  compose モードでのコンテナ内マウント先の基点（既定: /workspace）
 #   DEV_WORKFLOW_STAMP_HOME       検証済みスタンプの置き場（既定: ${HOME}/.claude/dev-workflow/stamps）
+#   DEV_WORKFLOW_DETACH_HOME      --detach/--wait のマーカー・ログの置き場
+#                                 （既定: ${HOME}/.claude/dev-workflow/detached）
 #   DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV
 #                                 レーンごとに分離したいキャッシュ環境変数の宣言
 #                                 （"<環境変数名>=<コンテナ内のキャッシュパス>" をスペース区切りで複数可。
@@ -97,6 +105,23 @@
 #   リポジトリ外 worktree のフォールバック実行では working_dir が HOST_ROOT 外になるため、
 #   そこで起動した project は `--down --all` の対象に含まれない。
 #   `--ls` にも compose project の状態（running/stopped）を表示する。
+#
+# 切り離し実行（--detach/--wait）について（issue #214）:
+#   駆動先のフルスイートが20〜35分に及ぶと、前景実行（既定の呼び出し方）は実行系の
+#   タイムアウトで打ち切られる。--detach は指定したコマンドをホスト側でバックグラウンドへ
+#   回し、完了を待たずに即座に返る（返る終了コードは「起動できたか」であり、コマンド自体の
+#   終了コードではない）。--wait は完了マーカーが出るまで内部でポーリングし、完了したら
+#   ログを標準出力へ流したうえで、**コマンドの終了コードをそのまま返す**（機械的ゲートの
+#   判定にそのまま使える）。
+#   マーカー・ログは ${DEV_WORKFLOW_DETACH_HOME:-${HOME}/.claude/dev-workflow/detached}/<repo>[-<epic>]/<handle>/
+#   に epic 単位（--epic を尊重する）で衝突しないように置く。同一 epic で複数の切り離し実行を
+#   並べたい場合は --handle でハンドルを分ける（既定は "default"）。
+#   実行中は running マーカーのみが存在し、完了して初めて exit_code ファイルが（一時ファイルへ
+#   書いてから rename する形で）現れる。実行中・完了はこの2ファイルの有無で区別でき、
+#   打ち切られて exit_code を書けないまま終わった場合も running が残るだけで完了扱いにはならない
+#   （fail-safe）。バックグラウンド処理自体は `trap '' HUP` を付けたサブシェルとして起動するため、
+#   起動元の呼び出し（--detach の呼び出しや、待っている --wait の呼び出し）が打ち切られても
+#   実行は継続する。
 
 set -u
 
@@ -135,6 +160,8 @@ WARM=0
 ALL=0
 FORCE=0
 REBUILD=0
+DETACH=0
+HANDLE=""
 ACTION="exec"
 
 while [ $# -gt 0 ]; do
@@ -156,6 +183,15 @@ while [ $# -gt 0 ]; do
     --force)       FORCE=1; shift ;;
     --rebuild)     REBUILD=1; shift ;;
     --print-plan)  ACTION="print-plan"; shift ;;
+    --detach)      DETACH=1; shift ;;
+    --wait)        ACTION="wait"; shift ;;
+    --handle)
+      # --epic と同じ理由（無限ループ防止）で引数個数を検査する。
+      if [ $# -lt 2 ]; then
+        echo "ERROR: --handle には値が必要です" >&2
+        exit 2
+      fi
+      HANDLE="$2"; shift 2 ;;
     --)            shift; break ;;
     -*)            echo "ERROR: 未知のオプション: $1" >&2; exit 2 ;;
     *)             break ;;
@@ -163,6 +199,9 @@ while [ $# -gt 0 ]; do
 done
 
 CMD="${1:-}"
+
+# --detach/--wait のハンドル（既定: "default"。同一epicで並べて走らせたい場合だけ指定する）。
+HANDLE="${HANDLE:-default}"
 
 sanitize() { printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '-'; }
 
@@ -260,6 +299,98 @@ CONTAINER="dw-sandbox-${SLUG}"
 # CONTAINER と同じ SLUG から作るため、通常時は worktree 名に依存せず agent worktree から
 # 叩いても epic worktree と同じ project になり、フォールバック時は CONTAINER と同様に分離される。
 COMPOSE_PROJECT="dw-${SLUG}"
+
+# --- 切り離し実行（--detach/--wait）のマーカー置き場（issue #214） -----------------
+#
+# epic 単位（SLUG に epic を含む）で衝突しないディレクトリに、ハンドルごとの
+# running/exit_code/log/pid を置く。リポジトリの追跡ファイルにはしない
+# （ハーネス非注入原則。スタンプと同じ考え方で ${HOME} 配下に置く）。
+DETACH_HOME="${DEV_WORKFLOW_DETACH_HOME:-}"
+if [ -z "$DETACH_HOME" ] && [ -n "${HOME:-}" ]; then
+  DETACH_HOME="${HOME}/.claude/dev-workflow/detached"
+fi
+
+detach_dir_for() {
+  # detach_dir_for <handle>
+  printf '%s/%s/%s' "$DETACH_HOME" "$SLUG" "$(sanitize "$1")"
+}
+
+start_detached() {
+  # start_detached <dir> <command...>
+  # 指定コマンドをバックグラウンドで実行し、完了マーカー（exit_code）とログを
+  # <dir> に書き出して即座に返る（コマンドの完了は待たない）。
+  local dir="$1"; shift
+
+  if [ -z "$DETACH_HOME" ]; then
+    echo "ERROR: HOME が未設定のため切り離し実行のマーカーを解決できません（--detach は使用できません）" >&2
+    return 1
+  fi
+
+  mkdir -p "$dir" 2>/dev/null || {
+    echo "ERROR: 切り離し実行用ディレクトリを作成できません: ${dir}" >&2
+    return 1
+  }
+
+  # 同一ハンドルが実行中（exit_code未着・pidが生存）なら多重起動を拒否する。
+  # pidが死んでいる（完了マーカーを書けずに終了した）場合は上書きして再実行を許す。
+  if [ -f "${dir}/pid" ] && [ ! -f "${dir}/exit_code" ]; then
+    local existing_pid
+    existing_pid="$(cat "${dir}/pid" 2>/dev/null || true)"
+    if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
+      echo "ERROR: ハンドル '${HANDLE}' は既に実行中です（pid=${existing_pid}）。別の --handle を指定してください: ${dir}" >&2
+      return 1
+    fi
+    echo "WARNING: ハンドル '${HANDLE}' の前回実行が完了マーカーを残さず終了していました。上書きして再実行します: ${dir}" >&2
+  fi
+
+  rm -f "${dir}/exit_code" "${dir}/exit_code.tmp" "${dir}/pid" "${dir}/log"
+  : > "${dir}/running"
+
+  # trap '' HUP で SIGHUP を無視させたサブシェル（`( ... )`）としてバックグラウンド起動する。
+  # `( )` はこのスクリプトのプロセスから fork するため、compose_cmd 等の関数定義や現在の
+  # 環境変数をそのまま引き継ぐ（別プロセスとして再解釈させる必要が無い）。
+  # exit_code は一時ファイルへ書いてから rename することで、書き込み途中の中身を
+  # --wait 側が読んでしまう事態を避ける（atomic）。
+  #
+  # サブシェル全体の標準出力・標準エラーを `>/dev/null 2>&1` でここで明示的に閉じる
+  # （内側の `"$@" >log 2>&1` だけでは不十分。それは「$@」の実行中だけの一時的な
+  # 付け替えであり、サブシェル自身が継承した元の fd は生き続ける）。呼び出し元が
+  # `$( ... )` でこの呼び出しを包んでいる場合、パイプの書き込み側を継承したプロセスが
+  # 1つでも残っていると `$( ... )` はそれが終わるまで返らない。ここを閉じないと、
+  # バックグラウンド化したはずの --detach が実質的に前景実行と同じだけ待たされる
+  # （実測で確認済みの回帰）。
+  (
+    trap '' HUP
+    "$@" >"${dir}/log" 2>&1
+    rc=$?
+    printf '%s' "$rc" > "${dir}/exit_code.tmp"
+    mv -f "${dir}/exit_code.tmp" "${dir}/exit_code"
+    rm -f "${dir}/running"
+  ) >/dev/null 2>&1 &
+  local bg_pid=$!
+  disown "$bg_pid" 2>/dev/null || true
+  printf '%s' "$bg_pid" > "${dir}/pid"
+
+  echo "handle=${HANDLE}"
+  echo "dir=${dir}"
+  echo "pid=${bg_pid}"
+  echo "バックグラウンドで実行を開始しました。完了は次で待ってください:"
+  echo "  bash ${SCRIPT_DIR}/sandbox-exec.sh${EPIC:+ --epic $EPIC} --wait --handle ${HANDLE}"
+  return 0
+}
+
+run_and_report_or_detach() {
+  # run_and_report_or_detach <command...>
+  # DETACH=1 なら start_detached へ、そうでなければ従来どおり run_and_report へ渡す
+  # （既定の前景実行は完全に現行のまま。後方互換）。
+  if [ "$DETACH" -eq 1 ]; then
+    local dir
+    dir="$(detach_dir_for "$HANDLE")"
+    start_detached "$dir" "$@"
+    return $?
+  fi
+  run_and_report "$@"
+}
 
 cache_volume_name() {
   printf 'dw-cache-%s-%s' \
@@ -735,11 +866,43 @@ case "$ACTION" in
     print_plan
     exit 0
     ;;
+  wait)
+    # --wait は docker に一切触れない（マーカーファイルのポーリングのみ）。
+    # そのため DEV_WORKFLOW_SANDBOX_MODE の解決結果には依存しない。
+    if [ -z "$DETACH_HOME" ]; then
+      echo "ERROR: HOME が未設定のため切り離し実行のマーカーを解決できません（--wait は使用できません）" >&2
+      exit 1
+    fi
+
+    WAIT_DIR="$(detach_dir_for "$HANDLE")"
+    if [ ! -d "$WAIT_DIR" ]; then
+      echo "ERROR: ハンドル '${HANDLE}' の切り離し実行が見つかりません（repo=${PROJECT}, epic=${EPIC:-未指定}）: ${WAIT_DIR}" >&2
+      echo "       先に --detach で起動してください。" >&2
+      exit 1
+    fi
+
+    # 内部でポーリングし、完了（exit_codeの出現）まで待つ。ポーリング間隔は
+    # DEV_WORKFLOW_WAIT_POLL_SECONDS（既定5秒）。呼び出し側はこの1回の呼び出しだけで
+    # 完了まで待てるため、呼び出し側自身がポーリングループを新たに書く必要が無い（issue #140）。
+    WAIT_POLL_SECONDS="${DEV_WORKFLOW_WAIT_POLL_SECONDS:-5}"
+    while [ ! -f "${WAIT_DIR}/exit_code" ]; do
+      if [ ! -f "${WAIT_DIR}/running" ]; then
+        echo "ERROR: ハンドル '${HANDLE}' は実行中でも完了済みでもありません（マーカー不整合）: ${WAIT_DIR}" >&2
+        exit 1
+      fi
+      sleep "$WAIT_POLL_SECONDS"
+    done
+
+    # 前景実行時と同様、呼び出し側から出力が見えるようにログを流してから終了コードを返す。
+    [ -f "${WAIT_DIR}/log" ] && cat "${WAIT_DIR}/log"
+    WAIT_EXIT_CODE="$(cat "${WAIT_DIR}/exit_code" 2>/dev/null || echo 1)"
+    exit "$WAIT_EXIT_CODE"
+    ;;
 esac
 
 if [ -z "$CMD" ]; then
   echo "ERROR: 実行するコマンドが指定されていません" >&2
-  echo "使い方: bash scripts/sandbox-exec.sh [--epic <N>] [--warm] '<command>'" >&2
+  echo "使い方: bash scripts/sandbox-exec.sh [--epic <N>] [--warm] [--detach [--handle <名前>]] '<command>'" >&2
   exit 2
 fi
 
@@ -815,7 +978,7 @@ case "$DEV_WORKFLOW_SANDBOX_MODE" in
       exit 1
     fi
 
-    run_and_report compose_cmd exec -T -w "$COMPOSE_WORKDIR" "${LANE_ENV_ARGS[@]}" "$COMPOSE_SERVICE" sh -c "$(lane_cache_mkdir_prefix)${CMD}"
+    run_and_report_or_detach compose_cmd exec -T -w "$COMPOSE_WORKDIR" "${LANE_ENV_ARGS[@]}" "$COMPOSE_SERVICE" sh -c "$(lane_cache_mkdir_prefix)${CMD}"
     exit $?
     ;;
 
@@ -823,7 +986,7 @@ case "$DEV_WORKFLOW_SANDBOX_MODE" in
     # サンドボックス未設定。ホスト側で実行する（テストが環境を汚す可能性がある）。
     # レーンスコープ・キャッシュの mkdir プレフィックスは docker 前提（コンテナ内パス）
     # なので、none モードには適用しない（ホストの / を触ってしまうため）。
-    run_and_report sh -c "$CMD"
+    run_and_report_or_detach sh -c "$CMD"
     exit $?
     ;;
 
@@ -852,7 +1015,7 @@ case "$DEV_WORKFLOW_SANDBOX_MODE" in
     fi
 
     if [ "$FAST_PATH" -eq 1 ]; then
-      run_and_report docker exec -w "$WORKDIR" "${LANE_ENV_ARGS[@]}" "$CONTAINER" sh -c "$(lane_cache_mkdir_prefix)${CMD}"
+      run_and_report_or_detach docker exec -w "$WORKDIR" "${LANE_ENV_ARGS[@]}" "$CONTAINER" sh -c "$(lane_cache_mkdir_prefix)${CMD}"
       exit $?
     fi
 
