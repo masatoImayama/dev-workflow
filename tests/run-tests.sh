@@ -16476,6 +16476,229 @@ fi
 unset RG198_FILE RG198_BODY_REGION RG198_HIT RG198_LEAK_DETAIL
 
 # ---------------------------------------------------------------------------
+# scripts/doctor.sh（環境診断を1コマンドにまとめる。#218）
+#
+# 必須依存（gh/docker）・任意依存（context7-mcp/code-review-graph）・サンドボックス
+# （sandbox-exec.sh --print-plan）・リポジトリ衛生（check-repo-hygiene.sh --check --print）・
+# CRLF設定（check-prerequisites.sh の crlf_warning_message）をまとめて表示する。
+# 実 gh/実 docker には一切触れず、スタブに差し替えて検証する。
+# ---------------------------------------------------------------------------
+
+echo "== scripts/doctor.sh（環境診断・#218） =="
+
+DOCTOR_SCRIPT_SRC="${REPO_ROOT}/scripts/doctor.sh"
+
+copy_doctor_scripts() {
+  # copy_doctor_scripts <dest_repo_dir>
+  # doctor.sh とその依存スクリプト（check-prerequisites.sh / check-repo-hygiene.sh /
+  # sandbox-exec.sh / resolve-sandbox.sh / lib）を検証対象の一時リポジトリへ複製してコミットする。
+  local dest="$1"
+  copy_sandbox_scripts "$dest"
+  cp "${REPO_ROOT}/scripts/doctor.sh"              "${dest}/scripts/doctor.sh"
+  cp "${REPO_ROOT}/scripts/check-prerequisites.sh" "${dest}/scripts/check-prerequisites.sh"
+  cp "${REPO_ROOT}/scripts/check-repo-hygiene.sh"  "${dest}/scripts/check-repo-hygiene.sh"
+  (
+    cd "$dest" || exit 1
+    git add scripts
+    git commit -q -m "add doctor.sh and deps"
+  ) >/dev/null 2>&1
+}
+
+make_doctor_stub_bin_dir() {
+  # make_doctor_stub_bin_dir <gh auth status の終了コード> <docker info の終了コード>
+  # 指定した終了コードで動作する gh / docker のスタブを1つのディレクトリにまとめて作る。
+  # サブコマンド以外の呼び出し（command -v の対象存在確認）は常に成功させる。
+  local gh_exit="$1" docker_exit="$2"
+  local dir
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-doctor-bin.XXXXXX")"
+  cat > "${dir}/gh" <<SH
+#!/bin/bash
+if [ "\$1" = "auth" ] && [ "\$2" = "status" ]; then
+  exit ${gh_exit}
+fi
+exit 0
+SH
+  chmod +x "${dir}/gh"
+  cat > "${dir}/docker" <<SH
+#!/bin/bash
+if [ "\$1" = "info" ]; then
+  exit ${docker_exit}
+fi
+exit 0
+SH
+  chmod +x "${dir}/docker"
+  printf '%s' "$dir"
+}
+
+# gh/docker が実際に存在するディレクトリだけをPATHから除外する（ベンダー固有パスを
+# 決め打ちしない。この環境に無い場合は dirname が "." を返すだけで無害）。
+DOCTOR_REAL_GH_DIR="$(dirname "$(command -v gh 2>/dev/null || true)")"
+DOCTOR_REAL_DOCKER_DIR="$(dirname "$(command -v docker 2>/dev/null || true)")"
+DOCTOR_PATH_WITHOUT_GH_DOCKER="$(printf '%s' "$PATH" | tr ':' '\n' \
+  | grep -vFx "$DOCTOR_REAL_GH_DIR" | grep -vFx "$DOCTOR_REAL_DOCKER_DIR" \
+  | tr '\n' ':' | sed 's/:$//')"
+
+DOCTOR_OK_REPO="$(make_temp_repo)"
+copy_doctor_scripts "$DOCTOR_OK_REPO"
+DOCTOR_OK_BIN="$(make_doctor_stub_bin_dir 0 0)"
+DOCTOR_OK_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-doctor-home.XXXXXX")"
+
+# --- ケース1: gh/docker が両方揃っている（認証済み・起動済み）場合、exit 0 で全セクションが出る ---
+DOCTOR_OK_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+DOCTOR_OK_EXIT=0
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_OK_OUT" 2>&1
+) || DOCTOR_OK_EXIT=$?
+
+assert_exit_code "doctor.sh: gh/docker が揃っていれば exit 0（#218）" 0 "$DOCTOR_OK_EXIT"
+
+for section in "必須依存" "任意依存" "サンドボックス" "リポジトリ衛生" "CRLF設定"; do
+  if grep -qF "$section" "$DOCTOR_OK_OUT"; then
+    pass "doctor.sh: 「${section}」セクションが表示される（#218）"
+  else
+    fail "doctor.sh: 「${section}」セクションが表示される（#218）" "$(cat "$DOCTOR_OK_OUT")"
+  fi
+done
+unset section
+
+# --- ケース2: gh/docker が両方とも見つからない環境でも最後まで走り切り、全項目が表示される ---
+DOCTOR_MISSING_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+DOCTOR_MISSING_EXIT=0
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  HOME="$DOCTOR_OK_HOME" PATH="$DOCTOR_PATH_WITHOUT_GH_DOCKER" \
+    bash scripts/doctor.sh > "$DOCTOR_MISSING_OUT" 2>&1
+) || DOCTOR_MISSING_EXIT=$?
+
+assert_exit_code "doctor.sh: gh/docker が両方無ければ exit 1（#218）" 1 "$DOCTOR_MISSING_EXIT"
+
+for section in "必須依存" "任意依存" "サンドボックス" "リポジトリ衛生" "CRLF設定"; do
+  if grep -qF "$section" "$DOCTOR_MISSING_OUT"; then
+    pass "doctor.sh: gh/docker が無くても「${section}」まで最後まで走り切る（#218）"
+  else
+    fail "doctor.sh: gh/docker が無くても「${section}」まで最後まで走り切る（#218）" "$(cat "$DOCTOR_MISSING_OUT")"
+  fi
+done
+unset section
+
+case "$(cat "$DOCTOR_MISSING_OUT")" in
+  *"gh: 見つかりません"*) pass "doctor.sh: gh不在時に見つからない旨のメッセージが出る（#218）" ;;
+  *) fail "doctor.sh: gh不在時に見つからない旨のメッセージが出る（#218）" "$(cat "$DOCTOR_MISSING_OUT")" ;;
+esac
+
+case "$(cat "$DOCTOR_MISSING_OUT")" in
+  *"docker: 見つかりません"*) pass "doctor.sh: docker不在時に見つからない旨のメッセージが出る（#218）" ;;
+  *) fail "doctor.sh: docker不在時に見つからない旨のメッセージが出る（#218）" "$(cat "$DOCTOR_MISSING_OUT")" ;;
+esac
+
+# --- ケース3: gh は導入済みだが未認証、docker は導入済みだが未起動 -> NGメッセージが出て exit 1 ---
+DOCTOR_UNAUTH_BIN="$(make_doctor_stub_bin_dir 1 1)"
+DOCTOR_UNAUTH_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+DOCTOR_UNAUTH_EXIT=0
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_UNAUTH_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_UNAUTH_OUT" 2>&1
+) || DOCTOR_UNAUTH_EXIT=$?
+
+assert_exit_code "doctor.sh: gh未認証・docker未起動なら exit 1（#218）" 1 "$DOCTOR_UNAUTH_EXIT"
+
+case "$(cat "$DOCTOR_UNAUTH_OUT")" in
+  *"gh auth login"*) pass "doctor.sh: gh未認証時に 'gh auth login' の案内が出る（#218）" ;;
+  *) fail "doctor.sh: gh未認証時に 'gh auth login' の案内が出る（#218）" "$(cat "$DOCTOR_UNAUTH_OUT")" ;;
+esac
+
+case "$(cat "$DOCTOR_UNAUTH_OUT")" in
+  *"Docker Desktop"*) pass "doctor.sh: docker未起動時に Docker Desktop 起動の案内が出る（#218）" ;;
+  *) fail "doctor.sh: docker未起動時に Docker Desktop 起動の案内が出る（#218）" "$(cat "$DOCTOR_UNAUTH_OUT")" ;;
+esac
+
+# --- ケース4: 任意依存（context7-mcp / code-review-graph）が未導入なら、貼り付け可能な
+#     導入コマンドが表示され、「異常ではない」ことが伝わる文言になっている（DOCTOR_OK_OUTを流用。
+#     ケース1のスタブbinには context7-mcp / code-review-graph を含めていないため未導入扱い） ---
+case "$(cat "$DOCTOR_OK_OUT")" in
+  *"npm install"*"@upstash/context7-mcp"*) pass "doctor.sh: context7-mcp未導入時に貼り付け可能な導入コマンドが出る（#218）" ;;
+  *) fail "doctor.sh: context7-mcp未導入時に貼り付け可能な導入コマンドが出る（#218）" "$(cat "$DOCTOR_OK_OUT")" ;;
+esac
+
+case "$(cat "$DOCTOR_OK_OUT")" in
+  *"pip install code-review-graph"*) pass "doctor.sh: code-review-graph未導入時に貼り付け可能な導入コマンドが出る（#218）" ;;
+  *) fail "doctor.sh: code-review-graph未導入時に貼り付け可能な導入コマンドが出る（#218）" "$(cat "$DOCTOR_OK_OUT")" ;;
+esac
+
+case "$(cat "$DOCTOR_OK_OUT")" in
+  *"従来どおり"*) pass "doctor.sh: 任意依存の未導入が異常でないと分かる文言（『従来どおり』）が出る（#218）" ;;
+  *) fail "doctor.sh: 任意依存の未導入が異常でないと分かる文言（『従来どおり』）が出る（#218）" "$(cat "$DOCTOR_OK_OUT")" ;;
+esac
+
+# --- ケース5: 任意依存が両方導入済みなら [OK] と表示され、導入コマンド案内は出ない ---
+DOCTOR_OPT_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-doctor-opt-bin.XXXXXX")"
+cat > "${DOCTOR_OPT_BIN}/context7-mcp" <<'SH'
+#!/bin/bash
+exit 0
+SH
+chmod +x "${DOCTOR_OPT_BIN}/context7-mcp"
+cat > "${DOCTOR_OPT_BIN}/code-review-graph" <<'SH'
+#!/bin/bash
+exit 0
+SH
+chmod +x "${DOCTOR_OPT_BIN}/code-review-graph"
+
+DOCTOR_OPT_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OPT_BIN}:${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_OPT_OUT" 2>&1
+)
+
+case "$(cat "$DOCTOR_OPT_OUT")" in
+  *"[OK] context7"*"導入済み"*) pass "doctor.sh: context7-mcp導入済みなら[OK]と表示される（#218）" ;;
+  *) fail "doctor.sh: context7-mcp導入済みなら[OK]と表示される（#218）" "$(cat "$DOCTOR_OPT_OUT")" ;;
+esac
+
+case "$(cat "$DOCTOR_OPT_OUT")" in
+  *"[OK] code-review-graph"*"導入済み"*) pass "doctor.sh: code-review-graph導入済みなら[OK]と表示される（#218）" ;;
+  *) fail "doctor.sh: code-review-graph導入済みなら[OK]と表示される（#218）" "$(cat "$DOCTOR_OPT_OUT")" ;;
+esac
+
+# --- ケース6: crlf_warning_message を再実装せず check-prerequisites.sh から source している ---
+if grep -qE 'source[[:space:]]+"[^"]*check-prerequisites\.sh"' "$DOCTOR_SCRIPT_SRC"; then
+  pass "doctor.sh: check-prerequisites.sh を source している（#218）"
+else
+  fail "doctor.sh: check-prerequisites.sh を source している（#218）" "$(cat "$DOCTOR_SCRIPT_SRC")"
+fi
+
+if grep -q "core.autocrlf" "$DOCTOR_SCRIPT_SRC"; then
+  fail "doctor.sh: crlf_warning_messageの判定ロジックを再実装していない（#218）" \
+    "doctor.sh 内に core.autocrlf への直接参照が見つかりました（source した関数を呼ぶだけにすること）"
+else
+  pass "doctor.sh: crlf_warning_messageの判定ロジックを再実装していない（#218）"
+fi
+
+# --- ケース7: 何度実行しても副作用が無い（ファイルを作らない・.git/info/excludeを書き換えない） ---
+DOCTOR_SIDEEFFECT_REPO="$(make_temp_repo)"
+copy_doctor_scripts "$DOCTOR_SIDEEFFECT_REPO"
+DOCTOR_SIDEEFFECT_EXCLUDE="$(cd "$DOCTOR_SIDEEFFECT_REPO" && git rev-parse --path-format=absolute --git-common-dir)/info/exclude"
+DOCTOR_SIDEEFFECT_EXCLUDE_BEFORE=""
+[ -f "$DOCTOR_SIDEEFFECT_EXCLUDE" ] && DOCTOR_SIDEEFFECT_EXCLUDE_BEFORE="$(cat "$DOCTOR_SIDEEFFECT_EXCLUDE")"
+
+(
+  cd "$DOCTOR_SIDEEFFECT_REPO" || exit 1
+  HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" bash scripts/doctor.sh >/dev/null 2>&1
+  HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" bash scripts/doctor.sh >/dev/null 2>&1
+)
+
+DOCTOR_SIDEEFFECT_STATUS="$(cd "$DOCTOR_SIDEEFFECT_REPO" && git status --porcelain --untracked-files=all)"
+assert_eq "doctor.sh: 2回実行しても未追跡ファイル・変更を作らない（副作用なし。#218）" "" "$DOCTOR_SIDEEFFECT_STATUS"
+
+DOCTOR_SIDEEFFECT_EXCLUDE_AFTER=""
+[ -f "$DOCTOR_SIDEEFFECT_EXCLUDE" ] && DOCTOR_SIDEEFFECT_EXCLUDE_AFTER="$(cat "$DOCTOR_SIDEEFFECT_EXCLUDE")"
+assert_eq "doctor.sh: .git/info/exclude を書き換えない（衛生チェックを--checkで呼ぶ。#218）" \
+  "$DOCTOR_SIDEEFFECT_EXCLUDE_BEFORE" "$DOCTOR_SIDEEFFECT_EXCLUDE_AFTER"
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
