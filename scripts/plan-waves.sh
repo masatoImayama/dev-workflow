@@ -31,14 +31,37 @@
 #         （Task #39 対応時に実データで確認済み）、本文の完全一致抽出のみを信頼する。
 #
 # --from-file: タブ区切り、1行1タスク。テストが GitHub に依存しないようにするための入力差し替え。
-#   <issue番号>\t<state: open|closed>\t<前提行の生テキスト（無ければ空文字列）>
+#   <issue番号>\t<state: open|closed>\t<前提行の生テキスト（無ければ空文字列）>\t<対象ファイル一覧（無ければ空文字列）>
 #   前提行は本文中の「- 前提:」で始まる行そのもの（例: "- 前提: #4, #9（注釈）"）。
 #   空文字列は「- 前提: 行そのものが無い」＝宣言漏れを意味する。「- 前提: なし」は
 #   明記された0件の依存として扱われ、宣言漏れの警告は出ない。
+#   4列目（対象ファイル）はカンマ区切りのファイルパス一覧（例: "scripts/a.sh,docs/b.md"）。
+#   空文字列は「## 対象ファイル」節そのものが無い＝宣言漏れを意味する（Task #216）。
+#   4列目自体を省略した行（旧形式のフィクスチャ）も同じく空文字列として扱われ、既存Epicとの
+#   後方互換を保つ。
 #
 # --lanes N: 既定3。環境変数 DEV_WORKFLOW_MAX_LANES があればそれを既定にする。
 # --skipped: カンマ区切りの issue 番号。それらに依存するタスクは推移的にスキップする。
 # --print: 人間向けの表を出す（ドライラン。既定は機械可読な TSV）。
+#
+# 対象ファイルの重なりによるサブバッチ分割（Task #216、core/roles/planner.md「対象ファイル
+# 宣言（## 対象ファイル）の必須化」）:
+#   同一ウェーブ内でサブバッチを割り当てる際、対象ファイルが重なる2タスクを同一サブバッチに
+#   入れない（依存グラフ＝ウェーブの決定そのものは変えない。あくまでサブバッチ分割の追加制約）。
+#   判定は次のとおり:
+#     - 両方が宣言済みでファイルが重なる     -> 重なり。別サブバッチにする
+#     - 両方が宣言済みでファイルが重ならない -> 従来どおり同居可能
+#     - 片方が宣言漏れ・もう片方が宣言済み（1件以上）-> 安全側に倒し、別サブバッチにする
+#       （宣言漏れタスクが何を触るか不明なため）
+#     - 両方が宣言漏れ                       -> 従来どおり同居可能（後方互換。「## 対象ファイル」
+#       導入前の既存Epicで編成が変わらないようにするための扱い）
+#   この宣言は実装前の見積もりであり、実際に触るファイルと乖離しうる。節を書いた
+#   （かつファイルが重ならない）からといって競合が起きない保証にはならない。makimaki-sso
+#   Epic #1 のウェーブ11では、実際に3レーン中2本が競合して見送りになった実例がある一方、
+#   その原因ファイル（tests/run-tests.sh 等）が当該タスクの「## 対象ファイル」節に
+#   宣言されていなかった（dev-workflow自身のEpic #212 ウェーブ1でも同種の事例が発生した）。
+#   宣言はあくまで見積もりであり、merge-lane.sh の exit 11 による事後検出（共通ルール
+#   「失敗時の扱い」参照）は従来どおり残る。
 #
 # 出力（既定・機械可読、タブ区切り）:
 #   lanes	<N>
@@ -49,6 +72,12 @@
 #     （宣言漏れが1件以上のときだけ、warn missing-deps の列挙の後に1本だけ出す。
 #      実効並列度 = min(指定lanes, 各ウェーブに属するタスク数の最大値)。0件のときは出さない＝後方互換）
 #   warn	unknown-dep	<番号>	<未知のdep番号>
+#   warn	missing-files	<番号>	（「## 対象ファイル」節が無いタスク。「- 前提:」の欠落と同じ扱い）
+#   warn	file-overlap	<番号>	<重なった相手の番号>	<重なったファイル、または宣言漏れなら理由文字列>
+#   warn	file-overlap-summary	<分割されたタスク数>	<対象タスク数>	<実効並列度>	<指定lanes>
+#     （対象ファイルの重なりによりサブバッチが分割され、かつそれによって実効並列度が
+#      「重なりが無かった場合に達成できたはずの並列度」より落ちたときだけ1本出す。
+#      実効並列度 = 実際に割り当てられた各(ウェーブ,サブバッチ)組の最大タスク数。0件のときは出さない）
 #   skip	<番号>	reason	depends-on-skipped	<依存先番号>
 #
 # 終了コード: 0=成功 2=引数エラー 3=循環依存（循環に含まれるタスクを stderr に列挙して停止）
@@ -129,29 +158,35 @@ SOURCE_MODE="file"
 
 declare -A TASK_STATE   # issue番号 -> open|closed（この番号を知っている＝Epic内 or 個別確認済み）
 declare -A DEPS_LINE    # issue番号 -> 前提行の生テキスト（空文字列＝宣言漏れ）
+declare -A FILES_LINE   # issue番号 -> 対象ファイル一覧（カンマ区切り。空文字列＝宣言漏れ、Task #216）
 PLAN_LIST=()            # ウェーブ計画の対象（state=open のタスク）issue番号の配列
 
 register_task() {
-  # register_task <issue番号> <state:open|closed> <前提行の生テキスト>
-  local num="$1" state="$2" deps_line="$3"
+  # register_task <issue番号> <state:open|closed> <前提行の生テキスト> [対象ファイル一覧（カンマ区切り）]
+  local num="$1" state="$2" deps_line="$3" files_line="${4:-}"
   TASK_STATE["$num"]="$state"
   DEPS_LINE["$num"]="$deps_line"
+  FILES_LINE["$num"]="$files_line"
   if [ "$state" = "open" ]; then
     PLAN_LIST+=("$num")
   fi
 }
 
 load_from_file() {
-  local file="$1" num state deps_line
+  local file="$1" num state deps_line files_line
   if [ ! -f "$file" ]; then
     echo "ERROR: --from-file で指定されたファイルが見つかりません: ${file}" >&2
     exit 2
   fi
-  while IFS=$'\t' read -r num state deps_line; do
+  # タブそのものを区切りに使わず、いったん Unit Separator（0x1f）に変換してから読む。
+  # bash の read は tab を「IFS空白文字」として扱うため、3列目（前提行）が空で4列目
+  # （対象ファイル）が続く行（Task #216 で追加）だと連続する区切りを1個に畳んでしまい、
+  # 4列目の値が3列目にずれる（load_from_gh が同じ理由で \x1f を使っているのと同じ問題）。
+  while IFS=$'\x1f' read -r num state deps_line files_line; do
     [ -n "$num" ] || continue
     case "$num" in ''|*[!0-9]*) continue ;; esac
-    register_task "$num" "$state" "$deps_line"
-  done < "$file"
+    register_task "$num" "$state" "$deps_line" "$files_line"
+  done < <(tr '\t' '\037' < "$file")
 }
 
 load_from_gh() {
@@ -159,8 +194,13 @@ load_from_gh() {
   # 「IFS空白文字」として連続する区切りを1個に畳んでしまうため、前提行が空でそのあとに
   # Epic行が続く行（実データで頻出）だと3列目が2列目にずれて誤検出する
   # （Task #39 対応時、テスト実装中に実際にこの畳み込みで検出漏れを起こして発覚した）。
-  local num deps_line epic_line epic_in_line
-  while IFS=$'\x1f' read -r num deps_line epic_line; do
+  #
+  # 「## 対象ファイル」節（Task #216）も同じ jq 呼び出しの中で抽出する（API 呼び出しを
+  # 増やさないため）。本文を行配列にし、見出し行のインデックスを探し、次の「## 」見出し
+  # （または末尾）までの「- 」で始まる行を集めてカンマ区切りにする。見出しが無ければ
+  # 空文字列（＝宣言漏れ）のまま。
+  local num deps_line epic_line files_line epic_in_line
+  while IFS=$'\x1f' read -r num deps_line epic_line files_line; do
     [ -n "$num" ] || continue
     # 本文の「- Epic:」行の**有無**で分岐する。行が無い（旧形式）ときだけフェイルオープンで含める。
     # 行があるなら、そこから取り出した #N が指定 Epic と一致する場合だけ含める。
@@ -172,9 +212,24 @@ load_from_gh() {
         continue
       fi
     fi
-    register_task "$num" "open" "$deps_line"
-  done < <(gh issue list --label task --state open --json number,body --limit 200 \
-    -q '.[] | [(.number|tostring), ((.body // "") | split("\n") | map(select(startswith("- 前提:"))) | (.[0] // "")), ((.body // "") | split("\n") | map(select(startswith("- Epic:"))) | (.[0] // ""))] | join("\u001f")')
+    register_task "$num" "open" "$deps_line" "$files_line"
+  done < <(
+    # shellcheck disable=SC2016  # 単一引用符は意図的。$L/$h/$files/$ln は jq 側の変数で、
+    # bash 側で展開してはならない（gojq が -q の引数として自分で解釈する）
+    gh issue list --label task --state open --json number,body --limit 200 \
+    -q '.[] | ((.body // "") | split("\n")) as $L
+      | ($L | index("## 対象ファイル")) as $h
+      | (if $h == null then ""
+         else
+           ($L[($h+1):]
+            | reduce .[] as $ln ({done:false, files:[]};
+                if .done then .
+                elif ($ln | startswith("## ")) then (.done = true)
+                elif ($ln | startswith("- ")) then (.files += [$ln[2:]])
+                else . end)
+            | .files | join(","))
+         end) as $files
+      | [(.number|tostring), ((.body // "") | split("\n") | map(select(startswith("- 前提:"))) | (.[0] // "")), ((.body // "") | split("\n") | map(select(startswith("- Epic:"))) | (.[0] // "")), $files] | join("\u001f")')
 }
 
 if [ "$SOURCE_MODE" = "file" ]; then
@@ -252,6 +307,60 @@ for _n in "${PLAN_LIST[@]}"; do
   resolve_task_deps "$_n"
 done
 unset _n
+
+# ---------------------------------------------------------------------------
+# 対象ファイル宣言の検査（Task #216。「- 前提:」の宣言漏れ検査と同じ位置づけ）
+# ---------------------------------------------------------------------------
+
+MISSING_FILES_WARN=()   # 「## 対象ファイル」節が無い issue 番号
+
+for _n in "${PLAN_LIST[@]}"; do
+  if [ -z "${FILES_LINE[$_n]:-}" ]; then
+    MISSING_FILES_WARN+=("$_n")
+  fi
+done
+unset _n
+
+files_overlap() {
+  # files_overlap <task_a> <task_b>
+  # 戻り値 0=重なりあり（安全側判定含む。OVERLAP_FILE に理由/ファイル名を積む） 1=重なりなし
+  #
+  # 判定表（core/roles/planner.md「対象ファイル宣言（## 対象ファイル）の必須化」参照）:
+  #   両方宣言済みで重なるファイルがある   -> 重なり（OVERLAP_FILE=そのファイル）
+  #   両方宣言済みで重ならない             -> 重なりなし
+  #   片方が宣言漏れ・もう片方が1件以上宣言 -> 安全側に倒し重なり扱い（OVERLAP_FILE=理由文字列）
+  #   両方が宣言漏れ                       -> 重なりなし（既存Epicとの後方互換）
+  local a="$1" b="$2"
+  local a_files="${FILES_LINE[$a]:-}" b_files="${FILES_LINE[$b]:-}"
+  OVERLAP_FILE=""
+
+  if [ -z "$a_files" ] && [ -z "$b_files" ]; then
+    return 1
+  fi
+  if [ -z "$a_files" ] || [ -z "$b_files" ]; then
+    local declared="${a_files}${b_files}"
+    if [ -n "$declared" ]; then
+      OVERLAP_FILE="(宣言漏れのため不明。安全側に倒しています)"
+      return 0
+    fi
+    return 1
+  fi
+
+  local f g
+  local a_arr=() b_arr=()
+  IFS=',' read -r -a a_arr <<< "$a_files"
+  IFS=',' read -r -a b_arr <<< "$b_files"
+  for f in "${a_arr[@]}"; do
+    [ -n "$f" ] || continue
+    for g in "${b_arr[@]}"; do
+      if [ "$f" = "$g" ]; then
+        OVERLAP_FILE="$f"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
 
 # ---------------------------------------------------------------------------
 # スキップの推移的伝播
@@ -364,6 +473,8 @@ unset _n
 
 declare -A SUBBATCH_OF   # issue番号 -> サブバッチ番号（ウェーブ内、1始まり）
 WAVE_TASKS=()            # インデックス = ウェーブ番号（1始まり）の "n1,n2,..." 文字列
+FILE_OVERLAP_DETAIL=()   # "task:other:file" 形式。対象ファイルの重なりで別サブバッチへ回した記録
+FILE_OVERLAP_TASKS=()    # 重なりにより後続サブバッチへ回されたタスク番号（重複あり。件数計算用）
 
 _w=1
 while [ "$_w" -le "$MAX_WAVE" ]; do
@@ -372,20 +483,56 @@ while [ "$_w" -le "$MAX_WAVE" ]; do
     [ "${WAVE_OF[$_n]}" -eq "$_w" ] && _tasks+=("$_n")
   done
   # ACTIVE_LIST は PLAN_LIST（昇順整列済み）由来の順序をそのまま保つため既に昇順
-  _i=0
+  #
+  # サブバッチ割当は貪欲な first-fit で行う（Task #216）。対象ファイルが重ならない限り、
+  # 先頭から LANES 件ずつ詰める従来のチャンク分割（i/LANES+1）と完全に同じ結果になる
+  # （先頭の空いているサブバッチに常に詰められるため）。対象ファイルが重なるタスクだけ、
+  # その相手がいるサブバッチを避けて次のサブバッチへ回す。
+  declare -A _sb_members   # サブバッチ番号 -> "n1,n2,..."（そのサブバッチに入っているタスク）
+  _sb_count=0
   for _n in "${_tasks[@]}"; do
-    SUBBATCH_OF["$_n"]=$((_i / LANES + 1))
-    _i=$((_i + 1))
+    _placed=0
+    _s=1
+    while [ "$_s" -le "$_sb_count" ]; do
+      _members_csv="${_sb_members[$_s]}"
+      IFS=',' read -r -a _members_arr <<< "$_members_csv"
+      if [ "${#_members_arr[@]}" -lt "$LANES" ]; then
+        _conflict=0
+        for _m in "${_members_arr[@]}"; do
+          [ -n "$_m" ] || continue
+          if files_overlap "$_n" "$_m"; then
+            _conflict=1
+            FILE_OVERLAP_DETAIL+=("${_n}:${_m}:${OVERLAP_FILE}")
+            FILE_OVERLAP_TASKS+=("$_n")
+          fi
+        done
+        if [ "$_conflict" -eq 0 ]; then
+          _sb_members[$_s]="${_members_csv:+${_members_csv},}${_n}"
+          SUBBATCH_OF["$_n"]="$_s"
+          _placed=1
+          break
+        fi
+      fi
+      _s=$((_s + 1))
+    done
+    if [ "$_placed" -eq 0 ]; then
+      _sb_count=$((_sb_count + 1))
+      _sb_members[$_sb_count]="$_n"
+      SUBBATCH_OF["$_n"]="$_sb_count"
+    fi
   done
+  unset _sb_members
   _joined="$(IFS=,; printf '%s' "${_tasks[*]:-}")"
   WAVE_TASKS[_w]="$_joined"
   _w=$((_w + 1))
 done
-unset _w _n _i _tasks _joined
+unset _w _n _tasks _joined _s _sb_count _placed _conflict _m _members_csv _members_arr
 
 # ---------------------------------------------------------------------------
 # 実効並列度（宣言漏れ警告で使う。min(指定lanes, 各ウェーブに属するタスク数の最大値)）
 # 完全逐次（全ウェーブが1タスク）なら1になる。既に計算済みのWAVE_TASKS/LANESから機械的に求める。
+# 対象ファイルの重なりによるサブバッチ分割の影響は受けない（ウェーブのタスク数だけを見るため。
+# 「重なりが無かったら達成できたはずの並列度」の基準値として、次のfile-overlap-summary計算で使う）。
 # ---------------------------------------------------------------------------
 
 EFFECTIVE_LANES=0
@@ -402,6 +549,35 @@ while [ "$_w" -le "$MAX_WAVE" ]; do
 done
 unset _w _wtasks_csv _wcount _wtasks_arr
 [ "$EFFECTIVE_LANES" -gt "$LANES" ] && EFFECTIVE_LANES="$LANES"
+
+# ---------------------------------------------------------------------------
+# 対象ファイルの重なりによる実効並列度の低下（Task #216）
+# 実際に割り当てられた各(ウェーブ,サブバッチ)組の最大タスク数を求め、上記EFFECTIVE_LANES
+# （重なりが無かったら達成できたはずの並列度）と比べる。重なりで分割が発生し、かつ
+# それによって並列度が落ちたときだけ file-overlap-summary を出す。
+# ---------------------------------------------------------------------------
+
+FILE_OVERLAP_ACTUAL_LANES=0
+declare -A _ws_count
+for _n in "${ACTIVE_LIST[@]}"; do
+  _key="${WAVE_OF[$_n]}:${SUBBATCH_OF[$_n]}"
+  _ws_count["$_key"]=$(( ${_ws_count["$_key"]:-0} + 1 ))
+done
+for _key in "${!_ws_count[@]}"; do
+  [ "${_ws_count[$_key]}" -gt "$FILE_OVERLAP_ACTUAL_LANES" ] && FILE_OVERLAP_ACTUAL_LANES="${_ws_count[$_key]}"
+done
+unset _n _key
+unset _ws_count
+
+FILE_OVERLAP_UNIQUE_COUNT=0
+if [ "${#FILE_OVERLAP_TASKS[@]}" -gt 0 ]; then
+  FILE_OVERLAP_UNIQUE_COUNT="$(printf '%s\n' "${FILE_OVERLAP_TASKS[@]}" | sort -un | wc -l | tr -d ' ')"
+fi
+
+FILE_OVERLAP_SUMMARY_SHOW=0
+if [ "$FILE_OVERLAP_UNIQUE_COUNT" -gt 0 ] && [ "$FILE_OVERLAP_ACTUAL_LANES" -lt "$EFFECTIVE_LANES" ]; then
+  FILE_OVERLAP_SUMMARY_SHOW=1
+fi
 
 # ---------------------------------------------------------------------------
 # 出力
@@ -444,6 +620,28 @@ print_machine() {
       dep="${pair##*:}"
       echo -e "warn\tunknown-dep\t${task}\t${dep}"
     done
+  fi
+
+  if [ "${#MISSING_FILES_WARN[@]}" -gt 0 ]; then
+    local sorted_missing_files
+    mapfile -t sorted_missing_files < <(printf '%s\n' "${MISSING_FILES_WARN[@]}" | sort -n)
+    for n in "${sorted_missing_files[@]}"; do
+      echo -e "warn\tmissing-files\t${n}"
+    done
+  fi
+
+  if [ "${#FILE_OVERLAP_DETAIL[@]}" -gt 0 ]; then
+    local triple task other file
+    for triple in "${FILE_OVERLAP_DETAIL[@]}"; do
+      task="$(printf '%s' "$triple" | cut -d: -f1)"
+      other="$(printf '%s' "$triple" | cut -d: -f2)"
+      file="$(printf '%s' "$triple" | cut -d: -f3-)"
+      echo -e "warn\tfile-overlap\t${task}\t${other}\t${file}"
+    done
+  fi
+
+  if [ "$FILE_OVERLAP_SUMMARY_SHOW" -eq 1 ]; then
+    echo -e "warn\tfile-overlap-summary\t${FILE_OVERLAP_UNIQUE_COUNT}\t${#ACTIVE_LIST[@]}\t${FILE_OVERLAP_ACTUAL_LANES}\t${LANES}"
   fi
 
   if [ "${#SKIP_PROPAGATED[@]}" -gt 0 ]; then
@@ -511,6 +709,37 @@ print_human() {
       dep="${pair##*:}"
       echo "  #${task} -> #${dep}"
     done
+  fi
+
+  if [ "${#MISSING_FILES_WARN[@]}" -gt 0 ]; then
+    echo ""
+    echo "[警告] 対象ファイル未宣言が ${#MISSING_FILES_WARN[@]} 件あります（対象タスク ${#PLAN_LIST[@]} 件中）。"
+    echo "       該当タスクは何を触るか不明なため、対象ファイルを宣言している他タスクとは"
+    echo "       同一サブバッチに同居させません（安全側）。Task issue 本文に「## 対象ファイル」節を"
+    echo "       追記してください（触るファイルが無い場合も節自体は省略しないでください）。"
+    local sorted_missing_files n3
+    mapfile -t sorted_missing_files < <(printf '%s\n' "${MISSING_FILES_WARN[@]}" | sort -n)
+    for n3 in "${sorted_missing_files[@]}"; do
+      echo "  #${n3}"
+    done
+  fi
+
+  if [ "${#FILE_OVERLAP_DETAIL[@]}" -gt 0 ]; then
+    echo ""
+    echo "[警告] 対象ファイルの重なりにより、以下のタスクは同一サブバッチに同居させず別サブバッチへ分割しました:"
+    local triple task other file
+    for triple in "${FILE_OVERLAP_DETAIL[@]}"; do
+      task="$(printf '%s' "$triple" | cut -d: -f1)"
+      other="$(printf '%s' "$triple" | cut -d: -f2)"
+      file="$(printf '%s' "$triple" | cut -d: -f3-)"
+      echo "  #${task} と #${other}（${file}）"
+    done
+    if [ "$FILE_OVERLAP_SUMMARY_SHOW" -eq 1 ]; then
+      echo "       この分割により実効並列度は ${FILE_OVERLAP_ACTUAL_LANES} です（指定 lanes=${LANES}）。"
+    fi
+    echo "       この宣言は実装前の見積もりであり、実際に触るファイルと乖離することがあります。"
+    echo "       節を書いた（かつファイルが重ならない）からといって競合が起きない保証にはなりません。"
+    echo "       merge-lane.sh の exit 11 による事後検出は従来どおり有効です。"
   fi
 
   if [ "${#SKIP_PROPAGATED[@]}" -gt 0 ]; then

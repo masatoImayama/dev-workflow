@@ -3573,6 +3573,136 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# plan-waves.sh: 対象ファイルの重なりによるサブバッチ分割（Task #216）
+#
+# --from-file の4列目（対象ファイル、カンマ区切り）を使う。空文字列は「## 対象ファイル」節が
+# 無い＝宣言漏れを意味する（3列目の前提行と同じ規約）。
+# ---------------------------------------------------------------------------
+
+echo "== plan-waves.sh（対象ファイルの重なりによるサブバッチ分割、Task #216） =="
+
+# --- ケース14: makimaki-sso Epic #1 ウェーブ11相当の入力（#11,#12,#13が全てops/verify.shで
+#     重なる）で3本が別サブバッチに分かれる。依存関係は無い（全て「- 前提: なし」）ため、
+#     ウェーブの決定（依存グラフ）はサブバッチ分割の影響を受けないことも合わせて確認する ---
+PW216_OVERLAP_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw216-overlap.XXXXXX")"
+{
+  printf '11\topen\t- 前提: なし\tops/verify.sh\n'
+  printf '12\topen\t- 前提: なし\tdocs/runbook.md,ops/verify.sh\n'
+  printf '13\topen\t- 前提: なし\tops/verify.sh,zitadel/terraform/variables.tf\n'
+} > "$PW216_OVERLAP_FIXTURE"
+
+PW216_OVERLAP_OUTPUT="$(bash "$PLAN_WAVES_SCRIPT" --from-file "$PW216_OVERLAP_FIXTURE" --lanes 3)"
+
+assert_eq "#216 makimaki-sso再現: #11,#12,#13は同一ウェーブ1のまま（依存グラフは変わらない）" \
+  "11,12,13" "$(pw_wave_tasks 1 "$PW216_OVERLAP_OUTPUT")"
+assert_eq "#216 makimaki-sso再現: #11はsubbatch1" "1" "$(pw_value 11 subbatch "$PW216_OVERLAP_OUTPUT")"
+assert_eq "#216 makimaki-sso再現: #12はsubbatch2（#11のops/verify.shと重なるため分割）" \
+  "2" "$(pw_value 12 subbatch "$PW216_OVERLAP_OUTPUT")"
+assert_eq "#216 makimaki-sso再現: #13はsubbatch3（#11,#12双方のops/verify.shと重なるため分割）" \
+  "3" "$(pw_value 13 subbatch "$PW216_OVERLAP_OUTPUT")"
+assert_eq "#216: 依存グラフ（deps列）は対象ファイルの重なりの影響を受けない（#12のdepsは空のまま）" \
+  "" "$(pw_value 12 deps "$PW216_OVERLAP_OUTPUT")"
+
+assert_eq "#216: file-overlap警告に#12と#11がops/verify.shで重なった旨が出る" "1" \
+  "$(printf '%s\n' "$PW216_OVERLAP_OUTPUT" | grep -c '^warn	file-overlap	12	11	ops/verify.sh$')"
+assert_eq "#216: file-overlap-summaryで実効並列度1・指定lanes3が出る" "1" \
+  "$(printf '%s\n' "$PW216_OVERLAP_OUTPUT" | grep -c '^warn	file-overlap-summary	2	3	1	3$')"
+
+PW216_OVERLAP_PRINT="$(bash "$PLAN_WAVES_SCRIPT" --from-file "$PW216_OVERLAP_FIXTURE" --lanes 3 --print)"
+case "$PW216_OVERLAP_PRINT" in
+  *"#12 と #11（ops/verify.sh）"*)
+    pass "#216 --print: 対象ファイルの重なりの理由（誰と・どのファイルで）が人間可読に出る" ;;
+  *) fail "#216 --print: 対象ファイルの重なりの理由（誰と・どのファイルで）が人間可読に出る" \
+    "output=[${PW216_OVERLAP_PRINT}]" ;;
+esac
+case "$PW216_OVERLAP_PRINT" in
+  *"実効並列度は 1 です（指定 lanes=3）"*)
+    pass "#216 --print: 分割による実効並列度の低下が人間可読に出る" ;;
+  *) fail "#216 --print: 分割による実効並列度の低下が人間可読に出る" "output=[${PW216_OVERLAP_PRINT}]" ;;
+esac
+case "$PW216_OVERLAP_PRINT" in
+  *"実装前の見積もり"*"競合が起きない保証にはなりません"*)
+    pass "#216 --print: 宣言は見積もりであり競合の保証ではない旨が出る" ;;
+  *) fail "#216 --print: 宣言は見積もりであり競合の保証ではない旨が出る" "output=[${PW216_OVERLAP_PRINT}]" ;;
+esac
+
+# --- ケース15: 対象ファイルが重ならない2タスクは従来どおり同一サブバッチに入る ---
+PW216_NOOVERLAP_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw216-nooverlap.XXXXXX")"
+{
+  printf '21\topen\t- 前提: なし\tscripts/a.sh\n'
+  printf '22\topen\t- 前提: なし\tscripts/b.sh\n'
+} > "$PW216_NOOVERLAP_FIXTURE"
+
+PW216_NOOVERLAP_OUTPUT="$(bash "$PLAN_WAVES_SCRIPT" --from-file "$PW216_NOOVERLAP_FIXTURE" --lanes 3)"
+assert_eq "#216: 対象ファイルが重ならない#21,#22は同一subbatch1に入る（#21）" \
+  "1" "$(pw_value 21 subbatch "$PW216_NOOVERLAP_OUTPUT")"
+assert_eq "#216: 対象ファイルが重ならない#21,#22は同一subbatch1に入る（#22）" \
+  "1" "$(pw_value 22 subbatch "$PW216_NOOVERLAP_OUTPUT")"
+if printf '%s\n' "$PW216_NOOVERLAP_OUTPUT" | grep -q '^warn	file-overlap'; then
+  fail "#216: 重ならないタスクにはfile-overlap警告が出ない" "output=[${PW216_NOOVERLAP_OUTPUT}]"
+else
+  pass "#216: 重ならないタスクにはfile-overlap警告が出ない"
+fi
+
+# --- ケース16: 「## 対象ファイル」節が無い既存Epic（PW_EPIC3_FIXTUREを再利用。4列目は
+#     元々省略されている）で、現行と同一の編成になる（後方互換）。ケース1・2で確認済みの
+#     wave/subbatchアサーションがこのまま通り続けることが後方互換の証拠であり、ここでは
+#     追加で missing-files 警告が宣言漏れとして出ることも確認する ---
+assert_eq "#216: 「## 対象ファイル」節が無い既存フィクスチャでも#5はsubbatch1のまま（後方互換）" \
+  "1" "$(pw_value 5 subbatch "$PW_LANES2_OUTPUT")"
+assert_eq "#216: 「## 対象ファイル」節が無い既存フィクスチャでも#11はsubbatch2のまま（後方互換）" \
+  "2" "$(pw_value 11 subbatch "$PW_LANES2_OUTPUT")"
+assert_eq "#216: 「## 対象ファイル」節が無いタスク全件にmissing-files警告が出る（#4〜#13の10件）" \
+  "10" "$(printf '%s\n' "$PW_EPIC3_OUTPUT" | grep -c '^warn	missing-files	')"
+
+# --- ケース17: 片方が宣言漏れ・もう片方が対象ファイルを宣言している場合は安全側に倒し
+#     別サブバッチへ分割する ---
+PW216_MIXED_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw216-mixed.XXXXXX")"
+{
+  printf '31\topen\t- 前提: なし\tscripts/a.sh\n'
+  printf '32\topen\t- 前提: なし\t\n'
+} > "$PW216_MIXED_FIXTURE"
+
+PW216_MIXED_OUTPUT="$(bash "$PLAN_WAVES_SCRIPT" --from-file "$PW216_MIXED_FIXTURE" --lanes 3)"
+assert_eq "#216: 片方が宣言漏れの場合は安全側に倒し別サブバッチへ分割する（#31）" \
+  "1" "$(pw_value 31 subbatch "$PW216_MIXED_OUTPUT")"
+assert_eq "#216: 片方が宣言漏れの場合は安全側に倒し別サブバッチへ分割する（#32）" \
+  "2" "$(pw_value 32 subbatch "$PW216_MIXED_OUTPUT")"
+assert_eq "#216: #32にmissing-files警告が出る" "1" \
+  "$(printf '%s\n' "$PW216_MIXED_OUTPUT" | grep -c '^warn	missing-files	32$')"
+
+# --- ケース18: gh モードでも「## 対象ファイル」節を同じ jq 呼び出しで抽出できる（API呼び出しを
+#     増やさない）。#600（対象ファイル宣言あり）と#601（節が無い＝宣言漏れ）を混在させ、
+#     安全側の分割（ケース17と同じ規則）が効くことで抽出が正しく行われたことを間接確認する ---
+PW216_GH_FAKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-pw216-ghfake.XXXXXX")"
+PW216_GH_CALL_MARKER="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw216-ghcall.XXXXXX")"
+cat > "${PW216_GH_FAKE_DIR}/gh" <<'FAKE_GH216'
+#!/bin/bash
+US=$'\x1f'
+# gh 呼び出し1回につき1行のマーカーを積む（$* にはjqプログラムの改行が含まれるため、
+# wc -l で数えると1回の呼び出しでも複数行に見えてしまう。呼び出し回数はこのマーカー行数で数える）
+printf '===CALL===\n' >> "${PW216_GH_CALL_MARKER}"
+case "$*" in
+  *"issue list --label task --state open"*)
+    printf '600%s- 前提: なし%s- Epic: #14%sscripts/a.sh,scripts/b.sh\n' "$US" "$US" "$US"
+    printf '601%s- 前提: なし%s- Epic: #14%s\n' "$US" "$US" "$US"
+    ;;
+esac
+FAKE_GH216
+chmod +x "${PW216_GH_FAKE_DIR}/gh"
+
+PW216_GH_OUTPUT="$(PATH="${PW216_GH_FAKE_DIR}:${PATH}" PW216_GH_CALL_MARKER="$PW216_GH_CALL_MARKER" bash "$PLAN_WAVES_SCRIPT" --epic 14)"
+PW216_GH_CALL_COUNT="$(grep -c '^===CALL===$' "$PW216_GH_CALL_MARKER")"
+
+assert_eq "#216 gh モード: issue list の呼び出しは1回のまま（API呼び出しを増やさない）" "1" "$PW216_GH_CALL_COUNT"
+assert_eq "#216 gh モード: #600(対象ファイル宣言あり)はsubbatch1" \
+  "1" "$(pw_value 600 subbatch "$PW216_GH_OUTPUT")"
+assert_eq "#216 gh モード: #601(節が無い)は安全側に倒され別subbatch2へ分割される" \
+  "2" "$(pw_value 601 subbatch "$PW216_GH_OUTPUT")"
+assert_eq "#216 gh モード: #601にmissing-files警告が出る" "1" \
+  "$(printf '%s\n' "$PW216_GH_OUTPUT" | grep -c '^warn	missing-files	601$')"
+
+# ---------------------------------------------------------------------------
 # merge-lane.sh（merge-base 検証と wave ブランチ統合。Task #16）
 #
 # 一時 git リポジトリを組み立てて検証する（Docker 非依存）。scripts/merge-lane.sh は
