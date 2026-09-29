@@ -84,6 +84,12 @@ dev-workflow は複数の外部ツール（context7 / code-review-graph / LSP）
 - **入れ方**: 導入手順・結線方式の実測結果・MCPツール名は [`docs/optional-mcp-tools.md`](docs/optional-mcp-tools.md) が正本です（README では二重管理しません）
 - **効かなければ外す判断基準**: `docs/optional-mcp-tools.md` の「外す判断基準」節を参照してください。複数 Epic を通してトークン消費が減らず、レビュー品質の向上も観測できない場合は結線を外してかまいません
 
+### トラブルシューティング
+
+| 症状 | 原因・対処 |
+|---|---|
+| `/plugin` に `Failed to reconnect to plugin:dev-workflow:context7: CONNECTION_CLOSED` 等と出る | 任意ツール（context7 / code-review-graph）が未導入なだけの正常な挙動です（異常ではありません）。解消したい場合は `/dev-workflow:setup` または `bash scripts/doctor.sh` を実行してください。詳細は [`docs/optional-mcp-tools.md`](docs/optional-mcp-tools.md) の「`/plugin` に `CONNECTION_CLOSED` と出る場合」参照 |
+
 ### LSP（探索ターン数の削減。Claude Code のみ。issue #154）
 
 `Grep` → `Read` → `Read` → `Read` と3〜5ターンかかっていた定義・参照の追跡を、LSP
@@ -188,6 +194,15 @@ services:
 /dev-workflow:spec notifications
 /dev-workflow:epic notifications
 ```
+
+### 環境セットアップ
+
+```
+/dev-workflow:setup
+```
+→ 新しいマシン・新しい駆動先リポジトリでの立ち上げに使う。診断（`scripts/doctor.sh`）→
+案内 → （明示的な同意があれば）任意MCPの導入・サンドボックス雛形の生成 → 再診断、の順に進める。
+**`/dev-workflow:run` の前提ではない**。setup を実行していなくても run は従来どおり動く。
 
 ### フィードバック
 
