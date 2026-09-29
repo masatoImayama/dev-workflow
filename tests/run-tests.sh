@@ -17116,6 +17116,38 @@ case "$RUN_SKILL_EPICGATE" in
       "$RUN_SKILL_EPICGATE" ;;
 esac
 
+# --- ケース10b: skills/run/SKILL.md のEpic統合ゲートが、--wait を tee へ直結するだけで
+#     パイプラインの終了コードを捨てていない（PIPESTATUS/pipefailで明示的に取り出している）
+#     ことを確認する（#228: --waitの終了コードがteeの終了コードに上書きされ、
+#     「機械的ゲートの判定に使える」という#214の契約が使う側で守られていなかった回帰） ---
+case "$RUN_SKILL_EPICGATE" in
+  *PIPESTATUS*|*"set -o pipefail"*)
+    pass "skills/run/SKILL.md: Epic統合ゲートの --wait パイプがPIPESTATUS/pipefailで終了コードを取り出している（#228）" ;;
+  *)
+    fail "skills/run/SKILL.md: Epic統合ゲートの --wait パイプがPIPESTATUS/pipefailで終了コードを取り出している（#228）" \
+      "$RUN_SKILL_EPICGATE" ;;
+esac
+
+# 取り出した終了コード（GATE_RC）が、実際に合否判定へ使われていることも確認する。
+# 代入（PIPESTATUS由来）と判定（不合格判定の条件）の両方で登場するはずなので2回以上を要求する。
+RUN_SKILL_EPICGATE_GATE_RC_COUNT="$(printf '%s\n' "$RUN_SKILL_EPICGATE" | grep -c 'GATE_RC')"
+if [ "$RUN_SKILL_EPICGATE_GATE_RC_COUNT" -ge 2 ]; then
+  pass "skills/run/SKILL.md: Epic統合ゲートの合否判定がGATE_RC（PIPESTATUS由来の終了コード）を参照している（#228）"
+else
+  fail "skills/run/SKILL.md: Epic統合ゲートの合否判定がGATE_RC（PIPESTATUS由来の終了コード）を参照している（#228）" \
+    "count=${RUN_SKILL_EPICGATE_GATE_RC_COUNT}"
+fi
+
+# run_in_background別呼び出しで $EPIC_NUM / $EPIC_GATE_TEST_LOG が解決できる前提を
+# 置かない旨（値を直接埋め込むか再導出する旨）が明記されていることも確認する。
+case "$RUN_SKILL_EPICGATE" in
+  *"再導出"*)
+    pass "skills/run/SKILL.md: run_in_background別呼び出しでの変数解決に依存しない旨の注記がある（#228）" ;;
+  *)
+    fail "skills/run/SKILL.md: run_in_background別呼び出しでの変数解決に依存しない旨の注記がある（#228）" \
+      "$RUN_SKILL_EPICGATE" ;;
+esac
+
 # ---------------------------------------------------------------------------
 echo "== Task issueテンプレートの「## 対象ファイル」節の必須化（#215） =="
 

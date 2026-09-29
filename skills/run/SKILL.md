@@ -909,16 +909,23 @@ EPIC_GATE_START_SEC=$(date +%s)   # 「Epic統合ゲート」フェーズの計�
 # 新たに書く必要は無い（issue #140と同じ制約）。--wait は長時間かかりうるため、
 # Bashツールを run_in_background: true で呼び、通知を受けてから処理を続ける
 # （generatorと異なりrunはセッションが継続するため、issue #138の「通知待ちで停止しない」
-# 制約は適用されない。通知を待ってよい）。
+# 制約は適用されない。通知を待ってよい）。run_in_background: true の呼び出しは
+# 元のBash呼び出しとは別のシェルになるため、$EPIC_NUM / $EPIC_GATE_TEST_LOG が
+# そのシェルにも引き継がれている前提で書かない。値を直接埋め込むか、その呼び出しの中で
+# 再導出すること。
 # 固定パスは複数ウェーブ・並列実行間で衝突しうるため mktemp で一意化する（issue #145）
 EPIC_GATE_TEST_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-epic-gate-test-output.XXXXXX")"
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" --detach \
   --handle epic-gate '[全テストを走らせるコマンド]'
 # 上のBash呼び出しは即座に返る。続けて下のBash呼び出しを run_in_background: true で発行し、
 # 完了通知を待つ（sandbox-exec.shの--waitはコマンドの終了コードをそのまま返す契約なので、
-# 機械的ゲートの判定に使える）
+# 機械的ゲートの判定に使える）。ただし `--wait ... | tee ...` のように単純にパイプへ流すと、
+# パイプライン全体の終了コードは最後のコマンド（tee、ほぼ常に0）のものになり、--waitの
+# 終了コードが失われる（issue #228。#214の設計上の注意「終了コードを失わないこと」への回帰）。
+# PIPESTATUSで明示的に取り出し、GATE_RCとして保持してから合否判定に使うこと
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" --wait \
   --handle epic-gate 2>&1 | tee "$EPIC_GATE_TEST_LOG"
+GATE_RC=${PIPESTATUS[0]}
 
 # 1b) SKIP件数はレーンの自己申告に依存せず、run自身がcount-skips.shで機械的に数える。
 #     0件でも必ず表示する（黙って省略しない）
@@ -931,6 +938,11 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-readability.sh" --git
 EPIC_GATE_END_SEC=$(date +%s)
 EPIC_GATE_SEC=$((EPIC_GATE_END_SEC - EPIC_GATE_START_SEC))
 ```
+
+**合否は `$GATE_RC` で判定する。** `tee` 越しの標準出力にテスト失敗の文字列が見えていても、
+`$GATE_RC` を読み落として「出力に FAIL が無かったから合格」と誤読しない。
+`$GATE_RC` が非0、または `check-readability.sh --git` が非0で終了した場合は
+不合格として扱い、下記「失敗時の扱い」へ進む。
 
 **フルスイートを走らせるのはここだけである**（「機械的ゲートの三段構成」節）。ウェーブ末の
 取り込み検証は可読性ガードとmerge-base検証しか行わないため、**回帰の判定はこのEpic統合ゲートが
