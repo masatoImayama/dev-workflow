@@ -17230,6 +17230,45 @@ else
     "docs/optional-mcp-tools.md に『[NG] メッセージと exit 2 で終了する』という記述が見つかりません"
 fi
 
+# --- ケース11（#234）: 「install --platform claude-code は使わない」節（旧#219実装内容の
+#     判断根拠を記録した段落）が、実装の動的検出（pip/pip3/pipx/uvx。#224）と整合している。
+#     #225 と同種の「文書と実装の整合」チェックであり、detect_code_review_graph_pip_tool() の
+#     候補一覧（ケース9で動的抽出した $MCP_PIP_CANDIDATES）をそのまま使って検査する（別途
+#     ハードコードした候補一覧を保守すると候補が増減したときにテストが追随しなくなるため。
+#     #224 と同じ理由。#234 対応時の指示）。文書全体ではなく該当段落だけを対象にする
+#     （他所の記述に引きずられて偽陽性で通ってしまわないように。line 11 の手動導入手順表・
+#     line 440 の設計判断の記録は既に pip3/pipx/uvx へ言及しており、文書全体を対象にすると
+#     この段落自体を直さなくてもテストが通ってしまう）。コマンド文字列が改行をまたぐと単純な
+#     grep -F では見えなくなる（#234 で実際に見落とされた原因）ため、段落抽出後に改行を
+#     スペースへ畳んでから検査する ---
+DOC234_SECTION="$(sed -n '/^\*\*`code-review-graph install --platform claude-code`/,/^## /p' "$DOC225_MCP_DOC" \
+  | tr '\n' ' ')"
+
+if [ -z "$DOC234_SECTION" ]; then
+  fail "docs/optional-mcp-tools.md: 「install --platform claude-code は使わない」段落を抽出できる（#234）" \
+    "抽出結果が空でした（見出し文言が変わった可能性があります）"
+else
+  pass "docs/optional-mcp-tools.md: 「install --platform claude-code は使わない」段落を抽出できる（#234）"
+fi
+
+DOC234_MISSING=""
+for pip_tool in $MCP_PIP_CANDIDATES; do
+  printf '%s' "$DOC234_SECTION" | grep -qF "${pip_tool}" || DOC234_MISSING="${DOC234_MISSING}${pip_tool} "
+done
+if [ -z "$DOC234_MISSING" ]; then
+  pass "docs/optional-mcp-tools.md: 「install --platform claude-code は使わない」段落がdetect_code_review_graph_pip_tool()の全候補（pip/pip3/pipx/uvx）に言及している（#234）"
+else
+  fail "docs/optional-mcp-tools.md: 「install --platform claude-code は使わない」段落がdetect_code_review_graph_pip_tool()の全候補に言及している（#234）" \
+    "言及が見つからない候補: ${DOC234_MISSING}"
+fi
+
+if printf '%s' "$DOC234_SECTION" | grep -qF 'code-review-graph` のみを行う'; then
+  fail "docs/optional-mcp-tools.md: #224修正前の『pip install code-review-graphのみを行う』という記述が残っていない（#234）" \
+    "旧文言（改行をまたいでいるため単純なgrep -Fでは見えない。#234で実際に見落とされた記述）が見つかりました"
+else
+  pass "docs/optional-mcp-tools.md: #224修正前の『pip install code-review-graphのみを行う』という記述が残っていない（#234）"
+fi
+
 # ---------------------------------------------------------------------------
 # skills/setup/SKILL.md: 診断・導入・整備を束ねるユーザー向けスキル（Task #221）
 # ---------------------------------------------------------------------------

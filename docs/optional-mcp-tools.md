@@ -458,8 +458,11 @@ npm 等の**前提コマンドの有無**を確認し、無ければ導入を試
 作業環境にはネットワーク接続が無く、上流ソースで実際の出力ファイル・冪等性（dev-workflow側の
 宣言と衝突しないか）を確認できなかった。上記「設計上の注意」に記載された
 「不要なら `pip install` と `build` だけでよい可能性がある」という代替案に従い、確認できない
-コマンドは安全側（実行しない）に倒し、`scripts/install-optional-mcp.sh` は `pip install
-code-review-graph` のみを行う。グラフ構築（`code-review-graph build`）は Epic issue 本文の
+コマンドは安全側（実行しない）に倒した。`scripts/install-optional-mcp.sh` は当初 `pip install
+code-review-graph` のみを行っていたが、`pip` が無く `pip3`/`pipx`/`uvx` のみの環境では
+案内どおりに実行すると失敗する不具合が見つかったため（#224）、現在は `pip`/`pip3`/`pipx`/`uvx`
+の順に前提コマンドの有無を検出し、最初に見つかったコマンドで導入する。グラフ構築
+（`code-review-graph build`）は Epic issue 本文の
 `## 準備コマンド` 節で run が Epic 開始時に1回だけ実行する既存の仕組み（上記「グラフ構築は
 Epic 開始時に1回（#75）」節）に任せ、本スクリプトでは行わない。
 
