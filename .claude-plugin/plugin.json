@@ -10,7 +10,7 @@
   },
   "repository": "https://github.com/masatoImayama/dev-workflow",
   "license": "MIT",
-  "keywords": ["workflow", "agents", "autonomous", "github-issues", "tdd", "docker", "sandbox"],
+  "keywords": ["workflow", "agents", "autonomous", "github-issues", "tdd", "docker", "sandbox", "setup"],
   "userConfig": {
     "default_generator_model": {
       "type": "string",

@@ -258,6 +258,27 @@ mcp__plugin_<plugin-name>_<server-name>__<tool-name>
   セッション開始が最大約30秒（既定タイムアウト）遅れうる。これはセッションの起動そのものを妨げるもの
   ではなく、開始が遅れるだけで、一度きり（他のツール呼び出しの繰り返しをブロックするものではない）
 
+## `/plugin` に `CONNECTION_CLOSED` と出る場合
+
+```
+Failed to reconnect to plugin:dev-workflow:code-review-graph: CONNECTION_CLOSED
+Failed to reconnect to plugin:dev-workflow:context7: CONNECTION_CLOSED
+```
+
+`/plugin` の表示にこの2行が出るのは、**未導入の任意ツールに対して、この方式（上記「採用方式」の
+方式A: 宣言方式）が設計どおりに反応した結果**である。dev-workflow は
+`.claude-plugin/plugin.json` に `context7-mcp` / `code-review-graph` を「導入済み前提」で
+宣言しており、コマンドが `PATH` に無ければ Claude Code 側の接続がこの文言で失敗する。
+この表示自体はプラグイン側の実装であり、dev-workflow から変えられない。
+
+**異常ではない。** 未導入でも `context7` / `code-review-graph` は上記「任意依存であることの
+保証」のとおり dev-workflow の動作を妨げない。解消したい場合は次のいずれかを実行する:
+
+```bash
+/dev-workflow:setup            # 診断・導入をまとめて案内する
+bash scripts/doctor.sh         # 診断のみ
+```
+
 ## Phase 4: code-review-graph の結線（#73）
 
 上記「採用方式」（方式A: 宣言方式）に従い、code-review-graph を **evaluator にのみ**結線した。
@@ -387,6 +408,63 @@ context7はツールが2つしか無いため、サーバー単位の限定で�
 
 まとめると、絞り込みの**粒度**（ツール単位 vs サーバー単位）はCLI間で異なるが、
 「generatorにのみcontext7が使える」という**結果**は両CLIで一致する。
+
+## 導入コマンド化: `scripts/install-optional-mcp.sh`（#219）
+
+上記「対象ツール」節の導入手順は文書に記載されているだけで、実行するスクリプトが無く、
+利用者が文書を探して手で叩く必要があった。`scripts/install-optional-mcp.sh` はこの手作業を
+1コマンドにまとめる。パッケージ名・導入コマンドの正本は引き続きこの文書であり、
+スクリプト側はハードコードした値を使う（`scripts/doctor.sh` と同じ方針）。
+
+```bash
+bash scripts/install-optional-mcp.sh                                  # dry-run（既定）。何もインストールしない
+bash scripts/install-optional-mcp.sh --apply                          # 実際に導入する
+bash scripts/install-optional-mcp.sh --apply --only context7          # 対象を絞る
+```
+
+**利用者の環境に無断でパッケージを入れない**（Epic #217 の D2）という要件のとおり、既定は
+dry-run であり、`--apply` を明示しない限り何もインストールしない。導入前に Python 3.10+ /
+npm 等の**前提コマンドの有無**を確認し、無ければ導入を試みず不足を表示して終了する。
+導入後は `command -v` で PATH 解決を検証し、通らなければその旨を明示する
+（`pip install --user` で PATH が通らない典型例があるため）。
+
+**D6（ネットワークが無い環境でも失敗しない）との関係について（#225 レビュー対応）:**
+上記の前提チェックは**ローカルバイナリの有無**しか見ておらず、**ネットワーク到達性そのものは事前に検証していない**。
+そのため npm/pip 等の前提コマンドは手元にあるがネットワークが無い、という D6 が本来想定する
+シナリオでは、スクリプトは実際に導入コマンドを一度試み、失敗すれば `[NG]` メッセージと exit 2 で終了する
+（「導入を試みない」「正常終了する」という D6 の文言どおりの動きにはならない）。ただし実装自体は
+クラッシュ・ハングせず、失敗理由を明示して確実に終了するという**安全側の動作**にはなっている。
+
+ネットワーク到達性の事前チェック（DNS解決・レジストリへの疎通確認等）を実装で追加すること
+も検討したが、以下の理由から見送った。
+- 対象コマンド（npm / pip / pip3 / pipx / uvx）ごとにレジストリの参照先が異なり、事前チェックを
+  「確実に導入コマンドの成否を予言できる」レベルで作り込むと、導入コマンド自体を試すのとほぼ
+  同じ複雑さ・同じ待ち時間になる
+- 事前チェックが通っても、レジストリ側の一時的な不調・認証・プロキシ設定等、事前チェックでは
+  検出できない理由で導入コマンドが失敗する余地は残る。つまり事前チェックを追加しても
+  「導入コマンドを試して失敗を検知する」という経路は結局なくならない
+- 現行実装は、失敗時に必ず `[NG]` メッセージと exit 2 で終了し、クラッシュ・ハング・無限リトライ
+  のいずれも起こさない。D6 が防ごうとしている実害（自律ループが止まる・利用者に何が起きたか
+  伝わらない）はこの安全側の動作で既に防げている
+
+したがって、本文書における D6 は「ネットワーク不通を事前に検知して導入を回避する」ではなく
+「ネットワーク不通であっても安全に（クラッシュ・ハングせず、次に何をすべきか分かる形で）
+終了する」という意味で実装されている、と読み替える。
+
+**`code-review-graph install --platform claude-code` は使わない判断をした。** dev-workflow は
+`.claude-plugin/plugin.json` の `mcpServers.code-review-graph` で起動コマンド
+（`code-review-graph serve`）を既に宣言済み（上記「Phase 4」節）であり、
+`install --platform claude-code` はMCP設定を自動生成するコマンドである。本タスク（#219）の
+作業環境にはネットワーク接続が無く、上流ソースで実際の出力ファイル・冪等性（dev-workflow側の
+宣言と衝突しないか）を確認できなかった。上記「設計上の注意」に記載された
+「不要なら `pip install` と `build` だけでよい可能性がある」という代替案に従い、確認できない
+コマンドは安全側（実行しない）に倒した。`scripts/install-optional-mcp.sh` は当初 `pip install
+code-review-graph` のみを行っていたが、`pip` が無く `pip3`/`pipx`/`uvx` のみの環境では
+案内どおりに実行すると失敗する不具合が見つかったため（#224）、現在は `pip`/`pip3`/`pipx`/`uvx`
+の順に前提コマンドの有無を検出し、最初に見つかったコマンドで導入する。グラフ構築
+（`code-review-graph build`）は Epic issue 本文の
+`## 準備コマンド` 節で run が Epic 開始時に1回だけ実行する既存の仕組み（上記「グラフ構築は
+Epic 開始時に1回（#75）」節）に任せ、本スクリプトでは行わない。
 
 ## Phase 5（#76）: 効果測定のベースラインと「外す判断基準」
 

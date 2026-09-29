@@ -29,6 +29,9 @@
 #   bash scripts/sandbox-exec.sh --reset-cache --force                # running でも強制的に削除する
 #   bash scripts/sandbox-exec.sh --rebuild 'make test'                # イメージを強制再ビルドしてから実行する
 #   bash scripts/sandbox-exec.sh --print-plan                        # docker に触れず解決結果を表示（ドライラン）
+#   bash scripts/sandbox-exec.sh --init                               # サンドボックス定義の雛形を規約パスに生成する
+#                                                                     # （~/.claude/dev-workflow/sandbox/<リポジトリ名>/。
+#                                                                     # 駆動先リポジトリは汚さない。既存ファイルは上書きしない）
 #   bash scripts/sandbox-exec.sh --detach 'make test'                 # バックグラウンドで起動し即座に返る（ハンドル既定値: default）
 #   bash scripts/sandbox-exec.sh --detach --handle full-suite 'make test'  # 複数を並行させたい場合はハンドルを分ける
 #   bash scripts/sandbox-exec.sh --wait                               # 直近の --detach（既定ハンドル）の完了を待ち、終了コードをそのまま返す
@@ -192,6 +195,7 @@ while [ $# -gt 0 ]; do
         exit 2
       fi
       HANDLE="$2"; shift 2 ;;
+    --init)        ACTION="init"; shift ;;
     --)            shift; break ;;
     -*)            echo "ERROR: 未知のオプション: $1" >&2; exit 2 ;;
     *)             break ;;
@@ -277,6 +281,15 @@ esac
 # generator の isolation worktree ごとに別キャッシュになり、キャッシュが効かなくなる。
 # フォールバック時も PROJECT はリポジトリルート基準のまま変えない（キャッシュは常にリポジトリ単位）。
 PROJECT="$(basename "$REPO_ROOT")"
+
+# --init（規約パスへの雛形生成。Task #220）で使う規約パスのベースディレクトリ。
+# resolve-sandbox.sh の SANDBOX_HOME 解決と同じ既定にする（DEV_WORKFLOW_SANDBOX_HOME
+# が空なら ${HOME}/.claude/dev-workflow/sandbox）。resolve-sandbox.sh はこの値を
+# 外部へ出力しないため、--init 専用にここで同じ規約を再現する。
+INIT_SANDBOX_HOME="${DEV_WORKFLOW_SANDBOX_HOME:-}"
+if [ -z "$INIT_SANDBOX_HOME" ] && [ -n "${HOME:-}" ]; then
+  INIT_SANDBOX_HOME="${HOME}/.claude/dev-workflow/sandbox"
+fi
 
 # コンテナ名（仕様書 4.2）。repo は REPO_ROOT の basename（worktree の basename は使わない）。
 # --epic 未指定時は環境変数 DEV_WORKFLOW_EPIC を参照する
@@ -519,6 +532,88 @@ print_plan() {
     [ -n "$plan_lane_var" ] || continue
     printf 'lane_cache_env=%s=%s/lanes/%s\n' "$plan_lane_var" "$plan_lane_base" "$LANE_SCOPE"
   done < <(lane_cache_declarations)
+}
+
+# --- --init: サンドボックス定義の雛形生成（Task #220） -----------------------------
+#
+# `--print-plan` が mode=none を返す場合の供給経路のうち、規約パス（駆動先リポジトリを
+# 汚さない経路）だけを自動化する。雛形は最小構成に留め、言語・フレームワークを推測して
+# 盛り込まない（中途半端な推測は動かない定義を掴ませることになる）。compose の雛形は
+# skills/run/references/sandbox.md「compose を使う場合の要求仕様」を満たす状態で生成する。
+
+init_dockerfile_template() {
+  cat <<'EOF'
+# dev-workflow: サンドボックス用 Dockerfile の雛形（scripts/sandbox-exec.sh --init が生成）
+#
+# 最小構成のみを用意している。言語・フレームワーク（node/go/python等）は
+# 推測せず、プロジェクトの実態に合わせて下記に追記すること。
+FROM debian:bookworm-slim
+
+WORKDIR /workspace
+
+# 例: RUN apt-get update && apt-get install -y --no-install-recommends <package> \
+#       && rm -rf /var/lib/apt/lists/*
+EOF
+}
+
+init_compose_template() {
+  cat <<'EOF'
+# dev-workflow: サンドボックス用 docker-compose の雛形（scripts/sandbox-exec.sh --init が生成）
+#
+# 要求仕様（skills/run/references/sandbox.md「compose を使う場合の要求仕様」）:
+#   - 常駐サービス名は既定 app（DEV_WORKFLOW_COMPOSE_SERVICE で変更可）
+#   - 当該サービスが .:/workspace をマウントすること
+#   - sleep infinity 等で常駐しつづけること
+#   - container_name と固定ホストポート（例: "8080:8080"）を使わないこと
+#     （epic の並行実行ができなくなる）
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    command: ["sleep", "infinity"]
+EOF
+}
+
+do_init() {
+  if [ -z "$INIT_SANDBOX_HOME" ]; then
+    echo "ERROR: 規約パスを解決できません（HOME が未設定です）。DEV_WORKFLOW_SANDBOX_HOME を指定してください。" >&2
+    exit 1
+  fi
+
+  local target_dir="${INIT_SANDBOX_HOME}/${PROJECT}"
+  local dockerfile_path="${target_dir}/Dockerfile.dev"
+  local compose_path="${target_dir}/docker-compose.dev.yml"
+
+  mkdir -p "$target_dir" || {
+    echo "ERROR: 規約パスのディレクトリを作成できません: ${target_dir}" >&2
+    exit 1
+  }
+
+  # 既存ファイルは上書きしない。存在する場合はそのパスを表示するだけに留める
+  # （生成しなかったファイルのぶんだけ何もしない。全体を中断はしない）。
+  if [ -e "$dockerfile_path" ]; then
+    echo "既存: ${dockerfile_path}（上書きしません）"
+  else
+    init_dockerfile_template > "$dockerfile_path"
+    echo "生成しました: ${dockerfile_path}"
+  fi
+
+  if [ -e "$compose_path" ]; then
+    echo "既存: ${compose_path}（上書きしません）"
+  else
+    init_compose_template > "$compose_path"
+    echo "生成しました: ${compose_path}"
+  fi
+
+  # 生成直後の解決結果を確認できるよう再解決してから表示する（--print-plan相当）。
+  # 生成前は mode=none のままなので、ここで解消を確認できる。
+  eval "$(bash "${SCRIPT_DIR}/resolve-sandbox.sh")"
+  echo ""
+  print_plan
 }
 
 # 管理コンテナの列挙・後片付け（仕様書 4.2 / 4.5）。
@@ -923,6 +1018,10 @@ case "$ACTION" in
     [ -f "${WAIT_DIR}/log" ] && cat "${WAIT_DIR}/log"
     WAIT_EXIT_CODE="$(cat "${WAIT_DIR}/exit_code" 2>/dev/null || echo 1)"
     exit "$WAIT_EXIT_CODE"
+    ;;
+  init)
+    do_init
+    exit 0
     ;;
 esac
 

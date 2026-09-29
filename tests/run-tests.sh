@@ -2616,6 +2616,46 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 検出時の警告から dev-workflow:setup への導線（Task #222）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== 検出時の警告から dev-workflow:setup への導線（#222） =="
+
+# --- 未導入通知に CONNECTION_CLOSED への言及と dev-workflow:setup への導線がある ---
+case "$OPT_TOOLS_NO_CONTEXT7_NOTICE" in
+  *"CONNECTION_CLOSED"*) pass "optional_tools_notice: CONNECTION_CLOSEDへの言及がある（#222）" ;;
+  *) fail "optional_tools_notice: CONNECTION_CLOSEDへの言及がある（#222）" \
+    "notice=[${OPT_TOOLS_NO_CONTEXT7_NOTICE}]" ;;
+esac
+
+case "$OPT_TOOLS_NO_CONTEXT7_NOTICE" in
+  *"dev-workflow:setup"*) pass "optional_tools_notice: dev-workflow:setupへの導線がある（#222）" ;;
+  *) fail "optional_tools_notice: dev-workflow:setupへの導線がある（#222）" \
+    "notice=[${OPT_TOOLS_NO_CONTEXT7_NOTICE}]" ;;
+esac
+
+# --- 警告のexit コードは従来どおり（任意依存の不在でexit 2にならない。上のOPT_TOOLS_FULL_EXITで既に検証済みだが、
+#     #222の完了条件として明示的に再掲する） ---
+assert_exit_code "検出時の警告を追加してもexit コードは従来どおり（任意依存の不在でexit 2にならない、#222）" \
+  0 "$OPT_TOOLS_FULL_EXIT"
+
+# --- docs/optional-mcp-tools.md に症状ベース（CONNECTION_CLOSED）の節がある ---
+DOC222_OPTIONAL_MCP_DOC="${REPO_ROOT}/docs/optional-mcp-tools.md"
+if grep -qF "CONNECTION_CLOSED" "$DOC222_OPTIONAL_MCP_DOC"; then
+  pass "docs/optional-mcp-tools.md: CONNECTION_CLOSEDの節がある（#222）"
+else
+  fail "docs/optional-mcp-tools.md: CONNECTION_CLOSEDの節がある（#222）"
+fi
+
+# --- README.mdのトラブルシューティングに該当行がある ---
+if grep -qF "CONNECTION_CLOSED" "${REPO_ROOT}/README.md"; then
+  pass "README.md: トラブルシューティングにCONNECTION_CLOSEDの記載がある（#222）"
+else
+  fail "README.md: トラブルシューティングにCONNECTION_CLOSEDの記載がある（#222）"
+fi
+
+# ---------------------------------------------------------------------------
 # check-readability.sh の非対話ハング修正（Task #10、Epic #3 仕様書 4.9）
 #
 # `--git` / `--staged` / ファイル引数が1つでもあれば stdin を一切読まない。
@@ -13045,6 +13085,120 @@ assert_eq "規約パス: worktreeから呼んでもイメージタグ(hash含む
 # 対象になっているため、ここでの追加テストは不要。
 
 # ---------------------------------------------------------------------------
+# sandbox-exec.sh --init: サンドボックス定義の雛形を規約パスに生成する（Task #220）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== sandbox-exec.sh --init（雛形生成、#220） =="
+
+INIT220_REPO="$(make_temp_repo)"
+copy_sandbox_scripts_no_dockerfile "$INIT220_REPO"
+INIT220_NAME="$(basename "$INIT220_REPO")"
+INIT220_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-init220-home.XXXXXX")"
+
+# --init 実行前は mode=none であることを確認する（前提条件）
+INIT220_BEFORE="$(
+  cd "$INIT220_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$INIT220_HOME" bash scripts/sandbox-exec.sh --print-plan
+)"
+assert_eq "--init 前提: 生成前は mode=none（#220）" \
+  "none" "$(plan_value mode "$INIT220_BEFORE")"
+
+INIT220_STATUS_BEFORE="$(git -C "$INIT220_REPO" status --short --untracked-files=all)"
+
+INIT220_OUT="$(
+  cd "$INIT220_REPO" || exit 1
+  DOCKER_CALLED_MARKER="$DOCKER_CALLED_MARKER" PATH="${FAKE_BIN_DIR}:${PATH}" \
+    DEV_WORKFLOW_SANDBOX_HOME="$INIT220_HOME" bash scripts/sandbox-exec.sh --init
+)"
+INIT220_EXIT=$?
+
+INIT220_DOCKERFILE="${INIT220_HOME}/${INIT220_NAME}/Dockerfile.dev"
+INIT220_COMPOSE="${INIT220_HOME}/${INIT220_NAME}/docker-compose.dev.yml"
+
+assert_exit_code "--init は exit 0 で終わる（#220）" 0 "$INIT220_EXIT"
+
+assert_eq "--init: 規約パスにDockerfile.devを生成する（完了条件、#220）" \
+  "yes" "$([ -f "$INIT220_DOCKERFILE" ] && echo yes || echo no)"
+assert_eq "--init: 規約パスにdocker-compose.dev.ymlを生成する（完了条件、#220）" \
+  "yes" "$([ -f "$INIT220_COMPOSE" ] && echo yes || echo no)"
+
+if [ -f "$DOCKER_CALLED_MARKER" ]; then
+  fail "--init は docker を起動しない（#220）" "docker が呼ばれました: $(cat "$DOCKER_CALLED_MARKER")"
+else
+  pass "--init は docker を起動しない（#220）"
+fi
+
+# 生成された compose が要求仕様（app / .:/workspace / sleep infinity）を満たす
+case "$(cat "$INIT220_COMPOSE")" in
+  *'app:'*'.:/workspace'*'sleep'*'infinity'*)
+    pass "--init: 生成されたcomposeが要求仕様（app/.:/workspace/sleep infinity）を満たす（完了条件、#220）" ;;
+  *)
+    fail "--init: 生成されたcomposeが要求仕様（app/.:/workspace/sleep infinity）を満たす（完了条件、#220）" \
+      "$(cat "$INIT220_COMPOSE")" ;;
+esac
+
+# 説明コメント自体が要求仕様の文言（container_name / 8080:8080）に触れているため、
+# コメント行（先頭が#）を除いた実体だけを対象に判定する。
+INIT220_COMPOSE_BODY="$(grep -v '^[[:space:]]*#' "$INIT220_COMPOSE")"
+
+if printf '%s\n' "$INIT220_COMPOSE_BODY" | grep -q 'container_name'; then
+  fail "--init: 生成されたcomposeにcontainer_nameが無い（完了条件、#220）" "$(cat "$INIT220_COMPOSE")"
+else
+  pass "--init: 生成されたcomposeにcontainer_nameが無い（完了条件、#220）"
+fi
+
+if printf '%s\n' "$INIT220_COMPOSE_BODY" | grep -Eq '"[0-9]+:[0-9]+"'; then
+  fail "--init: 生成されたcomposeに固定ホストポートが無い（完了条件、#220）" "$(cat "$INIT220_COMPOSE")"
+else
+  pass "--init: 生成されたcomposeに固定ホストポートが無い（完了条件、#220）"
+fi
+
+# 生成直後の --print-plan 相当出力で mode=none が解消したことを確認できる（完了条件）
+case "$INIT220_OUT" in
+  *'mode=dockerfile'*)
+    pass "--init: 生成直後にmode=noneが解消したことを確認できる（完了条件、#220）" ;;
+  *)
+    fail "--init: 生成直後にmode=noneが解消したことを確認できる（完了条件、#220）" "output=[${INIT220_OUT}]" ;;
+esac
+
+# 既存ファイルを上書きしない（2回目実行。完了条件）
+printf 'unchanged\n' > "$INIT220_DOCKERFILE"
+INIT220_OUT2="$(
+  cd "$INIT220_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOME="$INIT220_HOME" bash scripts/sandbox-exec.sh --init
+)"
+
+assert_eq "--init: 既存ファイルを上書きしない（完了条件、#220）" \
+  "unchanged" "$(cat "$INIT220_DOCKERFILE")"
+
+case "$INIT220_OUT2" in
+  *"既存: ${INIT220_DOCKERFILE}"*)
+    pass "--init: 既存ファイルのパスを表示する（完了条件、#220）" ;;
+  *)
+    fail "--init: 既存ファイルのパスを表示する（完了条件、#220）" "output=[${INIT220_OUT2}]" ;;
+esac
+
+# 駆動先リポジトリの作業ツリーが変更されない（既定動作。完了条件）
+INIT220_STATUS_AFTER="$(git -C "$INIT220_REPO" status --short --untracked-files=all)"
+assert_eq "--init: 駆動先リポジトリの作業ツリーが変更されない（完了条件、#220）" \
+  "$INIT220_STATUS_BEFORE" "$INIT220_STATUS_AFTER"
+
+# CLI契約（--init）が sandbox-exec.sh のオプション解析に存在する
+if grep -Fq -- '--init' "${REPO_ROOT}/scripts/sandbox-exec.sh"; then
+  pass "scripts/sandbox-exec.sh: --init オプションが実装されている（#220）"
+else
+  fail "scripts/sandbox-exec.sh: --init オプションが実装されている（#220）"
+fi
+
+# skills/run/SKILL.md の mode=none 案内に --init への言及がある（完了条件6）
+if grep -Fq -- 'sandbox-exec.sh --init' "${REPO_ROOT}/skills/run/SKILL.md"; then
+  pass "skills/run/SKILL.md: mode=none案内にsandbox-exec.sh --initへの言及がある（完了条件、#220）"
+else
+  fail "skills/run/SKILL.md: mode=none案内にsandbox-exec.sh --initへの言及がある（完了条件、#220）"
+fi
+
+# ---------------------------------------------------------------------------
 # skills/run/SKILL.md・skills-codex/dev-workflow-run/SKILL.md:
 # mode=none 時の案内が供給経路3択になっている（Task #128）
 # ---------------------------------------------------------------------------
@@ -13085,6 +13239,19 @@ for f in "skills/run/SKILL.md" "skills-codex/dev-workflow-run/SKILL.md"; do
       pass "${f}: mode=none 案内に選択肢3（リポジトリ直下）がある（#128）" ;;
     *)
       fail "${f}: mode=none 案内に選択肢3（リポジトリ直下）がある（#128）" "$MN_BLOCK" ;;
+  esac
+
+  # --- 両run スキルの mode=none 案内は記述が一致する
+  #     （docs/dev-workflow-multi-vendor-guide.md「両 run スキルの記述は一致する」）。
+  #     選択肢1（規約パス）配下の --init 案内もその一部であり、片方だけの追記で
+  #     乖離した実績がある（#223、起因タスク#220）。個別ファイルの回帰テストではなく、
+  #     この#128のループ（両ファイルを機械的に照合する仕組み）へ組み込み、
+  #     以後どちらのファイルに追記されても片方が漏れれば必ず検出できるようにする ---
+  case "$MN_BLOCK" in
+    *'sandbox-exec.sh --init'*)
+      pass "${f}: mode=none 案内の選択肢1に --init の案内がある（#223）" ;;
+    *)
+      fail "${f}: mode=none 案内の選択肢1に --init の案内がある（#223）" "$MN_BLOCK" ;;
   esac
 
   MN_SYNTAX_TMP="$(mktemp "${TMPDIR:-/tmp}/dw-test-mode-none.XXXXXX")"
@@ -17226,6 +17393,719 @@ if [ -f "$DOC215_CODEX_AGENT_PLANNER" ] && grep -Fq '対象ファイル宣言（
 else
   fail "codex-agents/planner.toml: 正本の「## 対象ファイル」追記内容が反映されている（#215）" \
     "見つかりません: ${DOC215_CODEX_AGENT_PLANNER}"
+fi
+
+# scripts/doctor.sh（環境診断を1コマンドにまとめる。#218）
+#
+# 必須依存（gh/docker）・任意依存（context7-mcp/code-review-graph）・サンドボックス
+# （sandbox-exec.sh --print-plan）・リポジトリ衛生（check-repo-hygiene.sh --check --print）・
+# CRLF設定（check-prerequisites.sh の crlf_warning_message）をまとめて表示する。
+# 実 gh/実 docker には一切触れず、スタブに差し替えて検証する。
+# ---------------------------------------------------------------------------
+
+echo "== scripts/doctor.sh（環境診断・#218） =="
+
+DOCTOR_SCRIPT_SRC="${REPO_ROOT}/scripts/doctor.sh"
+
+copy_doctor_scripts() {
+  # copy_doctor_scripts <dest_repo_dir>
+  # doctor.sh とその依存スクリプト（check-prerequisites.sh / check-repo-hygiene.sh /
+  # sandbox-exec.sh / resolve-sandbox.sh / lib）を検証対象の一時リポジトリへ複製してコミットする。
+  local dest="$1"
+  copy_sandbox_scripts "$dest"
+  cp "${REPO_ROOT}/scripts/doctor.sh"              "${dest}/scripts/doctor.sh"
+  cp "${REPO_ROOT}/scripts/check-prerequisites.sh" "${dest}/scripts/check-prerequisites.sh"
+  cp "${REPO_ROOT}/scripts/check-repo-hygiene.sh"  "${dest}/scripts/check-repo-hygiene.sh"
+  (
+    cd "$dest" || exit 1
+    git add scripts
+    git commit -q -m "add doctor.sh and deps"
+  ) >/dev/null 2>&1
+}
+
+make_doctor_stub_bin_dir() {
+  # make_doctor_stub_bin_dir <gh auth status の終了コード> <docker info の終了コード>
+  # 指定した終了コードで動作する gh / docker のスタブを1つのディレクトリにまとめて作る。
+  # サブコマンド以外の呼び出し（command -v の対象存在確認）は常に成功させる。
+  local gh_exit="$1" docker_exit="$2"
+  local dir
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-doctor-bin.XXXXXX")"
+  cat > "${dir}/gh" <<SH
+#!/bin/bash
+if [ "\$1" = "auth" ] && [ "\$2" = "status" ]; then
+  exit ${gh_exit}
+fi
+exit 0
+SH
+  chmod +x "${dir}/gh"
+  cat > "${dir}/docker" <<SH
+#!/bin/bash
+if [ "\$1" = "info" ]; then
+  exit ${docker_exit}
+fi
+exit 0
+SH
+  chmod +x "${dir}/docker"
+  printf '%s' "$dir"
+}
+
+# gh/docker が実際に存在するディレクトリだけをPATHから除外する（ベンダー固有パスを
+# 決め打ちしない。この環境に無い場合は dirname が "." を返すだけで無害）。
+DOCTOR_REAL_GH_DIR="$(dirname "$(command -v gh 2>/dev/null || true)")"
+DOCTOR_REAL_DOCKER_DIR="$(dirname "$(command -v docker 2>/dev/null || true)")"
+DOCTOR_PATH_WITHOUT_GH_DOCKER="$(printf '%s' "$PATH" | tr ':' '\n' \
+  | grep -vFx "$DOCTOR_REAL_GH_DIR" | grep -vFx "$DOCTOR_REAL_DOCKER_DIR" \
+  | tr '\n' ':' | sed 's/:$//')"
+
+DOCTOR_OK_REPO="$(make_temp_repo)"
+copy_doctor_scripts "$DOCTOR_OK_REPO"
+DOCTOR_OK_BIN="$(make_doctor_stub_bin_dir 0 0)"
+DOCTOR_OK_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-doctor-home.XXXXXX")"
+
+# --- ケース1: gh/docker が両方揃っている（認証済み・起動済み）場合、exit 0 で全セクションが出る ---
+DOCTOR_OK_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+DOCTOR_OK_EXIT=0
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_OK_OUT" 2>&1
+) || DOCTOR_OK_EXIT=$?
+
+assert_exit_code "doctor.sh: gh/docker が揃っていれば exit 0（#218）" 0 "$DOCTOR_OK_EXIT"
+
+for section in "必須依存" "任意依存" "サンドボックス" "リポジトリ衛生" "CRLF設定"; do
+  if grep -qF "$section" "$DOCTOR_OK_OUT"; then
+    pass "doctor.sh: 「${section}」セクションが表示される（#218）"
+  else
+    fail "doctor.sh: 「${section}」セクションが表示される（#218）" "$(cat "$DOCTOR_OK_OUT")"
+  fi
+done
+unset section
+
+# --- ケース2: gh/docker が両方とも見つからない環境でも最後まで走り切り、全項目が表示される ---
+DOCTOR_MISSING_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+DOCTOR_MISSING_EXIT=0
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  HOME="$DOCTOR_OK_HOME" PATH="$DOCTOR_PATH_WITHOUT_GH_DOCKER" \
+    bash scripts/doctor.sh > "$DOCTOR_MISSING_OUT" 2>&1
+) || DOCTOR_MISSING_EXIT=$?
+
+assert_exit_code "doctor.sh: gh/docker が両方無ければ exit 1（#218）" 1 "$DOCTOR_MISSING_EXIT"
+
+for section in "必須依存" "任意依存" "サンドボックス" "リポジトリ衛生" "CRLF設定"; do
+  if grep -qF "$section" "$DOCTOR_MISSING_OUT"; then
+    pass "doctor.sh: gh/docker が無くても「${section}」まで最後まで走り切る（#218）"
+  else
+    fail "doctor.sh: gh/docker が無くても「${section}」まで最後まで走り切る（#218）" "$(cat "$DOCTOR_MISSING_OUT")"
+  fi
+done
+unset section
+
+case "$(cat "$DOCTOR_MISSING_OUT")" in
+  *"gh: 見つかりません"*) pass "doctor.sh: gh不在時に見つからない旨のメッセージが出る（#218）" ;;
+  *) fail "doctor.sh: gh不在時に見つからない旨のメッセージが出る（#218）" "$(cat "$DOCTOR_MISSING_OUT")" ;;
+esac
+
+case "$(cat "$DOCTOR_MISSING_OUT")" in
+  *"docker: 見つかりません"*) pass "doctor.sh: docker不在時に見つからない旨のメッセージが出る（#218）" ;;
+  *) fail "doctor.sh: docker不在時に見つからない旨のメッセージが出る（#218）" "$(cat "$DOCTOR_MISSING_OUT")" ;;
+esac
+
+# --- ケース3: gh は導入済みだが未認証、docker は導入済みだが未起動 -> NGメッセージが出て exit 1 ---
+DOCTOR_UNAUTH_BIN="$(make_doctor_stub_bin_dir 1 1)"
+DOCTOR_UNAUTH_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+DOCTOR_UNAUTH_EXIT=0
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_UNAUTH_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_UNAUTH_OUT" 2>&1
+) || DOCTOR_UNAUTH_EXIT=$?
+
+assert_exit_code "doctor.sh: gh未認証・docker未起動なら exit 1（#218）" 1 "$DOCTOR_UNAUTH_EXIT"
+
+case "$(cat "$DOCTOR_UNAUTH_OUT")" in
+  *"gh auth login"*) pass "doctor.sh: gh未認証時に 'gh auth login' の案内が出る（#218）" ;;
+  *) fail "doctor.sh: gh未認証時に 'gh auth login' の案内が出る（#218）" "$(cat "$DOCTOR_UNAUTH_OUT")" ;;
+esac
+
+case "$(cat "$DOCTOR_UNAUTH_OUT")" in
+  *"Docker Desktop"*) pass "doctor.sh: docker未起動時に Docker Desktop 起動の案内が出る（#218）" ;;
+  *) fail "doctor.sh: docker未起動時に Docker Desktop 起動の案内が出る（#218）" "$(cat "$DOCTOR_UNAUTH_OUT")" ;;
+esac
+
+# --- ケース4: 任意依存（context7-mcp / code-review-graph）が未導入なら、貼り付け可能な
+#     導入コマンドが表示され、「異常ではない」ことが伝わる文言になっている（DOCTOR_OK_OUTを流用。
+#     ケース1のスタブbinには context7-mcp / code-review-graph を含めていないため未導入扱い） ---
+case "$(cat "$DOCTOR_OK_OUT")" in
+  *"npm install"*"@upstash/context7-mcp"*) pass "doctor.sh: context7-mcp未導入時に貼り付け可能な導入コマンドが出る（#218）" ;;
+  *) fail "doctor.sh: context7-mcp未導入時に貼り付け可能な導入コマンドが出る（#218）" "$(cat "$DOCTOR_OK_OUT")" ;;
+esac
+
+case "$(cat "$DOCTOR_OK_OUT")" in
+  *"bash scripts/install-optional-mcp.sh"*"--only code-review-graph"*) \
+    pass "doctor.sh: code-review-graph未導入時にinstall-optional-mcp.sh経由の案内が出る（環境依存のコマンドを固定文字列で案内しない。#233）" ;;
+  *) fail "doctor.sh: code-review-graph未導入時にinstall-optional-mcp.sh経由の案内が出る（環境依存のコマンドを固定文字列で案内しない。#233）" \
+    "$(cat "$DOCTOR_OK_OUT")" ;;
+esac
+
+case "$(cat "$DOCTOR_OK_OUT")" in
+  *"従来どおり"*) pass "doctor.sh: 任意依存の未導入が異常でないと分かる文言（『従来どおり』）が出る（#218）" ;;
+  *) fail "doctor.sh: 任意依存の未導入が異常でないと分かる文言（『従来どおり』）が出る（#218）" "$(cat "$DOCTOR_OK_OUT")" ;;
+esac
+
+# --- ケース5: 任意依存が両方導入済みなら [OK] と表示され、導入コマンド案内は出ない ---
+DOCTOR_OPT_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-doctor-opt-bin.XXXXXX")"
+cat > "${DOCTOR_OPT_BIN}/context7-mcp" <<'SH'
+#!/bin/bash
+exit 0
+SH
+chmod +x "${DOCTOR_OPT_BIN}/context7-mcp"
+cat > "${DOCTOR_OPT_BIN}/code-review-graph" <<'SH'
+#!/bin/bash
+exit 0
+SH
+chmod +x "${DOCTOR_OPT_BIN}/code-review-graph"
+
+DOCTOR_OPT_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OPT_BIN}:${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_OPT_OUT" 2>&1
+)
+
+case "$(cat "$DOCTOR_OPT_OUT")" in
+  *"[OK] context7"*"導入済み"*) pass "doctor.sh: context7-mcp導入済みなら[OK]と表示される（#218）" ;;
+  *) fail "doctor.sh: context7-mcp導入済みなら[OK]と表示される（#218）" "$(cat "$DOCTOR_OPT_OUT")" ;;
+esac
+
+case "$(cat "$DOCTOR_OPT_OUT")" in
+  *"[OK] code-review-graph"*"導入済み"*) pass "doctor.sh: code-review-graph導入済みなら[OK]と表示される（#218）" ;;
+  *) fail "doctor.sh: code-review-graph導入済みなら[OK]と表示される（#218）" "$(cat "$DOCTOR_OPT_OUT")" ;;
+esac
+
+# --- ケース6: crlf_warning_message を再実装せず check-prerequisites.sh から source している ---
+if grep -qE 'source[[:space:]]+"[^"]*check-prerequisites\.sh"' "$DOCTOR_SCRIPT_SRC"; then
+  pass "doctor.sh: check-prerequisites.sh を source している（#218）"
+else
+  fail "doctor.sh: check-prerequisites.sh を source している（#218）" "$(cat "$DOCTOR_SCRIPT_SRC")"
+fi
+
+if grep -q "core.autocrlf" "$DOCTOR_SCRIPT_SRC"; then
+  fail "doctor.sh: crlf_warning_messageの判定ロジックを再実装していない（#218）" \
+    "doctor.sh 内に core.autocrlf への直接参照が見つかりました（source した関数を呼ぶだけにすること）"
+else
+  pass "doctor.sh: crlf_warning_messageの判定ロジックを再実装していない（#218）"
+fi
+
+# --- ケース7: 何度実行しても副作用が無い（ファイルを作らない・.git/info/excludeを書き換えない） ---
+DOCTOR_SIDEEFFECT_REPO="$(make_temp_repo)"
+copy_doctor_scripts "$DOCTOR_SIDEEFFECT_REPO"
+DOCTOR_SIDEEFFECT_EXCLUDE="$(cd "$DOCTOR_SIDEEFFECT_REPO" && git rev-parse --path-format=absolute --git-common-dir)/info/exclude"
+DOCTOR_SIDEEFFECT_EXCLUDE_BEFORE=""
+[ -f "$DOCTOR_SIDEEFFECT_EXCLUDE" ] && DOCTOR_SIDEEFFECT_EXCLUDE_BEFORE="$(cat "$DOCTOR_SIDEEFFECT_EXCLUDE")"
+
+(
+  cd "$DOCTOR_SIDEEFFECT_REPO" || exit 1
+  HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" bash scripts/doctor.sh >/dev/null 2>&1
+  HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" bash scripts/doctor.sh >/dev/null 2>&1
+)
+
+DOCTOR_SIDEEFFECT_STATUS="$(cd "$DOCTOR_SIDEEFFECT_REPO" && git status --porcelain --untracked-files=all)"
+assert_eq "doctor.sh: 2回実行しても未追跡ファイル・変更を作らない（副作用なし。#218）" "" "$DOCTOR_SIDEEFFECT_STATUS"
+
+DOCTOR_SIDEEFFECT_EXCLUDE_AFTER=""
+[ -f "$DOCTOR_SIDEEFFECT_EXCLUDE" ] && DOCTOR_SIDEEFFECT_EXCLUDE_AFTER="$(cat "$DOCTOR_SIDEEFFECT_EXCLUDE")"
+assert_eq "doctor.sh: .git/info/exclude を書き換えない（衛生チェックを--checkで呼ぶ。#218）" \
+  "$DOCTOR_SIDEEFFECT_EXCLUDE_BEFORE" "$DOCTOR_SIDEEFFECT_EXCLUDE_AFTER"
+
+# ---------------------------------------------------------------------------
+# scripts/install-optional-mcp.sh（任意MCPの導入。既定 dry-run。Task #219）
+#
+# 実 npm / pip / python3 には一切触れず、スタブに差し替えて検証する。
+# 依存スクリプトを持たない単体スクリプトのため、doctor.sh のような一時リポジトリへの
+# 複製は不要で、REPO_ROOT のスクリプトを直接実行する。
+# ---------------------------------------------------------------------------
+
+echo "== scripts/install-optional-mcp.sh（任意MCPの導入・#219） =="
+
+MCP_INSTALL_SCRIPT="${REPO_ROOT}/scripts/install-optional-mcp.sh"
+
+make_mcp_prereq_stub_bin_dir() {
+  # 前提コマンド（npm / python3 / pip）が「揃っている」と判定させるための最小スタブ。
+  # パッケージを実際に入れたりはしない（--apply の成功系は専用のスタブで別途検証する）。
+  local dir
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-mcp-prereq-bin.XXXXXX")"
+  cat > "${dir}/npm" <<'SH'
+#!/bin/bash
+exit 0
+SH
+  chmod +x "${dir}/npm"
+  cat > "${dir}/python3" <<'SH'
+#!/bin/bash
+exit 0
+SH
+  chmod +x "${dir}/python3"
+  cat > "${dir}/pip" <<'SH'
+#!/bin/bash
+exit 0
+SH
+  chmod +x "${dir}/pip"
+  printf '%s' "$dir"
+}
+
+# gh/docker と同じ作法（doctor.sh のテスト参照）: 実際に存在するコマンドのディレクトリだけを
+# PATH から除外する（ベンダー固有パスを決め打ちしない）。
+MCP_REAL_NPM_DIR="$(dirname "$(command -v npm 2>/dev/null || true)")"
+MCP_REAL_PYTHON3_DIR="$(dirname "$(command -v python3 2>/dev/null || true)")"
+MCP_REAL_PYTHON_DIR="$(dirname "$(command -v python 2>/dev/null || true)")"
+MCP_REAL_PIP_DIR="$(dirname "$(command -v pip 2>/dev/null || true)")"
+MCP_REAL_PIP3_DIR="$(dirname "$(command -v pip3 2>/dev/null || true)")"
+MCP_REAL_PIPX_DIR="$(dirname "$(command -v pipx 2>/dev/null || true)")"
+MCP_REAL_UVX_DIR="$(dirname "$(command -v uvx 2>/dev/null || true)")"
+MCP_PATH_WITHOUT_PREREQS="$(printf '%s' "$PATH" | tr ':' '\n' \
+  | grep -vFx "$MCP_REAL_NPM_DIR" | grep -vFx "$MCP_REAL_PYTHON3_DIR" \
+  | grep -vFx "$MCP_REAL_PYTHON_DIR" | grep -vFx "$MCP_REAL_PIP_DIR" \
+  | grep -vFx "$MCP_REAL_PIP3_DIR" | grep -vFx "$MCP_REAL_PIPX_DIR" \
+  | grep -vFx "$MCP_REAL_UVX_DIR" \
+  | tr '\n' ':' | sed 's/:$//')"
+
+# --- ケース1: 引数なし（dry-run）。前提は揃っているが未導入 -> 何もインストールせず、
+#     両対象の導入予定コマンドを表示する（完了条件1） ---
+MCP_PREREQ_BIN="$(make_mcp_prereq_stub_bin_dir)"
+MCP_DRYRUN_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+MCP_DRYRUN_EXIT=0
+PATH="${MCP_PREREQ_BIN}:${PATH}" bash "$MCP_INSTALL_SCRIPT" > "$MCP_DRYRUN_OUT" 2>&1 \
+  || MCP_DRYRUN_EXIT=$?
+
+assert_exit_code "install-optional-mcp.sh: 引数なし（dry-run）は exit 0（#219）" 0 "$MCP_DRYRUN_EXIT"
+
+case "$(cat "$MCP_DRYRUN_OUT")" in
+  *"[dry-run]"*"npm install -g @upstash/context7-mcp"*) \
+    pass "install-optional-mcp.sh: dry-runでcontext7の導入予定コマンドが表示される（#219）" ;;
+  *) fail "install-optional-mcp.sh: dry-runでcontext7の導入予定コマンドが表示される（#219）" \
+    "$(cat "$MCP_DRYRUN_OUT")" ;;
+esac
+
+case "$(cat "$MCP_DRYRUN_OUT")" in
+  *"[dry-run]"*"pip install code-review-graph"*) \
+    pass "install-optional-mcp.sh: dry-runでcode-review-graphの導入予定コマンドが表示される（#219）" ;;
+  *) fail "install-optional-mcp.sh: dry-runでcode-review-graphの導入予定コマンドが表示される（#219）" \
+    "$(cat "$MCP_DRYRUN_OUT")" ;;
+esac
+
+case "$(cat "$MCP_DRYRUN_OUT")" in
+  *"[導入中]"*) fail "install-optional-mcp.sh: dry-runでは実際に導入コマンドを実行しない（#219）" \
+    "$(cat "$MCP_DRYRUN_OUT")" ;;
+  *) pass "install-optional-mcp.sh: dry-runでは実際に導入コマンドを実行しない（#219）" ;;
+esac
+
+# --- ケース2: --only で対象を絞れる（完了条件3） ---
+MCP_ONLY_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+PATH="${MCP_PREREQ_BIN}:${PATH}" bash "$MCP_INSTALL_SCRIPT" --only context7 > "$MCP_ONLY_OUT" 2>&1
+
+case "$(cat "$MCP_ONLY_OUT")" in
+  *"code-review-graph"*) fail "install-optional-mcp.sh: --only context7 はcode-review-graphに触れない（#219）" \
+    "$(cat "$MCP_ONLY_OUT")" ;;
+  *) pass "install-optional-mcp.sh: --only context7 はcode-review-graphに触れない（#219）" ;;
+esac
+
+case "$(cat "$MCP_ONLY_OUT")" in
+  *"context7"*) pass "install-optional-mcp.sh: --only context7 はcontext7のみ表示する（#219）" ;;
+  *) fail "install-optional-mcp.sh: --only context7 はcontext7のみ表示する（#219）" \
+    "$(cat "$MCP_ONLY_OUT")" ;;
+esac
+
+# --- ケース3: 前提不足の環境では --apply でも導入を試みず、不足を表示してexit 2になる
+#     （完了条件4）。dry-runでも同様に不足を表示する（何も実行しないため exit 0のまま） ---
+MCP_MISSING_APPLY_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+MCP_MISSING_APPLY_EXIT=0
+PATH="$MCP_PATH_WITHOUT_PREREQS" bash "$MCP_INSTALL_SCRIPT" --apply > "$MCP_MISSING_APPLY_OUT" 2>&1 \
+  || MCP_MISSING_APPLY_EXIT=$?
+
+assert_exit_code "install-optional-mcp.sh: 前提不足の環境で --apply は exit 2（#219）" 2 "$MCP_MISSING_APPLY_EXIT"
+
+for msg in "npm が見つかりません" "Python 3.10+ が見つかりません" "pip/pipx/uvx のいずれも見つかりません"; do
+  if grep -qF "$msg" "$MCP_MISSING_APPLY_OUT"; then
+    pass "install-optional-mcp.sh: 前提不足メッセージ「${msg}」が表示される（#219）"
+  else
+    fail "install-optional-mcp.sh: 前提不足メッセージ「${msg}」が表示される（#219）" "$(cat "$MCP_MISSING_APPLY_OUT")"
+  fi
+done
+unset msg
+
+case "$(cat "$MCP_MISSING_APPLY_OUT")" in
+  *"[導入中]"*) fail "install-optional-mcp.sh: 前提不足なら導入を試みない（#219）" \
+    "$(cat "$MCP_MISSING_APPLY_OUT")" ;;
+  *) pass "install-optional-mcp.sh: 前提不足なら導入を試みない（#219）" ;;
+esac
+
+MCP_MISSING_DRYRUN_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+MCP_MISSING_DRYRUN_EXIT=0
+PATH="$MCP_PATH_WITHOUT_PREREQS" bash "$MCP_INSTALL_SCRIPT" > "$MCP_MISSING_DRYRUN_OUT" 2>&1 \
+  || MCP_MISSING_DRYRUN_EXIT=$?
+assert_exit_code "install-optional-mcp.sh: 前提不足でもdry-runはexit 0（#219）" 0 "$MCP_MISSING_DRYRUN_EXIT"
+
+# --- ケース4: --apply で導入に成功する。導入後 command -v でPATH解決を検証し、
+#     解決できれば[OK]と表示する（完了条件2・6）。2回目の実行では再導入せず
+#     冪等になる（完了条件5。npm/pipの呼び出し回数で検証する） ---
+MCP_APPLY_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-mcp-apply-bin.XXXXXX")"
+MCP_APPLY_TARGET="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-mcp-apply-target.XXXXXX")"
+MCP_APPLY_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-apply-log.XXXXXX")"
+
+cat > "${MCP_APPLY_BIN}/npm" <<SH
+#!/bin/bash
+echo "npm \$*" >> "${MCP_APPLY_LOG}"
+if [ "\$1" = "install" ] && [ "\$2" = "-g" ] && [ "\$3" = "@upstash/context7-mcp" ]; then
+  printf '#!/bin/bash\nexit 0\n' > "${MCP_APPLY_TARGET}/context7-mcp"
+  chmod +x "${MCP_APPLY_TARGET}/context7-mcp"
+  exit 0
+fi
+exit 1
+SH
+chmod +x "${MCP_APPLY_BIN}/npm"
+
+cat > "${MCP_APPLY_BIN}/python3" <<'SH'
+#!/bin/bash
+exit 0
+SH
+chmod +x "${MCP_APPLY_BIN}/python3"
+
+cat > "${MCP_APPLY_BIN}/pip" <<SH
+#!/bin/bash
+echo "pip \$*" >> "${MCP_APPLY_LOG}"
+if [ "\$1" = "install" ] && [ "\$2" = "code-review-graph" ]; then
+  printf '#!/bin/bash\nexit 0\n' > "${MCP_APPLY_TARGET}/code-review-graph"
+  chmod +x "${MCP_APPLY_TARGET}/code-review-graph"
+  exit 0
+fi
+exit 1
+SH
+chmod +x "${MCP_APPLY_BIN}/pip"
+
+MCP_APPLY_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+MCP_APPLY_EXIT=0
+PATH="${MCP_APPLY_BIN}:${MCP_APPLY_TARGET}:${PATH}" bash "$MCP_INSTALL_SCRIPT" --apply \
+  > "$MCP_APPLY_OUT" 2>&1 || MCP_APPLY_EXIT=$?
+
+assert_exit_code "install-optional-mcp.sh: --apply で導入成功ならexit 0（#219）" 0 "$MCP_APPLY_EXIT"
+
+case "$(cat "$MCP_APPLY_OUT")" in
+  *"[OK]"*"context7"*"PATHで解決できました"*) \
+    pass "install-optional-mcp.sh: context7導入後にPATH解決を検証しOKと表示する（#219）" ;;
+  *) fail "install-optional-mcp.sh: context7導入後にPATH解決を検証しOKと表示する（#219）" \
+    "$(cat "$MCP_APPLY_OUT")" ;;
+esac
+
+case "$(cat "$MCP_APPLY_OUT")" in
+  *"[OK]"*"code-review-graph"*"PATHで解決できました"*) \
+    pass "install-optional-mcp.sh: code-review-graph導入後にPATH解決を検証しOKと表示する（#219）" ;;
+  *) fail "install-optional-mcp.sh: code-review-graph導入後にPATH解決を検証しOKと表示する（#219）" \
+    "$(cat "$MCP_APPLY_OUT")" ;;
+esac
+
+MCP_APPLY_LOG_LINES_1="$(wc -l < "$MCP_APPLY_LOG" | tr -d ' ')"
+
+# 2回目の実行（既に導入済み）。再導入コマンドを呼ばず、冪等であること。
+MCP_APPLY_OUT2="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+PATH="${MCP_APPLY_BIN}:${MCP_APPLY_TARGET}:${PATH}" bash "$MCP_INSTALL_SCRIPT" --apply \
+  > "$MCP_APPLY_OUT2" 2>&1
+
+case "$(cat "$MCP_APPLY_OUT2")" in
+  *"[OK]"*"context7"*"既に導入済みです"*) \
+    pass "install-optional-mcp.sh: 導入済み環境で再実行しても既導入と表示する（冪等・#219）" ;;
+  *) fail "install-optional-mcp.sh: 導入済み環境で再実行しても既導入と表示する（冪等・#219）" \
+    "$(cat "$MCP_APPLY_OUT2")" ;;
+esac
+
+MCP_APPLY_LOG_LINES_2="$(wc -l < "$MCP_APPLY_LOG" | tr -d ' ')"
+assert_eq "install-optional-mcp.sh: 導入済みなら2回目はnpm/pipを再度呼ばない（冪等・#219）" \
+  "$MCP_APPLY_LOG_LINES_1" "$MCP_APPLY_LOG_LINES_2"
+
+# --- ケース5: 導入コマンドが失敗しても異常終了せず、NGと表示してexit 2になる
+#     （ネットワーク不通を模擬。完了条件7） ---
+MCP_FAIL_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-mcp-fail-bin.XXXXXX")"
+cat > "${MCP_FAIL_BIN}/npm" <<'SH'
+#!/bin/bash
+echo "network error" >&2
+exit 1
+SH
+chmod +x "${MCP_FAIL_BIN}/npm"
+
+MCP_FAIL_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+MCP_FAIL_EXIT=0
+PATH="${MCP_FAIL_BIN}:${PATH}" bash "$MCP_INSTALL_SCRIPT" --apply --only context7 \
+  > "$MCP_FAIL_OUT" 2>&1 || MCP_FAIL_EXIT=$?
+
+assert_exit_code "install-optional-mcp.sh: 導入コマンド失敗時はexit 2（異常終了しない・#219）" 2 "$MCP_FAIL_EXIT"
+
+case "$(cat "$MCP_FAIL_OUT")" in
+  *"[NG]"*"導入コマンドが失敗しました"*) \
+    pass "install-optional-mcp.sh: 導入コマンド失敗時にNGメッセージが出る（#219）" ;;
+  *) fail "install-optional-mcp.sh: 導入コマンド失敗時にNGメッセージが出る（#219）" \
+    "$(cat "$MCP_FAIL_OUT")" ;;
+esac
+
+# --- ケース6: 導入コマンドは成功したがPATH解決できない場合、その旨を明示してexit 2になる
+#     （完了条件6。pip install --user 相当の典型例） ---
+MCP_UNRESOLVED_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-mcp-unresolved-bin.XXXXXX")"
+cat > "${MCP_UNRESOLVED_BIN}/npm" <<'SH'
+#!/bin/bash
+exit 0
+SH
+chmod +x "${MCP_UNRESOLVED_BIN}/npm"
+
+MCP_UNRESOLVED_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+MCP_UNRESOLVED_EXIT=0
+PATH="${MCP_UNRESOLVED_BIN}:${PATH}" bash "$MCP_INSTALL_SCRIPT" --apply --only context7 \
+  > "$MCP_UNRESOLVED_OUT" 2>&1 || MCP_UNRESOLVED_EXIT=$?
+
+assert_exit_code "install-optional-mcp.sh: 導入後もPATH解決できなければexit 2（#219）" 2 "$MCP_UNRESOLVED_EXIT"
+
+case "$(cat "$MCP_UNRESOLVED_OUT")" in
+  *"[警告]"*"context7-mcp"*"解決できません"*) \
+    pass "install-optional-mcp.sh: 導入後もPATH解決できない旨を明示する（#219）" ;;
+  *) fail "install-optional-mcp.sh: 導入後もPATH解決できない旨を明示する（#219）" \
+    "$(cat "$MCP_UNRESOLVED_OUT")" ;;
+esac
+
+# --- ケース7: 引数バリデーション ---
+MCP_BADONLY_EXIT=0
+bash "$MCP_INSTALL_SCRIPT" --only bogus >/dev/null 2>&1 || MCP_BADONLY_EXIT=$?
+assert_exit_code "install-optional-mcp.sh: --only に不正な値はexit 1（#219）" 1 "$MCP_BADONLY_EXIT"
+
+MCP_BADFLAG_EXIT=0
+bash "$MCP_INSTALL_SCRIPT" --no-such-flag >/dev/null 2>&1 || MCP_BADFLAG_EXIT=$?
+assert_exit_code "install-optional-mcp.sh: 不明な引数はexit 1（#219）" 1 "$MCP_BADFLAG_EXIT"
+
+MCP_HELP_OUT="$(bash "$MCP_INSTALL_SCRIPT" --help 2>&1)"
+MCP_HELP_EXIT=0
+bash "$MCP_INSTALL_SCRIPT" --help >/dev/null 2>&1 || MCP_HELP_EXIT=$?
+assert_exit_code "install-optional-mcp.sh: --help はexit 0（#219）" 0 "$MCP_HELP_EXIT"
+case "$MCP_HELP_OUT" in
+  *"使い方"*) pass "install-optional-mcp.sh: --help に使い方が表示される（#219）" ;;
+  *) fail "install-optional-mcp.sh: --help に使い方が表示される（#219）" "$MCP_HELP_OUT" ;;
+esac
+
+# --- ケース8（完了条件8）: `code-review-graph install --platform claude-code` を使わない
+#     判断とその根拠が、スクリプト・文書のいずれにも記録されている（静的検査）。
+#     ヘッダコメントには判断根拠として文字列そのものへの言及があるため、ファイル全体では
+#     なく実際の導入処理（install_code_review_graph 関数の本体）だけを見て、そこに
+#     呼び出しが紛れ込んでいないことを確認する ---
+MCP_INSTALL_FUNC_BODY="$(sed -n '/^install_code_review_graph()/,/^}/p' "$MCP_INSTALL_SCRIPT")"
+if printf '%s' "$MCP_INSTALL_FUNC_BODY" | grep -qF "install --platform claude-code"; then
+  fail "install-optional-mcp.sh: code-review-graph install --platform claude-codeを実行しない（#219）" \
+    "install_code_review_graph() 関数内に 'install --platform claude-code' の呼び出しが見つかりました: ${MCP_INSTALL_FUNC_BODY}"
+else
+  pass "install-optional-mcp.sh: code-review-graph install --platform claude-codeを実行しない（#219）"
+fi
+
+if grep -qF "install --platform claude-code" "${REPO_ROOT}/docs/optional-mcp-tools.md" \
+  && grep -qF "install-optional-mcp.sh" "${REPO_ROOT}/docs/optional-mcp-tools.md"; then
+  pass "install-optional-mcp.sh: 判断根拠がdocs/optional-mcp-tools.mdに記録されている（#219）"
+else
+  fail "install-optional-mcp.sh: 判断根拠がdocs/optional-mcp-tools.mdに記録されている（#219）" \
+    "docs/optional-mcp-tools.md に 'install --platform claude-code' への言及と 'install-optional-mcp.sh' への参照の両方が必要です"
+fi
+
+# --- ケース9（#224）: 「前提チェックが許容したコマンドと、実際に実行するコマンドが一致する」
+#     という性質を、pip3単体の回帰ケースに限らず候補全体に対して機械的に検査する。候補一覧は
+#     check_code_review_graph_prereqs() が実際に使う detect_code_review_graph_pip_tool() 本体
+#     から動的に抽出する（ハードコードした別一覧を保守すると、候補が増減したときにテストが
+#     追随しなくなるため。issue #224 対応時の指示）。
+MCP_PIP_CANDIDATES="$(sed -n '/^detect_code_review_graph_pip_tool()/,/^}/p' "$MCP_INSTALL_SCRIPT" \
+  | grep -oE 'for candidate in [a-z0-9 ]+' | tail -1 | sed -E 's/^for candidate in //')"
+
+if [ -z "$MCP_PIP_CANDIDATES" ]; then
+  fail "install-optional-mcp.sh: detect_code_review_graph_pip_tool()からpip系候補コマンドの一覧を抽出できる（#224）" \
+    "抽出結果が空でした（スクリプト側のfor文の書き方が変わった可能性があります）"
+else
+  pass "install-optional-mcp.sh: detect_code_review_graph_pip_tool()からpip系候補コマンドの一覧を抽出できる（#224）"
+fi
+
+for pip_tool in $MCP_PIP_CANDIDATES; do
+  MCP_PIPTOOL_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-mcp-piptool-bin.XXXXXX")"
+  MCP_PIPTOOL_TARGET="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-mcp-piptool-target.XXXXXX")"
+  MCP_PIPTOOL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-piptool-log.XXXXXX")"
+
+  cat > "${MCP_PIPTOOL_BIN}/python3" <<'SH'
+#!/bin/bash
+exit 0
+SH
+  chmod +x "${MCP_PIPTOOL_BIN}/python3"
+
+  cat > "${MCP_PIPTOOL_BIN}/${pip_tool}" <<SH
+#!/bin/bash
+echo "${pip_tool} \$*" >> "${MCP_PIPTOOL_LOG}"
+printf '#!/bin/bash\nexit 0\n' > "${MCP_PIPTOOL_TARGET}/code-review-graph"
+chmod +x "${MCP_PIPTOOL_TARGET}/code-review-graph"
+exit 0
+SH
+  chmod +x "${MCP_PIPTOOL_BIN}/${pip_tool}"
+
+  MCP_PIPTOOL_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+  MCP_PIPTOOL_EXIT=0
+  PATH="${MCP_PIPTOOL_BIN}:${MCP_PIPTOOL_TARGET}:${MCP_PATH_WITHOUT_PREREQS}" \
+    bash "$MCP_INSTALL_SCRIPT" --apply --only code-review-graph \
+    > "$MCP_PIPTOOL_OUT" 2>&1 || MCP_PIPTOOL_EXIT=$?
+
+  assert_exit_code "install-optional-mcp.sh: ${pip_tool} のみ存在する環境でcode-review-graphの導入が成功する（#224）" \
+    0 "$MCP_PIPTOOL_EXIT"
+
+  if [ -s "$MCP_PIPTOOL_LOG" ]; then
+    pass "install-optional-mcp.sh: ${pip_tool} のみ存在する環境で前提チェックが許容したコマンド自身が実行される（#224）"
+  else
+    fail "install-optional-mcp.sh: ${pip_tool} のみ存在する環境で前提チェックが許容したコマンド自身が実行される（#224）" \
+      "$(cat "$MCP_PIPTOOL_OUT")"
+  fi
+done
+unset pip_tool
+
+# --- ケース10（#225）: docs/optional-mcp-tools.md のD6に関する説明が、実際の失敗時挙動
+#     （上記ケース5「導入コマンド失敗時はexit 2（異常終了しない・#219）」）と整合している。
+#     「前提コマンドの有無しか見ていない」「ネットワーク不通時は[NG]・exit 2で終了する」という
+#     実挙動どおりの記述になっていることを検査する（旧記述「ネットワークが無い環境でも失敗
+#     しない」を実挙動の再検証なしに書き戻すことへの回帰防止でもある） ---
+DOC225_MCP_DOC="${REPO_ROOT}/docs/optional-mcp-tools.md"
+
+if grep -Fq 'ネットワーク到達性そのものは事前に検証していない' "$DOC225_MCP_DOC"; then
+  pass "docs/optional-mcp-tools.md: 前提チェックはローカルバイナリの有無のみでネットワーク到達性は事前検証しない旨が明記されている（#225）"
+else
+  fail "docs/optional-mcp-tools.md: 前提チェックはローカルバイナリの有無のみでネットワーク到達性は事前検証しない旨が明記されている（#225）" \
+    "docs/optional-mcp-tools.md に『ネットワーク到達性そのものは事前に検証していない』という記述が見つかりません"
+fi
+
+if grep -Fq '`[NG]` メッセージと exit 2 で終了する' "$DOC225_MCP_DOC"; then
+  pass "docs/optional-mcp-tools.md: ネットワーク不通時は[NG]・exit 2で終了する旨が明記されている（#225。install-optional-mcp.shケース5の実挙動と整合）"
+else
+  fail "docs/optional-mcp-tools.md: ネットワーク不通時は[NG]・exit 2で終了する旨が明記されている（#225）" \
+    "docs/optional-mcp-tools.md に『[NG] メッセージと exit 2 で終了する』という記述が見つかりません"
+fi
+
+# --- ケース11（#234）: 「install --platform claude-code は使わない」節（旧#219実装内容の
+#     判断根拠を記録した段落）が、実装の動的検出（pip/pip3/pipx/uvx。#224）と整合している。
+#     #225 と同種の「文書と実装の整合」チェックであり、detect_code_review_graph_pip_tool() の
+#     候補一覧（ケース9で動的抽出した $MCP_PIP_CANDIDATES）をそのまま使って検査する（別途
+#     ハードコードした候補一覧を保守すると候補が増減したときにテストが追随しなくなるため。
+#     #224 と同じ理由。#234 対応時の指示）。文書全体ではなく該当段落だけを対象にする
+#     （他所の記述に引きずられて偽陽性で通ってしまわないように。line 11 の手動導入手順表・
+#     line 440 の設計判断の記録は既に pip3/pipx/uvx へ言及しており、文書全体を対象にすると
+#     この段落自体を直さなくてもテストが通ってしまう）。コマンド文字列が改行をまたぐと単純な
+#     grep -F では見えなくなる（#234 で実際に見落とされた原因）ため、段落抽出後に改行を
+#     スペースへ畳んでから検査する ---
+DOC234_SECTION="$(sed -n '/^\*\*`code-review-graph install --platform claude-code`/,/^## /p' "$DOC225_MCP_DOC" \
+  | tr '\n' ' ')"
+
+if [ -z "$DOC234_SECTION" ]; then
+  fail "docs/optional-mcp-tools.md: 「install --platform claude-code は使わない」段落を抽出できる（#234）" \
+    "抽出結果が空でした（見出し文言が変わった可能性があります）"
+else
+  pass "docs/optional-mcp-tools.md: 「install --platform claude-code は使わない」段落を抽出できる（#234）"
+fi
+
+DOC234_MISSING=""
+for pip_tool in $MCP_PIP_CANDIDATES; do
+  printf '%s' "$DOC234_SECTION" | grep -qF "${pip_tool}" || DOC234_MISSING="${DOC234_MISSING}${pip_tool} "
+done
+if [ -z "$DOC234_MISSING" ]; then
+  pass "docs/optional-mcp-tools.md: 「install --platform claude-code は使わない」段落がdetect_code_review_graph_pip_tool()の全候補（pip/pip3/pipx/uvx）に言及している（#234）"
+else
+  fail "docs/optional-mcp-tools.md: 「install --platform claude-code は使わない」段落がdetect_code_review_graph_pip_tool()の全候補に言及している（#234）" \
+    "言及が見つからない候補: ${DOC234_MISSING}"
+fi
+
+if printf '%s' "$DOC234_SECTION" | grep -qF 'code-review-graph` のみを行う'; then
+  fail "docs/optional-mcp-tools.md: #224修正前の『pip install code-review-graphのみを行う』という記述が残っていない（#234）" \
+    "旧文言（改行をまたいでいるため単純なgrep -Fでは見えない。#234で実際に見落とされた記述）が見つかりました"
+else
+  pass "docs/optional-mcp-tools.md: #224修正前の『pip install code-review-graphのみを行う』という記述が残っていない（#234）"
+fi
+
+# ---------------------------------------------------------------------------
+# skills/setup/SKILL.md: 診断・導入・整備を束ねるユーザー向けスキル（Task #221）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== skills/setup/SKILL.md（診断・導入・整備を束ねるユーザー向けスキル、#221） =="
+
+SETUP_SKILL="${REPO_ROOT}/skills/setup/SKILL.md"
+
+if [ -f "$SETUP_SKILL" ]; then
+  pass "skills/setup/SKILL.md: ファイルが存在する（#221）"
+else
+  fail "skills/setup/SKILL.md: ファイルが存在する（#221）"
+fi
+
+if grep -qF -- '---' "$SETUP_SKILL" && grep -qE '^name: setup$' "$SETUP_SKILL"; then
+  pass "skills/setup/SKILL.md: frontmatterにname: setupがある（#221）"
+else
+  fail "skills/setup/SKILL.md: frontmatterにname: setupがある（#221）"
+fi
+
+# --- 3スクリプトを呼び出す（判定・導入コマンドを再実装しない） ---
+for _setup_ref in 'scripts/doctor.sh' 'scripts/install-optional-mcp.sh' 'scripts/sandbox-exec.sh" --init'; do
+  if grep -qF -- "$_setup_ref" "$SETUP_SKILL"; then
+    pass "skills/setup/SKILL.md: ${_setup_ref} を呼び出している（#221）"
+  else
+    fail "skills/setup/SKILL.md: ${_setup_ref} を呼び出している（#221）"
+  fi
+done
+
+# --- 完了条件: 必須依存不足時は自動導入を試みず案内で停止する ---
+if grep -qF '自動導入は行わない' "$SETUP_SKILL"; then
+  pass "skills/setup/SKILL.md: 必須依存不足時に自動導入を試みない旨が明記されている（#221）"
+else
+  fail "skills/setup/SKILL.md: 必須依存不足時に自動導入を試みない旨が明記されている（#221）"
+fi
+
+# --- 完了条件: 任意MCPの導入が利用者の明示的な選択なしには実行されない（既定dry-run + --apply） ---
+case "$(cat "$SETUP_SKILL")" in
+  *'利用者が明示的に選んだ場合に限り'*'--apply'*)
+    pass "skills/setup/SKILL.md: 任意MCPの導入は利用者の明示的な選択がある場合に限る（#221）" ;;
+  *)
+    fail "skills/setup/SKILL.md: 任意MCPの導入は利用者の明示的な選択がある場合に限る（#221）" ;;
+esac
+
+# --- 完了条件: 「任意依存を入れない」という選択が正当な結末として記述されている ---
+if grep -qF '任意依存を入れない」という選択も正当な結末である' "$SETUP_SKILL"; then
+  pass "skills/setup/SKILL.md: 「任意依存を入れない」選択が正当な結末として記述されている（#221）"
+else
+  fail "skills/setup/SKILL.md: 「任意依存を入れない」選択が正当な結末として記述されている（#221）"
+fi
+
+# --- 完了条件: setupを実行していない環境でもrunが従来どおり動く（D5、runの前提にしない） ---
+if grep -qF 'setup は run の前提ではない' "$SETUP_SKILL"; then
+  pass "skills/setup/SKILL.md: setupがrunの前提ではないと明記されている（D5、#221）"
+else
+  fail "skills/setup/SKILL.md: setupがrunの前提ではないと明記されている（D5、#221）"
+fi
+
+# --- 完了条件: check-prerequisites.shを置き換えない ---
+if grep -qF 'check-prerequisites.sh' "$SETUP_SKILL" && grep -qF 'を置き換えない' "$SETUP_SKILL"; then
+  pass "skills/setup/SKILL.md: check-prerequisites.shを置き換えない旨が明記されている（#221）"
+else
+  fail "skills/setup/SKILL.md: check-prerequisites.shを置き換えない旨が明記されている（#221）"
+fi
+
+# --- 完了条件: plugin.jsonにスキルが登録され（keywordsにsetupが追加され）、JSONとして妥当 ---
+SETUP_CLAUDE_PLUGIN_JSON="${REPO_ROOT}/.claude-plugin/plugin.json"
+if _hj_json_syntax_ok "$SETUP_CLAUDE_PLUGIN_JSON"; then
+  pass ".claude-plugin/plugin.json: 変更後もJSON構文として妥当（括弧の対応が取れている）（#221）"
+else
+  fail ".claude-plugin/plugin.json: 変更後もJSON構文として妥当（括弧の対応が取れている）（#221）"
+fi
+
+if grep -qF '"setup"' "$SETUP_CLAUDE_PLUGIN_JSON"; then
+  pass ".claude-plugin/plugin.json: keywordsにsetupが追加されている（#221）"
+else
+  fail ".claude-plugin/plugin.json: keywordsにsetupが追加されている（#221）"
+fi
+
+# --- 完了条件: README.mdに導線がある ---
+if grep -qF '/dev-workflow:setup' "${REPO_ROOT}/README.md"; then
+  pass "README.md: /dev-workflow:setup への導線がある（#221）"
+else
+  fail "README.md: /dev-workflow:setup への導線がある（#221）"
 fi
 
 # ---------------------------------------------------------------------------
