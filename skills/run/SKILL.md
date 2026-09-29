@@ -396,6 +396,15 @@ echo "$PLAN"
   該当タスクの宣言漏れ・不明な依存を報告に含める（fail-safeで完全逐次扱いになっている旨も明記）
 - `warn missing-deps-summary <件数> <対象タスク数> <実効並列度> <指定lanes>` が出力に含まれる場合、
   この集計行（宣言漏れの件数・実効並列度が指定lanesからどれだけ落ちたか）も報告に含める
+- `warn missing-files <番号>` が出力に含まれる場合、該当タスクに「## 対象ファイル」節が無い旨を
+  報告に含める（`- 前提:` の宣言漏れと同じ扱い。`core/roles/planner.md`「対象ファイル宣言
+  （`## 対象ファイル`）の必須化」参照）
+- `warn file-overlap <番号> <相手番号> <ファイル>` / `warn file-overlap-summary <件数> <対象タスク数>
+  <実効並列度> <指定lanes>` が出力に含まれる場合（Task #216）、対象ファイルの重なりでサブバッチが
+  分割されたタスクの組・ファイル名、および分割によって実効並列度が指定lanesから落ちたことを
+  報告に含める。**この宣言は実装前の見積もりであり、宣言が重ならない（あるいは無い）からといって
+  実際の競合が起きない保証にはならない。** `merge-lane.sh` の exit 11 による事後検出（共通ルール
+  「失敗時の扱い」参照）は従来どおり有効であり、`plan-waves.sh` の事前編成はそれを代替しない
 - 出力に `wave` 行が無い（＝全タスク完了）→ ループを終了し **「Epic一括レビュー」** へ進む
 - `wave 1 tasks 4,5,10` のような行から、今回処理するタスク番号の集合を取り出す。各タスクの
   `subbatch` 列（`task` 行）を見て、**レーンへ割り当てる**: レーン L には各サブバッチの
@@ -893,11 +902,31 @@ git -C "$EPIC_WT" checkout "${EPIC_BRANCH}"
 cd "$EPIC_WT"
 EPIC_GATE_START_SEC=$(date +%s)   # 「Epic統合ゲート」フェーズの計測開始
 
-# 1) テスト（Docker sandbox内）— 1回にまとめる。落ちたら不合格
+# 1) テスト（Docker sandbox内）— 1回にまとめる。落ちたら不合格。
+# フルスイートは20〜35分に及ぶことがあり、前景実行のままだと実行系のタイムアウトで
+# 打ち切られる（issue #214。makimaki-sso Epic #1 で手組みのnohup/disown/ポーリングを
+# 6回組み直す事故があった）。--detach で切り離し起動し、--wait で完了を待つ。
+# --wait はそれ自体が完了マーカーをポーリングして返るので、run 側でポーリングループを
+# 新たに書く必要は無い（issue #140と同じ制約）。--wait は長時間かかりうるため、
+# Bashツールを run_in_background: true で呼び、通知を受けてから処理を続ける
+# （generatorと異なりrunはセッションが継続するため、issue #138の「通知待ちで停止しない」
+# 制約は適用されない。通知を待ってよい）。run_in_background: true の呼び出しは
+# 元のBash呼び出しとは別のシェルになるため、$EPIC_NUM / $EPIC_GATE_TEST_LOG が
+# そのシェルにも引き継がれている前提で書かない。値を直接埋め込むか、その呼び出しの中で
+# 再導出すること。
 # 固定パスは複数ウェーブ・並列実行間で衝突しうるため mktemp で一意化する（issue #145）
 EPIC_GATE_TEST_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-epic-gate-test-output.XXXXXX")"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" '[全テストを走らせるコマンド]' \
-  2>&1 | tee "$EPIC_GATE_TEST_LOG"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" --detach \
+  --handle epic-gate '[全テストを走らせるコマンド]'
+# 上のBash呼び出しは即座に返る。続けて下のBash呼び出しを run_in_background: true で発行し、
+# 完了通知を待つ（sandbox-exec.shの--waitはコマンドの終了コードをそのまま返す契約なので、
+# 機械的ゲートの判定に使える）。ただし `--wait ... | tee ...` のように単純にパイプへ流すと、
+# パイプライン全体の終了コードは最後のコマンド（tee、ほぼ常に0）のものになり、--waitの
+# 終了コードが失われる（issue #228。#214の設計上の注意「終了コードを失わないこと」への回帰）。
+# PIPESTATUSで明示的に取り出し、GATE_RCとして保持してから合否判定に使うこと
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" --wait \
+  --handle epic-gate 2>&1 | tee "$EPIC_GATE_TEST_LOG"
+GATE_RC=${PIPESTATUS[0]}
 
 # 1b) SKIP件数はレーンの自己申告に依存せず、run自身がcount-skips.shで機械的に数える。
 #     0件でも必ず表示する（黙って省略しない）
@@ -910,6 +939,11 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-readability.sh" --git
 EPIC_GATE_END_SEC=$(date +%s)
 EPIC_GATE_SEC=$((EPIC_GATE_END_SEC - EPIC_GATE_START_SEC))
 ```
+
+**合否は `$GATE_RC` で判定する。** `tee` 越しの標準出力にテスト失敗の文字列が見えていても、
+`$GATE_RC` を読み落として「出力に FAIL が無かったから合格」と誤読しない。
+`$GATE_RC` が非0、または `check-readability.sh --git` が非0で終了した場合は
+不合格として扱い、下記「失敗時の扱い」へ進む。
 
 **フルスイートを走らせるのはここだけである**（「機械的ゲートの三段構成」節）。ウェーブ末の
 取り込み検証は可読性ガードとmerge-base検証しか行わないため、**回帰の判定はこのEpic統合ゲートが

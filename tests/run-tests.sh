@@ -330,6 +330,31 @@ case "$FIRST_CACHE_LINE" in
   *) fail "cache_volume の命名がリポジトリ単位である" "実際の1行目: ${FIRST_CACHE_LINE}" ;;
 esac
 
+# terraform の plugin cache が既定の cache_volume に含まれること（issue #213 完了条件1）。
+TF_CACHE_LINE="$(printf '%s\n' "$PRINT_PLAN_OUTPUT" | grep '^cache_volume=.*:/root/.terraform.d/plugin-cache$')"
+if [ -n "$TF_CACHE_LINE" ]; then
+  pass "cache_volume に terraform の plugin cache が既定で含まれる（issue #213）"
+else
+  fail "cache_volume に terraform の plugin cache が既定で含まれる（issue #213）" "cache_volume一覧:\n${PRINT_PLAN_OUTPUT}"
+fi
+
+# DEV_WORKFLOW_CACHE_PATHS で terraform を含まない値に上書きした場合、terraform 用の
+# cache_volume は出ない（issue #213 完了条件4: 上書きが従来どおり機能する）。
+TF_OVERRIDE_PLAN_OUTPUT="$(
+  cd "$PRINT_PLAN_REPO" || exit 1
+  DEV_WORKFLOW_CACHE_PATHS="/root/.cache/go-build" \
+    DOCKER_CALLED_MARKER="$DOCKER_CALLED_MARKER" PATH="${FAKE_BIN_DIR}:${PATH}" \
+    bash scripts/sandbox-exec.sh --print-plan
+)"
+TF_OVERRIDE_CACHE_COUNT="$(printf '%s\n' "$TF_OVERRIDE_PLAN_OUTPUT" | grep -c '^cache_volume=')"
+TF_OVERRIDE_TF_LINE="$(printf '%s\n' "$TF_OVERRIDE_PLAN_OUTPUT" | grep '^cache_volume=.*:/root/.terraform.d/plugin-cache$' || true)"
+if [ "$TF_OVERRIDE_CACHE_COUNT" = "1" ] && [ -z "$TF_OVERRIDE_TF_LINE" ]; then
+  pass "DEV_WORKFLOW_CACHE_PATHS でterraformを含まない値に上書きするとterraformのcache_volumeが出ない（issue #213）"
+else
+  fail "DEV_WORKFLOW_CACHE_PATHS でterraformを含まない値に上書きするとterraformのcache_volumeが出ない（issue #213）" \
+    "count=${TF_OVERRIDE_CACHE_COUNT} tf_line=[${TF_OVERRIDE_TF_LINE}]"
+fi
+
 # --epic 指定時にコンテナ名へ反映されることも、この段階の挙動として確認しておく。
 PRINT_PLAN_EPIC_OUTPUT="$(
   cd "$PRINT_PLAN_REPO" || exit 1
@@ -1301,6 +1326,15 @@ case "$IMG_A_RUN_LINE" in
     fail "イメージ未存在時: docker run に -v <mount_source>:/workspace が渡る（issue #30）" "run_line=[${IMG_A_RUN_LINE}]" ;;
 esac
 
+# terraform の plugin cache は volume 化するだけでは使われず、TF_PLUGIN_CACHE_DIR を
+# 明示的に env で渡す必要がある（issue #213 完了条件2）。
+case "$IMG_A_RUN_LINE" in
+  *"-e TF_PLUGIN_CACHE_DIR=/root/.terraform.d/plugin-cache"*)
+    pass "イメージ未存在時: docker run に -e TF_PLUGIN_CACHE_DIR=<path> が渡る（issue #213）" ;;
+  *)
+    fail "イメージ未存在時: docker run に -e TF_PLUGIN_CACHE_DIR=<path> が渡る（issue #213）" "run_line=[${IMG_A_RUN_LINE}]" ;;
+esac
+
 IMG_A_EXEC_WORKDIR="$(head -n1 "$IMG_TEST_EXEC_LOG")"
 assert_eq "イメージ未存在時: docker exec に解決済み workdir が -w で渡る（issue #30）" \
   "$IMG_WORKDIR" "$IMG_A_EXEC_WORKDIR"
@@ -1312,6 +1346,44 @@ assert_exit_code "イメージ存在時: 実行全体が成功する" 0 "$IMG_B_
 
 IMG_B_BUILD_COUNT="$(grep -c '^build ' "$IMG_TEST_LOG" || true)"
 assert_eq "イメージ存在時: docker build を呼ばない" "0" "$IMG_B_BUILD_COUNT"
+
+# --- DEV_WORKFLOW_CACHE_PATHS で terraform を含まない値に上書きした場合、
+#     docker run に -e TF_PLUGIN_CACHE_DIR が渡らない（issue #213 完了条件4） ---
+: > "$IMG_TEST_LOG"
+: > "$IMG_TEST_RM_LOG"
+: > "$IMG_TEST_RUN_LOG"
+: > "$IMG_TEST_EXEC_LOG"
+printf '0' > "$IMG_TEST_STATE_FILE"
+printf 'false\n' > "$IMG_TEST_RUNNING_FILE"
+
+IMG_TF_OVERRIDE_EXIT=0
+(
+  cd "$IMG_REPO" || exit 1
+  DEV_WORKFLOW_CACHE_PATHS="/root/.cache/go-build" \
+    DEV_WORKFLOW_STAMP_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-imgstamp.XXXXXX")" \
+    DW_IMG_LOG="$IMG_TEST_LOG" \
+    DW_IMG_RM_LOG="$IMG_TEST_RM_LOG" \
+    DW_IMG_RUN_LOG="$IMG_TEST_RUN_LOG" \
+    DW_IMG_EXEC_LOG="$IMG_TEST_EXEC_LOG" \
+    DW_IMG_CONTAINER_STATE="$IMG_TEST_STATE_FILE" \
+    DW_IMG_CONTAINER_RUNNING_STATE="$IMG_TEST_RUNNING_FILE" \
+    DW_IMG_CONTAINER_IMAGE_ID="" \
+    DW_IMG_CONTAINER_MOUNT="" \
+    DW_IMG_IMAGE_EXISTS=1 \
+    DW_IMG_IMAGE_ID="sha256:existing" \
+    PATH="${FAKE_DOCKER_IMAGE_DIR}:${PATH}" \
+    bash scripts/sandbox-exec.sh 'true'
+) >/dev/null 2>&1 || IMG_TF_OVERRIDE_EXIT=$?
+assert_exit_code "DEV_WORKFLOW_CACHE_PATHS上書き時: 実行全体が成功する（issue #213）" 0 "$IMG_TF_OVERRIDE_EXIT"
+
+IMG_TF_OVERRIDE_RUN_LINE="$(head -n1 "$IMG_TEST_RUN_LOG")"
+case "$IMG_TF_OVERRIDE_RUN_LINE" in
+  *"TF_PLUGIN_CACHE_DIR"*)
+    fail "DEV_WORKFLOW_CACHE_PATHSでterraformを含まない値に上書きするとTF_PLUGIN_CACHE_DIRが渡らない（issue #213）" \
+      "run_line=[${IMG_TF_OVERRIDE_RUN_LINE}]" ;;
+  *)
+    pass "DEV_WORKFLOW_CACHE_PATHSでterraformを含まない値に上書きするとTF_PLUGIN_CACHE_DIRが渡らない（issue #213）" ;;
+esac
 
 # --- --rebuild 指定時は存在してもビルドする ---
 IMG_C_EXIT=0
@@ -1590,6 +1662,93 @@ if [ -f "$STAMP_PLAN_MARKER" ]; then
   fail "スタンプ: --print-plan はスタンプ有効時も docker を起動しない" "docker が呼ばれました: $(cat "$STAMP_PLAN_MARKER")"
 else
   pass "スタンプ: --print-plan はスタンプ有効時も docker を起動しない"
+fi
+
+# ---------------------------------------------------------------------------
+# dockerfile モードのフル検証経路 + --detach/--wait（issue #227）
+#
+# fast path（スタンプ完全一致）だけでなく、スタンプ不在で必ずフル検証に落ちる経路
+# （初回実行相当）でも --detach が無視されず、マーカーが作られて即座に返ることを検証する。
+# ---------------------------------------------------------------------------
+
+echo "== dockerfileモードのフル検証経路 + --detach/--wait（#227） =="
+
+IMG_DETACH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-imgdetachhome.XXXXXX")"
+IMG_DETACH_STAMP_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-imgdetachstamp.XXXXXX")"
+
+: > "$IMG_TEST_LOG"
+: > "$IMG_TEST_RM_LOG"
+: > "$IMG_TEST_RUN_LOG"
+: > "$IMG_TEST_EXEC_LOG"
+printf '0' > "$IMG_TEST_STATE_FILE"
+printf 'false\n' > "$IMG_TEST_RUNNING_FILE"
+
+# --- ケース1: スタンプ不在（＝必ずフル検証）でも --detach は即座に返る ---
+IMG_DETACH_START=$(date +%s)
+IMG_DETACH_OUTPUT="$(
+  cd "$IMG_REPO" || exit 1
+  DEV_WORKFLOW_STAMP_HOME="$IMG_DETACH_STAMP_HOME" \
+    DEV_WORKFLOW_DETACH_HOME="$IMG_DETACH_HOME" \
+    DW_IMG_LOG="$IMG_TEST_LOG" \
+    DW_IMG_RM_LOG="$IMG_TEST_RM_LOG" \
+    DW_IMG_RUN_LOG="$IMG_TEST_RUN_LOG" \
+    DW_IMG_EXEC_LOG="$IMG_TEST_EXEC_LOG" \
+    DW_IMG_CONTAINER_STATE="$IMG_TEST_STATE_FILE" \
+    DW_IMG_CONTAINER_RUNNING_STATE="$IMG_TEST_RUNNING_FILE" \
+    DW_IMG_IMAGE_EXISTS=1 \
+    DW_IMG_IMAGE_ID="sha256:detach-full" \
+    PATH="${FAKE_DOCKER_IMAGE_DIR}:${PATH}" \
+    bash scripts/sandbox-exec.sh --epic epic227detach --detach --handle fullverify \
+      'sleep 3 && echo hello-from-fullverify-detach'
+)"
+IMG_DETACH_LAUNCH_EXIT=$?
+IMG_DETACH_END=$(date +%s)
+IMG_DETACH_ELAPSED=$((IMG_DETACH_END - IMG_DETACH_START))
+
+assert_exit_code "dockerfileモード(フル検証)+--detach: 起動コマンド自体は成功（exit 0）で返る（#227）" \
+  0 "$IMG_DETACH_LAUNCH_EXIT"
+
+if [ "$IMG_DETACH_ELAPSED" -lt 3 ]; then
+  pass "dockerfileモード(フル検証)+--detach: 3秒かかるコマンドでも呼び出しは即座に返る（経過${IMG_DETACH_ELAPSED}秒、#227）"
+else
+  fail "dockerfileモード(フル検証)+--detach: 3秒かかるコマンドでも呼び出しは即座に返る（#227）" \
+    "経過=${IMG_DETACH_ELAPSED}秒（3秒以上＝前景実行のまま＝run_and_reportが置き換わっていない）"
+fi
+
+case "$IMG_DETACH_OUTPUT" in
+  *"handle=fullverify"*) pass "dockerfileモード(フル検証)+--detach: 出力にhandle名が含まれる（#227）" ;;
+  *) fail "dockerfileモード(フル検証)+--detach: 出力にhandle名が含まれる（#227）" "output=[${IMG_DETACH_OUTPUT}]" ;;
+esac
+
+# --- ケース2: フル検証経路でもマーカーディレクトリ（running）が即座に作られる ---
+IMG_DETACH_DIR="${IMG_DETACH_HOME}/$(basename "$IMG_REPO")-epic227detach/fullverify"
+if [ -f "${IMG_DETACH_DIR}/running" ] && [ ! -f "${IMG_DETACH_DIR}/exit_code" ]; then
+  pass "dockerfileモード(フル検証)+--detach: マーカーディレクトリが即座に作られる（#227）"
+else
+  fail "dockerfileモード(フル検証)+--detach: マーカーディレクトリが即座に作られる（#227）" \
+    "dir=${IMG_DETACH_DIR} running=$([ -f "${IMG_DETACH_DIR}/running" ] && echo yes || echo no) exit_code=$([ -f "${IMG_DETACH_DIR}/exit_code" ] && echo yes || echo no)"
+fi
+
+# --- ケース3: --wait で完了を待ち、終了コード・ログとも取得できる ---
+IMG_DETACH_WAIT_OUTPUT="$(
+  cd "$IMG_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$IMG_DETACH_HOME" DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    bash scripts/sandbox-exec.sh --epic epic227detach --wait --handle fullverify
+)"
+IMG_DETACH_WAIT_EXIT=$?
+assert_exit_code "dockerfileモード(フル検証)+--wait: 完了したコマンドの終了コード(0)を返す（#227）" \
+  0 "$IMG_DETACH_WAIT_EXIT"
+
+case "$IMG_DETACH_WAIT_OUTPUT" in
+  *"hello-from-fullverify-detach"*) pass "dockerfileモード(フル検証)+--wait: 完了後にログ（標準出力）が読める（#227）" ;;
+  *) fail "dockerfileモード(フル検証)+--wait: 完了後にログ（標準出力）が読める（#227）" "output=[${IMG_DETACH_WAIT_OUTPUT}]" ;;
+esac
+
+if [ -f "${IMG_DETACH_DIR}/exit_code" ] && [ ! -f "${IMG_DETACH_DIR}/running" ]; then
+  pass "dockerfileモード(フル検証)+--wait後: 完了後はexit_codeのみが存在する（#227）"
+else
+  fail "dockerfileモード(フル検証)+--wait後: 完了後はexit_codeのみが存在する（#227）" \
+    "running=$([ -f "${IMG_DETACH_DIR}/running" ] && echo yes || echo no) exit_code=$([ -f "${IMG_DETACH_DIR}/exit_code" ] && echo yes || echo no)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -3539,6 +3698,236 @@ if printf '%s\n' "$PW_GH_OUTPUT" | grep -q '^task	400	'; then
 else
   pass "gh モード: 「- Epic: なし（単発タスク）」の #400 は除外される（#208）"
 fi
+
+# ---------------------------------------------------------------------------
+# plan-waves.sh: 対象ファイルの重なりによるサブバッチ分割（Task #216）
+#
+# --from-file の4列目（対象ファイル、カンマ区切り）を使う。空文字列は「## 対象ファイル」節が
+# 無い＝宣言漏れを意味する（3列目の前提行と同じ規約）。
+# ---------------------------------------------------------------------------
+
+echo "== plan-waves.sh（対象ファイルの重なりによるサブバッチ分割、Task #216） =="
+
+# --- ケース14: makimaki-sso Epic #1 ウェーブ11相当の入力（#11,#12,#13が全てops/verify.shで
+#     重なる）で3本が別サブバッチに分かれる。依存関係は無い（全て「- 前提: なし」）ため、
+#     ウェーブの決定（依存グラフ）はサブバッチ分割の影響を受けないことも合わせて確認する ---
+PW216_OVERLAP_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw216-overlap.XXXXXX")"
+{
+  printf '11\topen\t- 前提: なし\tops/verify.sh\n'
+  printf '12\topen\t- 前提: なし\tdocs/runbook.md,ops/verify.sh\n'
+  printf '13\topen\t- 前提: なし\tops/verify.sh,zitadel/terraform/variables.tf\n'
+} > "$PW216_OVERLAP_FIXTURE"
+
+PW216_OVERLAP_OUTPUT="$(bash "$PLAN_WAVES_SCRIPT" --from-file "$PW216_OVERLAP_FIXTURE" --lanes 3)"
+
+assert_eq "#216 makimaki-sso再現: #11,#12,#13は同一ウェーブ1のまま（依存グラフは変わらない）" \
+  "11,12,13" "$(pw_wave_tasks 1 "$PW216_OVERLAP_OUTPUT")"
+assert_eq "#216 makimaki-sso再現: #11はsubbatch1" "1" "$(pw_value 11 subbatch "$PW216_OVERLAP_OUTPUT")"
+assert_eq "#216 makimaki-sso再現: #12はsubbatch2（#11のops/verify.shと重なるため分割）" \
+  "2" "$(pw_value 12 subbatch "$PW216_OVERLAP_OUTPUT")"
+assert_eq "#216 makimaki-sso再現: #13はsubbatch3（#11,#12双方のops/verify.shと重なるため分割）" \
+  "3" "$(pw_value 13 subbatch "$PW216_OVERLAP_OUTPUT")"
+assert_eq "#216: 依存グラフ（deps列）は対象ファイルの重なりの影響を受けない（#12のdepsは空のまま）" \
+  "" "$(pw_value 12 deps "$PW216_OVERLAP_OUTPUT")"
+
+assert_eq "#216: file-overlap警告に#12と#11がops/verify.shで重なった旨が出る" "1" \
+  "$(printf '%s\n' "$PW216_OVERLAP_OUTPUT" | grep -c '^warn	file-overlap	12	11	ops/verify.sh$')"
+assert_eq "#216: file-overlap-summaryで実効並列度1・指定lanes3が出る" "1" \
+  "$(printf '%s\n' "$PW216_OVERLAP_OUTPUT" | grep -c '^warn	file-overlap-summary	2	3	1	3$')"
+
+PW216_OVERLAP_PRINT="$(bash "$PLAN_WAVES_SCRIPT" --from-file "$PW216_OVERLAP_FIXTURE" --lanes 3 --print)"
+case "$PW216_OVERLAP_PRINT" in
+  *"#12 と #11（ops/verify.sh）"*)
+    pass "#216 --print: 対象ファイルの重なりの理由（誰と・どのファイルで）が人間可読に出る" ;;
+  *) fail "#216 --print: 対象ファイルの重なりの理由（誰と・どのファイルで）が人間可読に出る" \
+    "output=[${PW216_OVERLAP_PRINT}]" ;;
+esac
+case "$PW216_OVERLAP_PRINT" in
+  *"実効並列度は 1 です（指定 lanes=3）"*)
+    pass "#216 --print: 分割による実効並列度の低下が人間可読に出る" ;;
+  *) fail "#216 --print: 分割による実効並列度の低下が人間可読に出る" "output=[${PW216_OVERLAP_PRINT}]" ;;
+esac
+case "$PW216_OVERLAP_PRINT" in
+  *"実装前の見積もり"*"競合が起きない保証にはなりません"*)
+    pass "#216 --print: 宣言は見積もりであり競合の保証ではない旨が出る" ;;
+  *) fail "#216 --print: 宣言は見積もりであり競合の保証ではない旨が出る" "output=[${PW216_OVERLAP_PRINT}]" ;;
+esac
+
+# --- ケース15: 対象ファイルが重ならない2タスクは従来どおり同一サブバッチに入る ---
+PW216_NOOVERLAP_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw216-nooverlap.XXXXXX")"
+{
+  printf '21\topen\t- 前提: なし\tscripts/a.sh\n'
+  printf '22\topen\t- 前提: なし\tscripts/b.sh\n'
+} > "$PW216_NOOVERLAP_FIXTURE"
+
+PW216_NOOVERLAP_OUTPUT="$(bash "$PLAN_WAVES_SCRIPT" --from-file "$PW216_NOOVERLAP_FIXTURE" --lanes 3)"
+assert_eq "#216: 対象ファイルが重ならない#21,#22は同一subbatch1に入る（#21）" \
+  "1" "$(pw_value 21 subbatch "$PW216_NOOVERLAP_OUTPUT")"
+assert_eq "#216: 対象ファイルが重ならない#21,#22は同一subbatch1に入る（#22）" \
+  "1" "$(pw_value 22 subbatch "$PW216_NOOVERLAP_OUTPUT")"
+if printf '%s\n' "$PW216_NOOVERLAP_OUTPUT" | grep -q '^warn	file-overlap'; then
+  fail "#216: 重ならないタスクにはfile-overlap警告が出ない" "output=[${PW216_NOOVERLAP_OUTPUT}]"
+else
+  pass "#216: 重ならないタスクにはfile-overlap警告が出ない"
+fi
+
+# --- ケース16: 「## 対象ファイル」節が無い既存Epic（PW_EPIC3_FIXTUREを再利用。4列目は
+#     元々省略されている）で、現行と同一の編成になる（後方互換）。ケース1・2で確認済みの
+#     wave/subbatchアサーションがこのまま通り続けることが後方互換の証拠であり、ここでは
+#     追加で missing-files 警告が宣言漏れとして出ることも確認する ---
+assert_eq "#216: 「## 対象ファイル」節が無い既存フィクスチャでも#5はsubbatch1のまま（後方互換）" \
+  "1" "$(pw_value 5 subbatch "$PW_LANES2_OUTPUT")"
+assert_eq "#216: 「## 対象ファイル」節が無い既存フィクスチャでも#11はsubbatch2のまま（後方互換）" \
+  "2" "$(pw_value 11 subbatch "$PW_LANES2_OUTPUT")"
+assert_eq "#216: 「## 対象ファイル」節が無いタスク全件にmissing-files警告が出る（#4〜#13の10件）" \
+  "10" "$(printf '%s\n' "$PW_EPIC3_OUTPUT" | grep -c '^warn	missing-files	')"
+
+# --- ケース17: 片方が宣言漏れ・もう片方が対象ファイルを宣言している場合は安全側に倒し
+#     別サブバッチへ分割する ---
+PW216_MIXED_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw216-mixed.XXXXXX")"
+{
+  printf '31\topen\t- 前提: なし\tscripts/a.sh\n'
+  printf '32\topen\t- 前提: なし\t\n'
+} > "$PW216_MIXED_FIXTURE"
+
+PW216_MIXED_OUTPUT="$(bash "$PLAN_WAVES_SCRIPT" --from-file "$PW216_MIXED_FIXTURE" --lanes 3)"
+assert_eq "#216: 片方が宣言漏れの場合は安全側に倒し別サブバッチへ分割する（#31）" \
+  "1" "$(pw_value 31 subbatch "$PW216_MIXED_OUTPUT")"
+assert_eq "#216: 片方が宣言漏れの場合は安全側に倒し別サブバッチへ分割する（#32）" \
+  "2" "$(pw_value 32 subbatch "$PW216_MIXED_OUTPUT")"
+assert_eq "#216: #32にmissing-files警告が出る" "1" \
+  "$(printf '%s\n' "$PW216_MIXED_OUTPUT" | grep -c '^warn	missing-files	32$')"
+
+# --- ケース18: gh モードでも「## 対象ファイル」節を同じ jq 呼び出しで抽出できる（API呼び出しを
+#     増やさない）。#600（対象ファイル宣言あり）と#601（節が無い＝宣言漏れ）を混在させ、
+#     安全側の分割（ケース17と同じ規則）が効くことで抽出が正しく行われたことを間接確認する ---
+PW216_GH_FAKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-pw216-ghfake.XXXXXX")"
+PW216_GH_CALL_MARKER="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw216-ghcall.XXXXXX")"
+cat > "${PW216_GH_FAKE_DIR}/gh" <<'FAKE_GH216'
+#!/bin/bash
+US=$'\x1f'
+# gh 呼び出し1回につき1行のマーカーを積む（$* にはjqプログラムの改行が含まれるため、
+# wc -l で数えると1回の呼び出しでも複数行に見えてしまう。呼び出し回数はこのマーカー行数で数える）
+printf '===CALL===\n' >> "${PW216_GH_CALL_MARKER}"
+case "$*" in
+  *"issue list --label task --state open"*)
+    printf '600%s- 前提: なし%s- Epic: #14%sscripts/a.sh,scripts/b.sh\n' "$US" "$US" "$US"
+    printf '601%s- 前提: なし%s- Epic: #14%s\n' "$US" "$US" "$US"
+    ;;
+esac
+FAKE_GH216
+chmod +x "${PW216_GH_FAKE_DIR}/gh"
+
+PW216_GH_OUTPUT="$(PATH="${PW216_GH_FAKE_DIR}:${PATH}" PW216_GH_CALL_MARKER="$PW216_GH_CALL_MARKER" bash "$PLAN_WAVES_SCRIPT" --epic 14)"
+PW216_GH_CALL_COUNT="$(grep -c '^===CALL===$' "$PW216_GH_CALL_MARKER")"
+
+assert_eq "#216 gh モード: issue list の呼び出しは1回のまま（API呼び出しを増やさない）" "1" "$PW216_GH_CALL_COUNT"
+assert_eq "#216 gh モード: #600(対象ファイル宣言あり)はsubbatch1" \
+  "1" "$(pw_value 600 subbatch "$PW216_GH_OUTPUT")"
+assert_eq "#216 gh モード: #601(節が無い)は安全側に倒され別subbatch2へ分割される" \
+  "2" "$(pw_value 601 subbatch "$PW216_GH_OUTPUT")"
+assert_eq "#216 gh モード: #601にmissing-files警告が出る" "1" \
+  "$(printf '%s\n' "$PW216_GH_OUTPUT" | grep -c '^warn	missing-files	601$')"
+
+# ---------------------------------------------------------------------------
+# plan-waves.sh: #230（満杯サブバッチ経由で重なり判定がスキップされ並列実行される不具合の修正）
+#
+# issue本文の実測ケースをそのまま再現する: --lanes 2 で #1=a.txt, #2=b.txt, #3=b.txt を
+# 与えると、旧実装ではサブバッチ1が{#1,#2}で満杯（lanes=2）になり、#3を配置しようとした際
+# サブバッチ1は「空きが無い」ため重なり判定自体がスキップされる。結果、#2はsubbatch1
+# （レーンB）、#3はsubbatch2（レーンA）に分かれ、b.txtを共有するにもかかわらず並列実行
+# されてしまっていた（warn file-overlapも出ないため人間が気付く手段も無かった）。
+# ---------------------------------------------------------------------------
+
+echo "== plan-waves.sh（#230: 満杯サブバッチ経由の重なり検出漏れの修正） =="
+
+PW230_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw230.XXXXXX")"
+{
+  printf '1101\topen\t- 前提: なし\ta.txt\n'
+  printf '1102\topen\t- 前提: なし\tb.txt\n'
+  printf '1103\topen\t- 前提: なし\tb.txt\n'
+} > "$PW230_FIXTURE"
+
+PW230_OUTPUT="$(bash "$PLAN_WAVES_SCRIPT" --from-file "$PW230_FIXTURE" --lanes 2)"
+
+assert_eq "#230実測再現: #1101(a.txt、重なり無し)はsubbatch1" "1" \
+  "$(pw_value 1101 subbatch "$PW230_OUTPUT")"
+assert_eq "#230実測再現: #1102(b.txt)は対象ファイルの重なりにより単独の新規サブバッチ(2)へ" \
+  "2" "$(pw_value 1102 subbatch "$PW230_OUTPUT")"
+assert_eq "#230実測再現: #1103(b.txt)は#1102と重なるため単独の新規サブバッチ(3)へ（満杯経由のスキップで見落とされない）" \
+  "3" "$(pw_value 1103 subbatch "$PW230_OUTPUT")"
+assert_eq "#230実測再現: file-overlap警告に#1103と#1102がb.txtで重なった旨が出る" "1" \
+  "$(printf '%s\n' "$PW230_OUTPUT" | grep -c '^warn	file-overlap	1103	1102	b.txt$')"
+assert_eq "#230実測再現: file-overlap-summaryで実効並列度1・指定lanes2が出る" "1" \
+  "$(printf '%s\n' "$PW230_OUTPUT" | grep -c '^warn	file-overlap-summary	1	3	1	2$')"
+
+# #1102と#1103はどちらも「単独のサブバッチ」に入る（それぞれのサブバッチ内の唯一のメンバー
+# ＝常に順位1＝同一レーン）ため、サブバッチをまたいでも同一レーンで逐次実行される。
+# 対象ファイルが重ならない#1101が#1102・#1103のいずれとも同居していないことも確認する
+# （単独化されたサブバッチには誰も同居させない）。
+if printf '%s\n' "$PW230_OUTPUT" | grep -q '^task	1101	wave	1	subbatch	2	'; then
+  fail "#230実測再現: #1101は#1102の単独サブバッチに同居しない" "output=[${PW230_OUTPUT}]"
+else
+  pass "#230実測再現: #1101は#1102の単独サブバッチに同居しない"
+fi
+
+# ---------------------------------------------------------------------------
+# plan-waves.sh: #231（対象ファイル宣言の表記ゆれの正規化、「- なし」の予約語化）
+# ---------------------------------------------------------------------------
+
+echo "== plan-waves.sh（#231: 対象ファイル宣言の表記ゆれ正規化） =="
+
+# --- 表記ゆれ（バッククォート付き/前後空白/先頭./）が混在していても同一ファイルとして
+#     重なりが検出される（実データで確認済みの表記: `` `scripts/sandbox-exec.sh` ``） ---
+PW231_NORM_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw231-norm.XXXXXX")"
+{
+  printf '1401\topen\t- 前提: なし\t`scripts/sandbox-exec.sh`\n'
+  printf '1402\topen\t- 前提: なし\t./scripts/sandbox-exec.sh\n'
+  printf '1403\topen\t- 前提: なし\t scripts/sandbox-exec.sh \n'
+} > "$PW231_NORM_FIXTURE"
+
+PW231_NORM_OUTPUT="$(bash "$PLAN_WAVES_SCRIPT" --from-file "$PW231_NORM_FIXTURE" --lanes 3)"
+
+assert_eq "#231: バッククォート付き表記の#1401はsubbatch1" "1" \
+  "$(pw_value 1401 subbatch "$PW231_NORM_OUTPUT")"
+assert_eq "#231: ./接頭表記の#1402は正規化後#1401と同一ファイルとして重なり、単独サブバッチ2へ" \
+  "2" "$(pw_value 1402 subbatch "$PW231_NORM_OUTPUT")"
+assert_eq "#231: 前後空白付き表記の#1403も正規化後#1401・#1402と同一ファイルとして重なり、単独サブバッチ3へ" \
+  "3" "$(pw_value 1403 subbatch "$PW231_NORM_OUTPUT")"
+assert_eq "#231: file-overlap警告は正規化済みのパス(バッククォート等を含まない)で出る" "1" \
+  "$(printf '%s\n' "$PW231_NORM_OUTPUT" | grep -c '^warn	file-overlap	1402	1401	scripts/sandbox-exec.sh$')"
+
+# --- 「- なし」は対象ファイル0件の明示宣言として扱われ、実ファイルパス「なし」としては
+#     扱われない: (a) 宣言済みの実ファイルとは重ならない (b) 宣言漏れ（安全側）とも重ならない
+#     (c) 「- なし」同士も、文字列「なし」の一致では重ならない ---
+PW231_NASHI_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw231-nashi.XXXXXX")"
+{
+  printf '1501\topen\t- 前提: なし\tなし\n'
+  printf '1502\topen\t- 前提: なし\tscripts/z.sh\n'
+  printf '1503\topen\t- 前提: なし\t\n'
+  printf '1504\topen\t- 前提: なし\tなし\n'
+} > "$PW231_NASHI_FIXTURE"
+
+PW231_NASHI_OUTPUT="$(bash "$PLAN_WAVES_SCRIPT" --from-file "$PW231_NASHI_FIXTURE" --lanes 3)"
+
+assert_eq "#231 なし: #1501（- なし）は対象ファイルが無いため重ならず、フリーのsubbatch1に入る" \
+  "1" "$(pw_value 1501 subbatch "$PW231_NASHI_OUTPUT")"
+assert_eq "#231 なし: #1502（scripts/z.sh宣言）は#1503（宣言漏れ）と安全側で重なり単独subbatch2へ" \
+  "2" "$(pw_value 1502 subbatch "$PW231_NASHI_OUTPUT")"
+assert_eq "#231 なし: #1503（宣言漏れ）は#1502と重なるため単独subbatch3へ" \
+  "3" "$(pw_value 1503 subbatch "$PW231_NASHI_OUTPUT")"
+assert_eq "#231 なし: #1504（- なし）も対象ファイルが無いため重ならず、#1501と同居できるフリーのsubbatch1に入る" \
+  "1" "$(pw_value 1504 subbatch "$PW231_NASHI_OUTPUT")"
+
+if printf '%s\n' "$PW231_NASHI_OUTPUT" | grep -q '^warn	file-overlap	.*1501'; then
+  fail "#231 なし: 「- なし」の#1501はどのタスクとも重ならず警告が出ない" "output=[${PW231_NASHI_OUTPUT}]"
+else
+  pass "#231 なし: 「- なし」の#1501はどのタスクとも重ならず警告が出ない"
+fi
+assert_eq "#231 なし: 「- なし」宣言済みの#1501にはmissing-files警告が出ない（節自体はある）" "0" \
+  "$(printf '%s\n' "$PW231_NASHI_OUTPUT" | grep -c '^warn	missing-files	1501$')"
+assert_eq "#231 なし: 宣言漏れ（節が無い）の#1503にはmissing-files警告が出る" "1" \
+  "$(printf '%s\n' "$PW231_NASHI_OUTPUT" | grep -c '^warn	missing-files	1503$')"
 
 # ---------------------------------------------------------------------------
 # merge-lane.sh（merge-base 検証と wave ブランチ統合。Task #16）
@@ -16643,6 +17032,369 @@ fi
 unset RG198_FILE RG198_BODY_REGION RG198_HIT RG198_LEAK_DETAIL
 
 # ---------------------------------------------------------------------------
+# --detach/--wait: 長時間コマンドの切り離し実行と待機（issue #214）
+#
+# Docker を使わない mode=none（Dockerfile.dev も docker-compose.dev.yml も置かない）で、
+# 実コマンドをホスト側で切り離し実行し、マーカー・ログ・終了コードの伝播を検証する
+# （このファイル冒頭の方針どおり Docker は一切呼び出さない）。
+# ---------------------------------------------------------------------------
+
+echo "== --detach/--wait（issue #214） =="
+
+DETACH_REPO="$(make_temp_repo)"
+copy_sandbox_scripts_no_dockerfile "$DETACH_REPO"
+DETACH_HOME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-detachhome.XXXXXX")"
+DETACH_DIR_BASE="${DETACH_HOME_DIR}/$(basename "$DETACH_REPO")-epic214a"
+
+# --- ケース1: --detach は即座に返る（長時間コマンドの完了を待たない） ---
+DETACH1_START=$(date +%s)
+DETACH1_OUTPUT="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" \
+    bash scripts/sandbox-exec.sh --epic epic214a --detach --handle case1 'sleep 3 && echo hello-from-detach'
+)"
+DETACH1_LAUNCH_EXIT=$?
+DETACH1_END=$(date +%s)
+DETACH1_ELAPSED=$((DETACH1_END - DETACH1_START))
+
+assert_exit_code "--detach: 起動コマンド自体は成功（exit 0）で返る" 0 "$DETACH1_LAUNCH_EXIT"
+
+if [ "$DETACH1_ELAPSED" -lt 3 ]; then
+  pass "--detach: 3秒かかるコマンドでも呼び出しは即座に返る（経過${DETACH1_ELAPSED}秒）"
+else
+  fail "--detach: 3秒かかるコマンドでも呼び出しは即座に返る" \
+    "経過=${DETACH1_ELAPSED}秒（3秒以上＝前景実行になっている）"
+fi
+
+case "$DETACH1_OUTPUT" in
+  *"handle=case1"*) pass "--detach: 出力にhandle名が含まれる" ;;
+  *) fail "--detach: 出力にhandle名が含まれる" "output=[${DETACH1_OUTPUT}]" ;;
+esac
+
+# --- ケース2: 実行中はrunningマーカーのみが存在し、exit_codeはまだ無い（区別できる） ---
+DETACH1_DIR="${DETACH_DIR_BASE}/case1"
+if [ -f "${DETACH1_DIR}/running" ] && [ ! -f "${DETACH1_DIR}/exit_code" ]; then
+  pass "--detach: 実行中はrunningマーカーのみが存在する（exit_codeはまだ無い＝実行中/完了を区別できる）"
+else
+  fail "--detach: 実行中はrunningマーカーのみが存在する" \
+    "running=$([ -f "${DETACH1_DIR}/running" ] && echo yes || echo no) exit_code=$([ -f "${DETACH1_DIR}/exit_code" ] && echo yes || echo no)"
+fi
+
+# --- ケース3: --wait は完了まで待ち、コマンドの終了コード（成功）をそのまま返す ---
+DETACH1_WAIT_OUTPUT="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    bash scripts/sandbox-exec.sh --epic epic214a --wait --handle case1
+)"
+DETACH1_WAIT_EXIT=$?
+assert_exit_code "--wait: 完了したコマンドの終了コード(0)をそのまま返す" 0 "$DETACH1_WAIT_EXIT"
+
+case "$DETACH1_WAIT_OUTPUT" in
+  *"hello-from-detach"*) pass "--wait: 完了後にコマンドのログ（標準出力）が読める" ;;
+  *) fail "--wait: 完了後にコマンドのログ（標準出力）が読める" "output=[${DETACH1_WAIT_OUTPUT}]" ;;
+esac
+
+if [ -f "${DETACH1_DIR}/exit_code" ] && [ ! -f "${DETACH1_DIR}/running" ]; then
+  pass "--wait後: 完了後はexit_codeのみが存在する（runningは消える＝実行中/完了を区別できる）"
+else
+  fail "--wait後: 完了後はexit_codeのみが存在する" \
+    "running=$([ -f "${DETACH1_DIR}/running" ] && echo yes || echo no) exit_code=$([ -f "${DETACH1_DIR}/exit_code" ] && echo yes || echo no)"
+fi
+
+# --- ケース4: 失敗したコマンドの終了コードもそのまま返る ---
+(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" \
+    bash scripts/sandbox-exec.sh --epic epic214a --detach --handle case4 'exit 7'
+) >/dev/null 2>&1
+
+DETACH4_WAIT_EXIT=0
+(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    bash scripts/sandbox-exec.sh --epic epic214a --wait --handle case4
+) >/dev/null 2>&1 || DETACH4_WAIT_EXIT=$?
+assert_exit_code "--wait: 失敗したコマンドの終了コード(7)もそのまま返る" 7 "$DETACH4_WAIT_EXIT"
+
+# --- ケース5: 未検出のハンドルを --wait すると即座にエラーで停止する（ハングしない） ---
+DETACH5_STDERR="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" \
+    bash scripts/sandbox-exec.sh --epic epic214a --wait --handle never-detached 2>&1 1>/dev/null
+)"
+DETACH5_EXIT=$?
+if [ "$DETACH5_EXIT" -ne 0 ]; then
+  pass "--wait: 未検出のハンドルは非0で終了する"
+else
+  fail "--wait: 未検出のハンドルは非0で終了する" "exit=0"
+fi
+case "$DETACH5_STDERR" in
+  *"never-detached"*) pass "--wait: 未検出のハンドルのエラーにハンドル名が含まれる" ;;
+  *) fail "--wait: 未検出のハンドルのエラーにハンドル名が含まれる" "stderr=[${DETACH5_STDERR}]" ;;
+esac
+
+# --- ケース6: --detach を付けない既定の前景実行は変わらない（後方互換） ---
+DETACH6_EXIT=0
+DETACH6_OUTPUT="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" \
+    bash scripts/sandbox-exec.sh --epic epic214a 'echo foreground && exit 3'
+)" || DETACH6_EXIT=$?
+assert_exit_code "--detachを付けない前景実行: コマンドの終了コードがそのまま返る（後方互換）" 3 "$DETACH6_EXIT"
+case "$DETACH6_OUTPUT" in
+  *"foreground"*) pass "--detachを付けない前景実行: 出力がそのまま呼び出し元に返る（後方互換）" ;;
+  *) fail "--detachを付けない前景実行: 出力がそのまま呼び出し元に返る（後方互換）" "output=[${DETACH6_OUTPUT}]" ;;
+esac
+
+if [ -d "${DETACH_DIR_BASE}/default" ]; then
+  fail "--detachを付けない前景実行: マーカーディレクトリを作らない" "作られています: ${DETACH_DIR_BASE}/default"
+else
+  pass "--detachを付けない前景実行: マーカーディレクトリを作らない"
+fi
+
+# --- ケース7: 同一ハンドルが実行中のまま再度 --detach すると多重起動を拒否する ---
+(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" \
+    bash scripts/sandbox-exec.sh --epic epic214a --detach --handle case7 'sleep 3'
+) >/dev/null 2>&1
+
+DETACH7_DUP_EXIT=0
+DETACH7_DUP_STDERR="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" \
+    bash scripts/sandbox-exec.sh --epic epic214a --detach --handle case7 'true' 2>&1 1>/dev/null
+)" || DETACH7_DUP_EXIT=$?
+if [ "$DETACH7_DUP_EXIT" -ne 0 ]; then
+  pass "--detach: 同一ハンドルが実行中なら多重起動を拒否する"
+else
+  fail "--detach: 同一ハンドルが実行中なら多重起動を拒否する" "exit=0"
+fi
+case "$DETACH7_DUP_STDERR" in
+  *"既に実行中です"*) pass "--detach: 多重起動拒否のエラーに理由が含まれる" ;;
+  *) fail "--detach: 多重起動拒否のエラーに理由が含まれる" "stderr=[${DETACH7_DUP_STDERR}]" ;;
+esac
+
+# 後片付け: case7 の完了を待ってからテストを終える
+# （バックグラウンドプロセスをぶら下げたままテストランナーを終わらせないため）
+(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    bash scripts/sandbox-exec.sh --epic epic214a --wait --handle case7
+) >/dev/null 2>&1 || true
+
+# --- ケース8: --detach の起動元プロセスが終了してもバックグラウンド実行は継続する ---
+# ケース1の --detach 呼び出し（サブシェル）は起動直後に終了している（ケース1で確認済み）。
+# その後、まったく別のプロセスとして発行した --wait 呼び出し（ケース3）が完了・終了コード
+# 取得までできたことは、バックグラウンド実行が起動元プロセスの生死に依存していないことの
+# 実証になっている。ここでは明示コメントのみ残す（重複テストを増やさない）。
+
+# --- ケース9: ハンドルを分ければ同一epicで複数の切り離し実行を並行させられる ---
+(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" \
+    bash scripts/sandbox-exec.sh --epic epic214a --detach --handle case9a 'echo nine-a'
+) >/dev/null 2>&1
+(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" \
+    bash scripts/sandbox-exec.sh --epic epic214a --detach --handle case9b 'echo nine-b'
+) >/dev/null 2>&1
+
+DETACH9A_OUT="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    bash scripts/sandbox-exec.sh --epic epic214a --wait --handle case9a
+)"
+DETACH9B_OUT="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    bash scripts/sandbox-exec.sh --epic epic214a --wait --handle case9b
+)"
+assert_eq "--handle: 別ハンドルの並行起動が互いに独立している（case9a）" "nine-a" "$DETACH9A_OUT"
+assert_eq "--handle: 別ハンドルの並行起動が互いに独立している（case9b）" "nine-b" "$DETACH9B_OUT"
+
+# --- ケース11: 完了直後（exit_codeあり・runningなし）の状態を正常完了として扱う（issue #229 (a)） ---
+# start_detached は exit_code を書いてから running を消すため、この2ステップの間で
+# --wait が「running が無い」と判定すると、既に exit_code が書かれているのに
+# 「マーカー不整合」として成功した終了コードを失う。マーカーを人工的にこの状態
+# （exit_codeあり・runningなし）に置いて直接 --wait を呼び、再現する。
+DETACH11_DIR="${DETACH_DIR_BASE}/case11"
+mkdir -p "$DETACH11_DIR"
+rm -f "${DETACH11_DIR}/running"
+printf '0' > "${DETACH11_DIR}/exit_code"
+printf 'race-complete\n' > "${DETACH11_DIR}/log"
+
+DETACH11_EXIT=0
+DETACH11_OUTPUT="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    timeout 5 bash scripts/sandbox-exec.sh --epic epic214a --wait --handle case11
+)" || DETACH11_EXIT=$?
+assert_exit_code "--wait: exit_codeあり・runningなし（完了直後）はマーカー不整合ではなく正常完了として扱う（#229 (a)）" \
+  0 "$DETACH11_EXIT"
+case "$DETACH11_OUTPUT" in
+  *"race-complete"*) pass "--wait: 完了直後の状態でもログが読める（#229 (a)）" ;;
+  *) fail "--wait: 完了直後の状態でもログが読める（#229 (a)）" "output=[${DETACH11_OUTPUT}]" ;;
+esac
+
+# --- ケース12: バックグラウンドがexit_codeを書けずに死んだ場合、無限に待たず非0終了する（issue #229 (b)） ---
+# 確実に生存していないpidを用意する（起動して即終了させ、waitで回収済みにする。#214での
+# watchdog.shテストと同じ手法）。running は残したまま exit_code を書かず、
+# start_detached が扱う「完了マーカーを残さず終了した」状況を --wait 側で模擬する。
+DETACH12_DIR="${DETACH_DIR_BASE}/case12"
+mkdir -p "$DETACH12_DIR"
+: > "${DETACH12_DIR}/running"
+rm -f "${DETACH12_DIR}/exit_code"
+bash -c 'exit 0' &
+DETACH12_DEAD_PID=$!
+wait "$DETACH12_DEAD_PID" 2>/dev/null
+printf '%s' "$DETACH12_DEAD_PID" > "${DETACH12_DIR}/pid"
+
+DETACH12_START=$(date +%s)
+DETACH12_EXIT=0
+DETACH12_STDERR="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    timeout 10 bash scripts/sandbox-exec.sh --epic epic214a --wait --handle case12 2>&1 1>/dev/null
+)" || DETACH12_EXIT=$?
+DETACH12_END=$(date +%s)
+DETACH12_ELAPSED=$((DETACH12_END - DETACH12_START))
+
+if [ "$DETACH12_EXIT" -ne 0 ] && [ "$DETACH12_EXIT" -ne 124 ]; then
+  pass "--wait: pidが死んでいてexit_codeも無い場合は無限待ちにならず非0終了する（#229 (b)、経過${DETACH12_ELAPSED}秒）"
+else
+  fail "--wait: pidが死んでいてexit_codeも無い場合は無限待ちにならず非0終了する（#229 (b)）" \
+    "exit=${DETACH12_EXIT}（124=timeoutで打ち切り=ハングした） 経過=${DETACH12_ELAPSED}秒"
+fi
+case "$DETACH12_STDERR" in
+  *"case12"*) pass "--wait: バックグラウンド死亡時のエラーにハンドル名が含まれる（#229 (b)）" ;;
+  *) fail "--wait: バックグラウンド死亡時のエラーにハンドル名が含まれる（#229 (b)）" "stderr=[${DETACH12_STDERR}]" ;;
+esac
+
+# --- ケース10: skills/run/SKILL.md のEpic統合ゲートが --detach/--wait を使う手順になっている ---
+RUN_SKILL_EPICGATE="$(awk '/^## Epic 統合ゲート/{f=1} f{print} f && /^## Epic一括レビュー/{exit}' \
+  "${REPO_ROOT}/skills/run/SKILL.md")"
+case "$RUN_SKILL_EPICGATE" in
+  *"sandbox-exec.sh"*"--detach"*"sandbox-exec.sh"*"--wait"*)
+    pass "skills/run/SKILL.md: Epic統合ゲートが --detach → --wait の順で使う手順になっている（#214）" ;;
+  *)
+    fail "skills/run/SKILL.md: Epic統合ゲートが --detach → --wait の順で使う手順になっている（#214）" \
+      "$RUN_SKILL_EPICGATE" ;;
+esac
+
+# --- ケース10b: skills/run/SKILL.md のEpic統合ゲートが、--wait を tee へ直結するだけで
+#     パイプラインの終了コードを捨てていない（PIPESTATUS/pipefailで明示的に取り出している）
+#     ことを確認する（#228: --waitの終了コードがteeの終了コードに上書きされ、
+#     「機械的ゲートの判定に使える」という#214の契約が使う側で守られていなかった回帰） ---
+case "$RUN_SKILL_EPICGATE" in
+  *PIPESTATUS*|*"set -o pipefail"*)
+    pass "skills/run/SKILL.md: Epic統合ゲートの --wait パイプがPIPESTATUS/pipefailで終了コードを取り出している（#228）" ;;
+  *)
+    fail "skills/run/SKILL.md: Epic統合ゲートの --wait パイプがPIPESTATUS/pipefailで終了コードを取り出している（#228）" \
+      "$RUN_SKILL_EPICGATE" ;;
+esac
+
+# 取り出した終了コード（GATE_RC）が、実際に合否判定へ使われていることも確認する。
+# 代入（PIPESTATUS由来）と判定（不合格判定の条件）の両方で登場するはずなので2回以上を要求する。
+RUN_SKILL_EPICGATE_GATE_RC_COUNT="$(printf '%s\n' "$RUN_SKILL_EPICGATE" | grep -c 'GATE_RC')"
+if [ "$RUN_SKILL_EPICGATE_GATE_RC_COUNT" -ge 2 ]; then
+  pass "skills/run/SKILL.md: Epic統合ゲートの合否判定がGATE_RC（PIPESTATUS由来の終了コード）を参照している（#228）"
+else
+  fail "skills/run/SKILL.md: Epic統合ゲートの合否判定がGATE_RC（PIPESTATUS由来の終了コード）を参照している（#228）" \
+    "count=${RUN_SKILL_EPICGATE_GATE_RC_COUNT}"
+fi
+
+# run_in_background別呼び出しで $EPIC_NUM / $EPIC_GATE_TEST_LOG が解決できる前提を
+# 置かない旨（値を直接埋め込むか再導出する旨）が明記されていることも確認する。
+case "$RUN_SKILL_EPICGATE" in
+  *"再導出"*)
+    pass "skills/run/SKILL.md: run_in_background別呼び出しでの変数解決に依存しない旨の注記がある（#228）" ;;
+  *)
+    fail "skills/run/SKILL.md: run_in_background別呼び出しでの変数解決に依存しない旨の注記がある（#228）" \
+      "$RUN_SKILL_EPICGATE" ;;
+esac
+
+# ---------------------------------------------------------------------------
+echo "== Task issueテンプレートの「## 対象ファイル」節の必須化（#215） =="
+
+# #216 でplan-waves.shが対象ファイルの重なり判定に使う「## 対象ファイル」節が、
+# テンプレート・役割定義側に規定されていることを固定する（「- 前提:」「- Epic:」と同じ思想）。
+
+DOC215_PLANNER_ROLE="${REPO_ROOT}/core/roles/planner.md"
+DOC215_EPIC_SKILL="${REPO_ROOT}/skills/epic/SKILL.md"
+DOC215_PLAN_SKILL="${REPO_ROOT}/skills/plan/SKILL.md"
+DOC215_AGENT_PLANNER="${REPO_ROOT}/agents/planner.md"
+DOC215_CODEX_AGENT_PLANNER="${REPO_ROOT}/codex-agents/planner.toml"
+
+# --- core/roles/planner.md: 必須化の節見出しと書式規定がある ---
+if grep -Fq '#### 対象ファイル宣言（`## 対象ファイル`）の必須化' "$DOC215_PLANNER_ROLE"; then
+  pass "core/roles/planner.md: 「## 対象ファイル」宣言の必須化の節がある（#215）"
+else
+  fail "core/roles/planner.md: 「## 対象ファイル」宣言の必須化の節がある（#215）"
+fi
+
+if grep -Fq 'リポジトリルートからの相対パス' "$DOC215_PLANNER_ROLE" && grep -Fq 'グロブ' "$DOC215_PLANNER_ROLE"; then
+  pass "core/roles/planner.md: 書式（相対パス・1行1ファイル・グロブ禁止）が明記されている（#215）"
+else
+  fail "core/roles/planner.md: 書式（相対パス・1行1ファイル・グロブ禁止）が明記されている（#215）"
+fi
+
+if grep -Fq '新規作成するファイルも列挙する' "$DOC215_PLANNER_ROLE"; then
+  pass "core/roles/planner.md: 新規作成ファイルも列挙する旨が明記されている（#215）"
+else
+  fail "core/roles/planner.md: 新規作成ファイルも列挙する旨が明記されている（#215）"
+fi
+
+if grep -Fq '宣言漏れ' "$DOC215_PLANNER_ROLE" && grep -Fq '同一サブバッチに同居させない' "$DOC215_PLANNER_ROLE"; then
+  pass "core/roles/planner.md: 欠落時は宣言漏れとして安全側に倒す旨が明記されている（#215）"
+else
+  fail "core/roles/planner.md: 欠落時は宣言漏れとして安全側に倒す旨が明記されている（#215）"
+fi
+
+if grep -Fq 'この宣言は実装前の見積もりであり' "$DOC215_PLANNER_ROLE" && grep -Fq '競合が起きない保証にはならない' "$DOC215_PLANNER_ROLE"; then
+  pass "core/roles/planner.md: 宣言は見積もりであり競合の保証ではない旨が明記されている（#215）"
+else
+  fail "core/roles/planner.md: 宣言は見積もりであり競合の保証ではない旨が明記されている（#215）"
+fi
+
+# --- skills/epic/SKILL.md: Task issueテンプレートの「## 対象ファイル」節が必須と明記され、
+#     テンプレート本体にも節がある ---
+if grep -Fq '`## 対象ファイル` 節も**必須**である' "$DOC215_EPIC_SKILL"; then
+  pass "skills/epic/SKILL.md: 「## 対象ファイル」節が必須と明記されている（#215）"
+else
+  fail "skills/epic/SKILL.md: 「## 対象ファイル」節が必須と明記されている（#215）"
+fi
+
+if grep -Fq '## 対象ファイル' "$DOC215_EPIC_SKILL"; then
+  pass "skills/epic/SKILL.md: Task issue本文テンプレートに「## 対象ファイル」節がある（#215）"
+else
+  fail "skills/epic/SKILL.md: Task issue本文テンプレートに「## 対象ファイル」節がある（#215）"
+fi
+
+# --- skills/plan/SKILL.md: Task issue要件に「## 対象ファイル」が明記されている ---
+if grep -Fq '`## 対象ファイル`' "$DOC215_PLAN_SKILL"; then
+  pass "skills/plan/SKILL.md: Task issue要件に「## 対象ファイル」が明記されている（#215）"
+else
+  fail "skills/plan/SKILL.md: Task issue要件に「## 対象ファイル」が明記されている（#215）"
+fi
+
+# --- core/roles/planner.md の追記はadapters/*/build.shの再生成対象であるため、
+#     生成物側にも同じ記述が反映されていることを固定する（生成漏れの検出） ---
+if [ -f "$DOC215_AGENT_PLANNER" ] && grep -Fq '#### 対象ファイル宣言（`## 対象ファイル`）の必須化' "$DOC215_AGENT_PLANNER"; then
+  pass "agents/planner.md: 正本（core/roles/planner.md）の「## 対象ファイル」追記内容が反映されている（#215）"
+else
+  fail "agents/planner.md: 正本（core/roles/planner.md）の「## 対象ファイル」追記内容が反映されている（#215）" \
+    "見つかりません: ${DOC215_AGENT_PLANNER}"
+fi
+
+if [ -f "$DOC215_CODEX_AGENT_PLANNER" ] && grep -Fq '対象ファイル宣言（`## 対象ファイル`）の必須化' "$DOC215_CODEX_AGENT_PLANNER"; then
+  pass "codex-agents/planner.toml: 正本の「## 対象ファイル」追記内容が反映されている（#215）"
+else
+  fail "codex-agents/planner.toml: 正本の「## 対象ファイル」追記内容が反映されている（#215）" \
+    "見つかりません: ${DOC215_CODEX_AGENT_PLANNER}"
+fi
+
 # scripts/doctor.sh（環境診断を1コマンドにまとめる。#218）
 #
 # 必須依存（gh/docker）・任意依存（context7-mcp/code-review-graph）・サンドボックス
