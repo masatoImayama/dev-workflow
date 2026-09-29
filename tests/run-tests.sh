@@ -16947,6 +16947,64 @@ DETACH9B_OUT="$(
 assert_eq "--handle: 別ハンドルの並行起動が互いに独立している（case9a）" "nine-a" "$DETACH9A_OUT"
 assert_eq "--handle: 別ハンドルの並行起動が互いに独立している（case9b）" "nine-b" "$DETACH9B_OUT"
 
+# --- ケース11: 完了直後（exit_codeあり・runningなし）の状態を正常完了として扱う（issue #229 (a)） ---
+# start_detached は exit_code を書いてから running を消すため、この2ステップの間で
+# --wait が「running が無い」と判定すると、既に exit_code が書かれているのに
+# 「マーカー不整合」として成功した終了コードを失う。マーカーを人工的にこの状態
+# （exit_codeあり・runningなし）に置いて直接 --wait を呼び、再現する。
+DETACH11_DIR="${DETACH_DIR_BASE}/case11"
+mkdir -p "$DETACH11_DIR"
+rm -f "${DETACH11_DIR}/running"
+printf '0' > "${DETACH11_DIR}/exit_code"
+printf 'race-complete\n' > "${DETACH11_DIR}/log"
+
+DETACH11_EXIT=0
+DETACH11_OUTPUT="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    timeout 5 bash scripts/sandbox-exec.sh --epic epic214a --wait --handle case11
+)" || DETACH11_EXIT=$?
+assert_exit_code "--wait: exit_codeあり・runningなし（完了直後）はマーカー不整合ではなく正常完了として扱う（#229 (a)）" \
+  0 "$DETACH11_EXIT"
+case "$DETACH11_OUTPUT" in
+  *"race-complete"*) pass "--wait: 完了直後の状態でもログが読める（#229 (a)）" ;;
+  *) fail "--wait: 完了直後の状態でもログが読める（#229 (a)）" "output=[${DETACH11_OUTPUT}]" ;;
+esac
+
+# --- ケース12: バックグラウンドがexit_codeを書けずに死んだ場合、無限に待たず非0終了する（issue #229 (b)） ---
+# 確実に生存していないpidを用意する（起動して即終了させ、waitで回収済みにする。#214での
+# watchdog.shテストと同じ手法）。running は残したまま exit_code を書かず、
+# start_detached が扱う「完了マーカーを残さず終了した」状況を --wait 側で模擬する。
+DETACH12_DIR="${DETACH_DIR_BASE}/case12"
+mkdir -p "$DETACH12_DIR"
+: > "${DETACH12_DIR}/running"
+rm -f "${DETACH12_DIR}/exit_code"
+bash -c 'exit 0' &
+DETACH12_DEAD_PID=$!
+wait "$DETACH12_DEAD_PID" 2>/dev/null
+printf '%s' "$DETACH12_DEAD_PID" > "${DETACH12_DIR}/pid"
+
+DETACH12_START=$(date +%s)
+DETACH12_EXIT=0
+DETACH12_STDERR="$(
+  cd "$DETACH_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$DETACH_HOME_DIR" DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    timeout 10 bash scripts/sandbox-exec.sh --epic epic214a --wait --handle case12 2>&1 1>/dev/null
+)" || DETACH12_EXIT=$?
+DETACH12_END=$(date +%s)
+DETACH12_ELAPSED=$((DETACH12_END - DETACH12_START))
+
+if [ "$DETACH12_EXIT" -ne 0 ] && [ "$DETACH12_EXIT" -ne 124 ]; then
+  pass "--wait: pidが死んでいてexit_codeも無い場合は無限待ちにならず非0終了する（#229 (b)、経過${DETACH12_ELAPSED}秒）"
+else
+  fail "--wait: pidが死んでいてexit_codeも無い場合は無限待ちにならず非0終了する（#229 (b)）" \
+    "exit=${DETACH12_EXIT}（124=timeoutで打ち切り=ハングした） 経過=${DETACH12_ELAPSED}秒"
+fi
+case "$DETACH12_STDERR" in
+  *"case12"*) pass "--wait: バックグラウンド死亡時のエラーにハンドル名が含まれる（#229 (b)）" ;;
+  *) fail "--wait: バックグラウンド死亡時のエラーにハンドル名が含まれる（#229 (b)）" "stderr=[${DETACH12_STDERR}]" ;;
+esac
+
 # --- ケース10: skills/run/SKILL.md のEpic統合ゲートが --detach/--wait を使う手順になっている ---
 RUN_SKILL_EPICGATE="$(awk '/^## Epic 統合ゲート/{f=1} f{print} f && /^## Epic一括レビュー/{exit}' \
   "${REPO_ROOT}/skills/run/SKILL.md")"

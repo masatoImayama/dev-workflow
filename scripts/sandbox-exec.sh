@@ -885,11 +885,37 @@ case "$ACTION" in
     # DEV_WORKFLOW_WAIT_POLL_SECONDS（既定5秒）。呼び出し側はこの1回の呼び出しだけで
     # 完了まで待てるため、呼び出し側自身がポーリングループを新たに書く必要が無い（issue #140）。
     WAIT_POLL_SECONDS="${DEV_WORKFLOW_WAIT_POLL_SECONDS:-5}"
-    while [ ! -f "${WAIT_DIR}/exit_code" ]; do
+    while true; do
+      # exit_code を最優先で確認する。start_detached は exit_code を書いてから
+      # running を消すため、ここで見つかれば下の running 判定より先に完了扱いにできる
+      # （issue #229 (a)。exit_code の有無より先に running の有無を見ると、その間に
+      # 完了したケースを「マーカー不整合」と誤判定し、成功した終了コードを失う）。
+      [ -f "${WAIT_DIR}/exit_code" ] && break
+
       if [ ! -f "${WAIT_DIR}/running" ]; then
+        # running が無くなった直後に exit_code が書かれる実装なので、エラーにする前に
+        # もう一度だけ exit_code を確認する（上のチェックとの間に完了した場合の救済）。
+        [ -f "${WAIT_DIR}/exit_code" ] && break
         echo "ERROR: ハンドル '${HANDLE}' は実行中でも完了済みでもありません（マーカー不整合）: ${WAIT_DIR}" >&2
         exit 1
       fi
+
+      # バックグラウンドプロセスが exit_code を書かずに死んでいないか確認する（fail-safe）。
+      # start_detached 側は起動時に同じ判定（pid生存確認）で多重起動の可否を決めているが、
+      # 待つ側（--wait）には同じ判定が無かった（issue #229 (b)）。SIGTERM でプロセス
+      # グループごと落とされた等で pid が死んでいるのに running が残り続けると、
+      # このチェックが無いと --wait は無限にポーリングし続けてしまう。
+      if [ -f "${WAIT_DIR}/pid" ]; then
+        WAIT_PID="$(cat "${WAIT_DIR}/pid" 2>/dev/null || true)"
+        if [ -n "$WAIT_PID" ] && ! kill -0 "$WAIT_PID" 2>/dev/null; then
+          # pid死亡の判定とexit_code書き込みの間に完了した可能性があるため、
+          # 非0終了する前にもう一度だけ確認する。
+          [ -f "${WAIT_DIR}/exit_code" ] && break
+          echo "ERROR: ハンドル '${HANDLE}' のバックグラウンド実行が完了マーカーを残さず終了しました（pid=${WAIT_PID}）: ${WAIT_DIR}" >&2
+          exit 1
+        fi
+      fi
+
       sleep "$WAIT_POLL_SECONDS"
     done
 
