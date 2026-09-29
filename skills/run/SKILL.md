@@ -927,6 +927,16 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" --detach
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" --wait \
   --handle epic-gate 2>&1 | tee "$EPIC_GATE_TEST_LOG"
 GATE_RC=${PIPESTATUS[0]}
+# 取り出しただけでは呼び出し側から見えない。GATE_RC はこの背景シェルのローカル変数であり、
+# 後続の別Bash呼び出しには存在しないためである（issue #237）。さらに、代入文が最後の
+# コマンドになるとこのシェルの終了コードは常に0になり、テストが落ちてもゲートが合格に
+# 見える。echo で出力に残し、exit でシェルの終了コードとしても返すこと。
+echo "GATE_RC=${GATE_RC}"
+exit "$GATE_RC"
+
+# --- ここから下は、上の背景呼び出しの完了通知を受けてから発行する「別のBash呼び出し」である。
+#     上の exit でそのシェルは終わっているため、$GATE_RC も $EPIC_GATE_TEST_LOG も
+#     ここには存在しない。ログのパスは上の出力から読み取って直接埋め込むこと。 ---
 
 # 1b) SKIP件数はレーンの自己申告に依存せず、run自身がcount-skips.shで機械的に数える。
 #     0件でも必ず表示する（黙って省略しない）
@@ -940,9 +950,13 @@ EPIC_GATE_END_SEC=$(date +%s)
 EPIC_GATE_SEC=$((EPIC_GATE_END_SEC - EPIC_GATE_START_SEC))
 ```
 
-**合否は `$GATE_RC` で判定する。** `tee` 越しの標準出力にテスト失敗の文字列が見えていても、
-`$GATE_RC` を読み落として「出力に FAIL が無かったから合格」と誤読しない。
-`$GATE_RC` が非0、または `check-readability.sh --git` が非0で終了した場合は
+**合否は上の背景呼び出しの終了コード（および出力の `GATE_RC=` 行）で判定する。**
+`tee` 越しの標準出力にテスト失敗の文字列が見えていても、終了コードを読み落として
+「出力に FAIL が無かったから合格」と誤読しない。
+**後続の別呼び出しに `$GATE_RC` が引き継がれている前提で書かない**（別シェルのため
+変数は存在しない。issue #237）。1b・2 の呼び出しでは `$EPIC_GATE_TEST_LOG` も同様に
+解決できないため、値を直接埋め込むか再導出すること。
+背景呼び出しの終了コードが非0、または `check-readability.sh --git` が非0で終了した場合は
 不合格として扱い、下記「失敗時の扱い」へ進む。
 
 **フルスイートを走らせるのはここだけである**（「機械的ゲートの三段構成」節）。ウェーブ末の
