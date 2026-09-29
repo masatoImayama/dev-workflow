@@ -17207,6 +17207,27 @@ SH
 done
 unset pip_tool
 
+# --- ケース10（#225）: docs/optional-mcp-tools.md のD6に関する説明が、実際の失敗時挙動
+#     （上記ケース5「導入コマンド失敗時はexit 2（異常終了しない・#219）」）と整合している。
+#     「前提コマンドの有無しか見ていない」「ネットワーク不通時は[NG]・exit 2で終了する」という
+#     実挙動どおりの記述になっていることを検査する（旧記述「ネットワークが無い環境でも失敗
+#     しない」を実挙動の再検証なしに書き戻すことへの回帰防止でもある） ---
+DOC225_MCP_DOC="${REPO_ROOT}/docs/optional-mcp-tools.md"
+
+if grep -Fq 'ネットワーク到達性そのものは事前に検証していない' "$DOC225_MCP_DOC"; then
+  pass "docs/optional-mcp-tools.md: 前提チェックはローカルバイナリの有無のみでネットワーク到達性は事前検証しない旨が明記されている（#225）"
+else
+  fail "docs/optional-mcp-tools.md: 前提チェックはローカルバイナリの有無のみでネットワーク到達性は事前検証しない旨が明記されている（#225）" \
+    "docs/optional-mcp-tools.md に『ネットワーク到達性そのものは事前に検証していない』という記述が見つかりません"
+fi
+
+if grep -Fq '`[NG]` メッセージと exit 2 で終了する' "$DOC225_MCP_DOC"; then
+  pass "docs/optional-mcp-tools.md: ネットワーク不通時は[NG]・exit 2で終了する旨が明記されている（#225。install-optional-mcp.shケース5の実挙動と整合）"
+else
+  fail "docs/optional-mcp-tools.md: ネットワーク不通時は[NG]・exit 2で終了する旨が明記されている（#225）" \
+    "docs/optional-mcp-tools.md に『[NG] メッセージと exit 2 で終了する』という記述が見つかりません"
+fi
+
 # ---------------------------------------------------------------------------
 # skills/setup/SKILL.md: 診断・導入・整備を束ねるユーザー向けスキル（Task #221）
 # ---------------------------------------------------------------------------

@@ -68,8 +68,11 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-optional-mcp.sh" --apply
 ```
 
 導入対象を絞りたい場合は `--only context7` または `--only code-review-graph` を追加する。
-`install-optional-mcp.sh` は導入前に npm / Python 3.10+ 等の前提を確認し、ネットワークが
-無い環境でも前提不足を表示するだけで導入を試みない（Epic #217 決定D6）。
+`install-optional-mcp.sh` は導入前に npm / Python 3.10+ 等の前提コマンドの有無を確認し、
+無ければ前提不足を表示するだけで導入を試みない。ネットワーク不通時（前提コマンドは揃って
+いる場合）は導入コマンドの失敗として検知し、クラッシュ・ハングせず `[NG]` と exit 2 で
+終了する（Epic #217 決定D6。詳細・実装との対応関係の正本は `docs/optional-mcp-tools.md`
+「導入コマンド化」節。#225）。
 
 **「任意依存を入れない」という選択も正当な結末である。** context7 / code-review-graph が
 未導入でも generator / evaluator は従来どおり動作する
