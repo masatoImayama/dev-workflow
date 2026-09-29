@@ -17305,6 +17305,29 @@ else
     "count=${RUN_SKILL_EPICGATE_GATE_RC_COUNT}"
 fi
 
+# --- ケース10c: 取り出した GATE_RC が呼び出し側から**観測できる**ことを確認する（#237）。
+#     GATE_RC は run_in_background の別シェル内のローカル変数であり、echo / exit で
+#     外へ出さない限り後続の別Bash呼び出しには存在しない。加えて、代入文が
+#     最後のコマンドになるとそのシェルの終了コードは常に0になり、テストが落ちても
+#     ゲートが合格に見える（#228の修正が変数スコープの形で残していた穴）。 ---
+case "$RUN_SKILL_EPICGATE" in
+  *'echo "GATE_RC='*|*'exit "$GATE_RC"'*)
+    pass "skills/run/SKILL.md: GATE_RCをecho/exitで呼び出し側へ出している（#237）" ;;
+  *)
+    fail "skills/run/SKILL.md: GATE_RCをecho/exitで呼び出し側へ出している（#237）" \
+      "$RUN_SKILL_EPICGATE" ;;
+esac
+
+# 背景呼び出しの終了コードそのもので判定する旨（後続呼び出しに $GATE_RC が
+# 引き継がれている前提を置かない旨）が明記されていることも確認する。
+case "$RUN_SKILL_EPICGATE" in
+  *'後続の別呼び出しに `$GATE_RC` が引き継がれている前提'*)
+    pass "skills/run/SKILL.md: GATE_RCが後続呼び出しへ引き継がれない旨の注記がある（#237）" ;;
+  *)
+    fail "skills/run/SKILL.md: GATE_RCが後続呼び出しへ引き継がれない旨の注記がある（#237）" \
+      "$RUN_SKILL_EPICGATE" ;;
+esac
+
 # run_in_background別呼び出しで $EPIC_NUM / $EPIC_GATE_TEST_LOG が解決できる前提を
 # 置かない旨（値を直接埋め込むか再導出する旨）が明記されていることも確認する。
 case "$RUN_SKILL_EPICGATE" in
