@@ -24,7 +24,8 @@
 #
 # 副作用:
 #   dry-run では一切無い（何もインストールしない・何も書き換えない）。
-#   --apply 時のみ、対象ごとの導入コマンド（npm install -g / pip install）を実行する。
+#   --apply 時のみ、対象ごとの導入コマンド（context7: npm install -g / code-review-graph:
+#   前提チェックで見つかった pip・pip3・pipx・uvx のいずれか）を実行する（issue #224）。
 #
 # 設計判断の記録（完了条件の1つ）:
 #   `code-review-graph install --platform claude-code` はこのスクリプトでは使わない。
@@ -35,7 +36,8 @@
 #   作業環境にはネットワーク接続が無く、上流ソースで実際の出力ファイル・冪等性
 #   （dev-workflow側の宣言と衝突しないか）を確認できなかった。issue本文の設計上の注意
 #   （「不要なら pip install と build だけでよい可能性がある」）に従い、確認できない
-#   コマンドは安全側（実行しない）に倒し、`pip install code-review-graph` のみを行う。
+#   コマンドは安全側（実行しない）に倒し、pip系コマンド（pip/pip3/pipx/uvx）による
+#   `code-review-graph` の導入のみを行う。
 #   グラフ構築（`code-review-graph build`）は Epic issue 本文の `## 準備コマンド` 節で
 #   run が Epic 開始時に1回だけ実行する既存の仕組みに任せ、ここでは行わない
 #   （`docs/optional-mcp-tools.md` 「グラフ構築は Epic 開始時に1回（#75）」節）。
@@ -66,8 +68,53 @@ install_context7() {
   npm install -g "$CONTEXT7_PACKAGE"
 }
 
+# detect_code_review_graph_pip_tool: pip/pip3/pipx/uvx のうち最初に見つかったコマンド名を
+# 標準出力へ書く（見つからなければ何も出力せず終了コード1）。
+# check_code_review_graph_prereqs() が「前提OK」と判定するコマンドと、install_code_review_graph()
+# が実際に実行するコマンドを同じ判定結果から導くための共通の入口（issue #224 再発防止）。
+detect_code_review_graph_pip_tool() {
+  local candidate
+  for candidate in pip pip3 pipx uvx; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# code_review_graph_install_cmd_display: 指定したpipツールで実際に実行するコマンド文字列を返す
+# （dry-run表示・[導入中]ログの両方で使い、install_code_review_graph() と表示内容を一致させる）。
+code_review_graph_install_cmd_display() {
+  local pip_tool="$1"
+  case "$pip_tool" in
+    pip|pip3) echo "${pip_tool} install ${CODE_REVIEW_GRAPH_PACKAGE}" ;;
+    pipx) echo "pipx install ${CODE_REVIEW_GRAPH_PACKAGE}" ;;
+    uvx) echo "uvx pip install ${CODE_REVIEW_GRAPH_PACKAGE}" ;;
+    *) echo "pip install ${CODE_REVIEW_GRAPH_PACKAGE}" ;;
+  esac
+}
+
+# install_code_review_graph: check_code_review_graph_prereqs() 側で検出したのと同じ探索順
+# （pip/pip3/pipx/uvx）で見つかったコマンドを引数で受け取り、そのコマンドで導入する。
+# 前提チェックが許容したコマンドと実際に実行するコマンドを一致させる（issue #224）。
 install_code_review_graph() {
-  pip install "$CODE_REVIEW_GRAPH_PACKAGE"
+  local pip_tool="$1"
+  case "$pip_tool" in
+    pip|pip3)
+      "$pip_tool" install "$CODE_REVIEW_GRAPH_PACKAGE"
+      ;;
+    pipx)
+      pipx install "$CODE_REVIEW_GRAPH_PACKAGE"
+      ;;
+    uvx)
+      uvx pip install "$CODE_REVIEW_GRAPH_PACKAGE"
+      ;;
+    *)
+      echo "[dev-workflow] エラー: 未知のpipツールです: ${pip_tool}" >&2
+      return 1
+      ;;
+  esac
 }
 
 # check_context7_prereqs: 不足している前提を1行1件で標準出力へ書く。
@@ -98,14 +145,7 @@ check_code_review_graph_prereqs() {
     echo "Python 3.10+ が必要です（検出したバージョン: ${ver:-不明}）"
   fi
 
-  local pip_tool=""
-  for candidate in pip pip3 pipx uvx; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-      pip_tool="$candidate"
-      break
-    fi
-  done
-  [ -n "$pip_tool" ] || echo "pip/pipx/uvx のいずれも見つかりません"
+  detect_code_review_graph_pip_tool >/dev/null || echo "pip/pipx/uvx のいずれも見つかりません"
 }
 
 APPLY=0
@@ -166,7 +206,10 @@ for target in "${TARGETS[@]}"; do
     code-review-graph)
       bin_name="code-review-graph"
       display_name="code-review-graph (${CODE_REVIEW_GRAPH_PACKAGE})"
-      install_cmd_display="pip install ${CODE_REVIEW_GRAPH_PACKAGE}"
+      # 前提チェック（check_code_review_graph_prereqs）が許容するコマンドと同じ探索結果を
+      # ここでも使い、表示・実行の両方を一致させる（issue #224）。
+      crg_pip_tool="$(detect_code_review_graph_pip_tool)"
+      install_cmd_display="$(code_review_graph_install_cmd_display "${crg_pip_tool:-pip}")"
       prereq_missing="$(check_code_review_graph_prereqs)"
       ;;
   esac
@@ -192,7 +235,7 @@ for target in "${TARGETS[@]}"; do
   echo "[導入中] ${display_name}: ${install_cmd_display}"
   case "$target" in
     context7) install_ok=0; install_context7 || install_ok=1 ;;
-    code-review-graph) install_ok=0; install_code_review_graph || install_ok=1 ;;
+    code-review-graph) install_ok=0; install_code_review_graph "$crg_pip_tool" || install_ok=1 ;;
   esac
 
   if [ "$install_ok" -ne 0 ]; then

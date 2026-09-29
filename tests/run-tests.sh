@@ -17154,6 +17154,59 @@ else
     "docs/optional-mcp-tools.md に 'install --platform claude-code' への言及と 'install-optional-mcp.sh' への参照の両方が必要です"
 fi
 
+# --- ケース9（#224）: 「前提チェックが許容したコマンドと、実際に実行するコマンドが一致する」
+#     という性質を、pip3単体の回帰ケースに限らず候補全体に対して機械的に検査する。候補一覧は
+#     check_code_review_graph_prereqs() が実際に使う detect_code_review_graph_pip_tool() 本体
+#     から動的に抽出する（ハードコードした別一覧を保守すると、候補が増減したときにテストが
+#     追随しなくなるため。issue #224 対応時の指示）。
+MCP_PIP_CANDIDATES="$(sed -n '/^detect_code_review_graph_pip_tool()/,/^}/p' "$MCP_INSTALL_SCRIPT" \
+  | grep -oE 'for candidate in [a-z0-9 ]+' | tail -1 | sed -E 's/^for candidate in //')"
+
+if [ -z "$MCP_PIP_CANDIDATES" ]; then
+  fail "install-optional-mcp.sh: detect_code_review_graph_pip_tool()からpip系候補コマンドの一覧を抽出できる（#224）" \
+    "抽出結果が空でした（スクリプト側のfor文の書き方が変わった可能性があります）"
+else
+  pass "install-optional-mcp.sh: detect_code_review_graph_pip_tool()からpip系候補コマンドの一覧を抽出できる（#224）"
+fi
+
+for pip_tool in $MCP_PIP_CANDIDATES; do
+  MCP_PIPTOOL_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-mcp-piptool-bin.XXXXXX")"
+  MCP_PIPTOOL_TARGET="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-mcp-piptool-target.XXXXXX")"
+  MCP_PIPTOOL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-piptool-log.XXXXXX")"
+
+  cat > "${MCP_PIPTOOL_BIN}/python3" <<'SH'
+#!/bin/bash
+exit 0
+SH
+  chmod +x "${MCP_PIPTOOL_BIN}/python3"
+
+  cat > "${MCP_PIPTOOL_BIN}/${pip_tool}" <<SH
+#!/bin/bash
+echo "${pip_tool} \$*" >> "${MCP_PIPTOOL_LOG}"
+printf '#!/bin/bash\nexit 0\n' > "${MCP_PIPTOOL_TARGET}/code-review-graph"
+chmod +x "${MCP_PIPTOOL_TARGET}/code-review-graph"
+exit 0
+SH
+  chmod +x "${MCP_PIPTOOL_BIN}/${pip_tool}"
+
+  MCP_PIPTOOL_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-mcp-out.XXXXXX")"
+  MCP_PIPTOOL_EXIT=0
+  PATH="${MCP_PIPTOOL_BIN}:${MCP_PIPTOOL_TARGET}:${MCP_PATH_WITHOUT_PREREQS}" \
+    bash "$MCP_INSTALL_SCRIPT" --apply --only code-review-graph \
+    > "$MCP_PIPTOOL_OUT" 2>&1 || MCP_PIPTOOL_EXIT=$?
+
+  assert_exit_code "install-optional-mcp.sh: ${pip_tool} のみ存在する環境でcode-review-graphの導入が成功する（#224）" \
+    0 "$MCP_PIPTOOL_EXIT"
+
+  if [ -s "$MCP_PIPTOOL_LOG" ]; then
+    pass "install-optional-mcp.sh: ${pip_tool} のみ存在する環境で前提チェックが許容したコマンド自身が実行される（#224）"
+  else
+    fail "install-optional-mcp.sh: ${pip_tool} のみ存在する環境で前提チェックが許容したコマンド自身が実行される（#224）" \
+      "$(cat "$MCP_PIPTOOL_OUT")"
+  fi
+done
+unset pip_tool
+
 # ---------------------------------------------------------------------------
 # skills/setup/SKILL.md: 診断・導入・整備を束ねるユーザー向けスキル（Task #221）
 # ---------------------------------------------------------------------------
