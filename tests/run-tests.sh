@@ -1665,6 +1665,93 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# dockerfile モードのフル検証経路 + --detach/--wait（issue #227）
+#
+# fast path（スタンプ完全一致）だけでなく、スタンプ不在で必ずフル検証に落ちる経路
+# （初回実行相当）でも --detach が無視されず、マーカーが作られて即座に返ることを検証する。
+# ---------------------------------------------------------------------------
+
+echo "== dockerfileモードのフル検証経路 + --detach/--wait（#227） =="
+
+IMG_DETACH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-imgdetachhome.XXXXXX")"
+IMG_DETACH_STAMP_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-imgdetachstamp.XXXXXX")"
+
+: > "$IMG_TEST_LOG"
+: > "$IMG_TEST_RM_LOG"
+: > "$IMG_TEST_RUN_LOG"
+: > "$IMG_TEST_EXEC_LOG"
+printf '0' > "$IMG_TEST_STATE_FILE"
+printf 'false\n' > "$IMG_TEST_RUNNING_FILE"
+
+# --- ケース1: スタンプ不在（＝必ずフル検証）でも --detach は即座に返る ---
+IMG_DETACH_START=$(date +%s)
+IMG_DETACH_OUTPUT="$(
+  cd "$IMG_REPO" || exit 1
+  DEV_WORKFLOW_STAMP_HOME="$IMG_DETACH_STAMP_HOME" \
+    DEV_WORKFLOW_DETACH_HOME="$IMG_DETACH_HOME" \
+    DW_IMG_LOG="$IMG_TEST_LOG" \
+    DW_IMG_RM_LOG="$IMG_TEST_RM_LOG" \
+    DW_IMG_RUN_LOG="$IMG_TEST_RUN_LOG" \
+    DW_IMG_EXEC_LOG="$IMG_TEST_EXEC_LOG" \
+    DW_IMG_CONTAINER_STATE="$IMG_TEST_STATE_FILE" \
+    DW_IMG_CONTAINER_RUNNING_STATE="$IMG_TEST_RUNNING_FILE" \
+    DW_IMG_IMAGE_EXISTS=1 \
+    DW_IMG_IMAGE_ID="sha256:detach-full" \
+    PATH="${FAKE_DOCKER_IMAGE_DIR}:${PATH}" \
+    bash scripts/sandbox-exec.sh --epic epic227detach --detach --handle fullverify \
+      'sleep 3 && echo hello-from-fullverify-detach'
+)"
+IMG_DETACH_LAUNCH_EXIT=$?
+IMG_DETACH_END=$(date +%s)
+IMG_DETACH_ELAPSED=$((IMG_DETACH_END - IMG_DETACH_START))
+
+assert_exit_code "dockerfileモード(フル検証)+--detach: 起動コマンド自体は成功（exit 0）で返る（#227）" \
+  0 "$IMG_DETACH_LAUNCH_EXIT"
+
+if [ "$IMG_DETACH_ELAPSED" -lt 3 ]; then
+  pass "dockerfileモード(フル検証)+--detach: 3秒かかるコマンドでも呼び出しは即座に返る（経過${IMG_DETACH_ELAPSED}秒、#227）"
+else
+  fail "dockerfileモード(フル検証)+--detach: 3秒かかるコマンドでも呼び出しは即座に返る（#227）" \
+    "経過=${IMG_DETACH_ELAPSED}秒（3秒以上＝前景実行のまま＝run_and_reportが置き換わっていない）"
+fi
+
+case "$IMG_DETACH_OUTPUT" in
+  *"handle=fullverify"*) pass "dockerfileモード(フル検証)+--detach: 出力にhandle名が含まれる（#227）" ;;
+  *) fail "dockerfileモード(フル検証)+--detach: 出力にhandle名が含まれる（#227）" "output=[${IMG_DETACH_OUTPUT}]" ;;
+esac
+
+# --- ケース2: フル検証経路でもマーカーディレクトリ（running）が即座に作られる ---
+IMG_DETACH_DIR="${IMG_DETACH_HOME}/$(basename "$IMG_REPO")-epic227detach/fullverify"
+if [ -f "${IMG_DETACH_DIR}/running" ] && [ ! -f "${IMG_DETACH_DIR}/exit_code" ]; then
+  pass "dockerfileモード(フル検証)+--detach: マーカーディレクトリが即座に作られる（#227）"
+else
+  fail "dockerfileモード(フル検証)+--detach: マーカーディレクトリが即座に作られる（#227）" \
+    "dir=${IMG_DETACH_DIR} running=$([ -f "${IMG_DETACH_DIR}/running" ] && echo yes || echo no) exit_code=$([ -f "${IMG_DETACH_DIR}/exit_code" ] && echo yes || echo no)"
+fi
+
+# --- ケース3: --wait で完了を待ち、終了コード・ログとも取得できる ---
+IMG_DETACH_WAIT_OUTPUT="$(
+  cd "$IMG_REPO" || exit 1
+  DEV_WORKFLOW_DETACH_HOME="$IMG_DETACH_HOME" DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    bash scripts/sandbox-exec.sh --epic epic227detach --wait --handle fullverify
+)"
+IMG_DETACH_WAIT_EXIT=$?
+assert_exit_code "dockerfileモード(フル検証)+--wait: 完了したコマンドの終了コード(0)を返す（#227）" \
+  0 "$IMG_DETACH_WAIT_EXIT"
+
+case "$IMG_DETACH_WAIT_OUTPUT" in
+  *"hello-from-fullverify-detach"*) pass "dockerfileモード(フル検証)+--wait: 完了後にログ（標準出力）が読める（#227）" ;;
+  *) fail "dockerfileモード(フル検証)+--wait: 完了後にログ（標準出力）が読める（#227）" "output=[${IMG_DETACH_WAIT_OUTPUT}]" ;;
+esac
+
+if [ -f "${IMG_DETACH_DIR}/exit_code" ] && [ ! -f "${IMG_DETACH_DIR}/running" ]; then
+  pass "dockerfileモード(フル検証)+--wait後: 完了後はexit_codeのみが存在する（#227）"
+else
+  fail "dockerfileモード(フル検証)+--wait後: 完了後はexit_codeのみが存在する（#227）" \
+    "running=$([ -f "${IMG_DETACH_DIR}/running" ] && echo yes || echo no) exit_code=$([ -f "${IMG_DETACH_DIR}/exit_code" ] && echo yes || echo no)"
+fi
+
+# ---------------------------------------------------------------------------
 # レーンスコープ・キャッシュ（issue #145、docs/adr/0002-sandbox-overhead-reduction.md 決定2）
 #
 # --print-plan のドライラン出力（lane_scope / lane_cache_env）と、dockerfile モードでの

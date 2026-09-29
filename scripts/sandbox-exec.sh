@@ -1083,7 +1083,7 @@ case "$DEV_WORKFLOW_SANDBOX_MODE" in
     [ -n "$CURRENT_IMAGE_ID" ] || CURRENT_IMAGE_ID="$(image_id_of "$DEV_WORKFLOW_SANDBOX_IMAGE")"
     write_stamp "$CONTAINER" "$CURRENT_IMAGE_ID" "$NORM_MOUNT_SOURCE"
 
-    run_and_report docker exec -w "$WORKDIR" "${LANE_ENV_ARGS[@]}" "$CONTAINER" sh -c "$(lane_cache_mkdir_prefix)${CMD}"
+    run_and_report_or_detach docker exec -w "$WORKDIR" "${LANE_ENV_ARGS[@]}" "$CONTAINER" sh -c "$(lane_cache_mkdir_prefix)${CMD}"
     exit $?
     ;;
 
