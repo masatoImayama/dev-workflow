@@ -17338,6 +17338,61 @@ case "$RUN_SKILL_EPICGATE" in
       "$RUN_SKILL_EPICGATE" ;;
 esac
 
+# --- ケース10d: skills-codex/dev-workflow-run/SKILL.md（Codex用ミラー）のEpic統合ゲートも
+#     同様にPIPESTATUS/pipefailで終了コードを取り出し、GATE_RCで合否判定していること（#236）。
+#     #228でskills/run/SKILL.mdは修正済みだが、手書きミラーであるskills-codex/側は
+#     adapters/*/build.shの生成物ではないため--checkでは検出できず、ここで明示的に
+#     担保する必要がある。終了コードを失うとテストが落ちていても統合ゲートが通過と
+#     判定される（偽陰性）。 ---
+CRS_EPICGATE_FRESH="$(awk '/^## Epic 統合ゲート/{f=1} /^## Epic一括レビュー/{f=0} f' "$CODEX_RUN_SKILL")"
+
+CRS_EPICGATE_HAS_PIPESTATUS=false
+case "$CRS_EPICGATE_FRESH" in
+  *PIPESTATUS*|*"set -o pipefail"*) CRS_EPICGATE_HAS_PIPESTATUS=true ;;
+esac
+if [ "$CRS_EPICGATE_HAS_PIPESTATUS" = true ]; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: Epic統合ゲートのテスト実行パイプがPIPESTATUS/pipefailで終了コードを取り出している（#236）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: Epic統合ゲートのテスト実行パイプがPIPESTATUS/pipefailで終了コードを取り出している（#236）" \
+    "$CRS_EPICGATE_FRESH"
+fi
+
+CRS_EPICGATE_GATE_RC_COUNT="$(printf '%s\n' "$CRS_EPICGATE_FRESH" | grep -c 'GATE_RC')"
+if [ "$CRS_EPICGATE_GATE_RC_COUNT" -ge 2 ]; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: Epic統合ゲートの合否判定がGATE_RC（PIPESTATUS由来の終了コード）を参照している（#236）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: Epic統合ゲートの合否判定がGATE_RC（PIPESTATUS由来の終了コード）を参照している（#236）" \
+    "count=${CRS_EPICGATE_GATE_RC_COUNT}"
+fi
+
+# --- ケース10e: 既存のログ専用tee箇所（BASE_EVIDENCE_FILE / EVIDENCE_FILE）まで
+#     不要に書き換えていないこと（#236の完了条件「ログ目的だけのtee箇所を不要に
+#     書き換えていない」）。これらの箇所にGATE_RCが紛れ込んでいないことを確認する。 ---
+CRS_BASE_EVIDENCE_BLOCK="$(awk '/BASE_EVIDENCE_FILE/{print}' "$CODEX_RUN_SKILL")"
+case "$CRS_BASE_EVIDENCE_BLOCK" in
+  *GATE_RC*)
+    fail "skills-codex/dev-workflow-run/SKILL.md: ログ専用のBASE_EVIDENCE_FILE箇所にGATE_RCを混入させていない（#236）" \
+      "$CRS_BASE_EVIDENCE_BLOCK" ;;
+  *)
+    pass "skills-codex/dev-workflow-run/SKILL.md: ログ専用のBASE_EVIDENCE_FILE箇所にGATE_RCを混入させていない（#236）" ;;
+esac
+
+# --- ケース10f: Claude用（skills/run/SKILL.md）とCodex用（skills-codex/dev-workflow-run/SKILL.md）
+#     の両方に同じ性質（PIPESTATUS/pipefailで終了コードを取り出し、GATE_RCで合否判定する）が
+#     あることを確認する。将来また一方だけ直して他方が取り残される乖離を防ぐための
+#     突き合わせ検査（#236の設計上の注意「両者が将来また乖離しないよう、テストは
+#     『Claude用とCodex用の両方に同じ性質があること』を検査する形が望ましい」に対応）。 ---
+RUN_SKILL_HAS_PIPESTATUS=false
+case "$RUN_SKILL_EPICGATE" in
+  *PIPESTATUS*|*"set -o pipefail"*) RUN_SKILL_HAS_PIPESTATUS=true ;;
+esac
+if [ "$RUN_SKILL_HAS_PIPESTATUS" = true ] && [ "$CRS_EPICGATE_HAS_PIPESTATUS" = true ]; then
+  pass "skills/run/SKILL.mdとskills-codex/dev-workflow-run/SKILL.mdの両方でEpic統合ゲートがPIPESTATUS/pipefailを使っている（乖離防止 #236）"
+else
+  fail "skills/run/SKILL.mdとskills-codex/dev-workflow-run/SKILL.mdの両方でEpic統合ゲートがPIPESTATUS/pipefailを使っている（乖離防止 #236）" \
+    "claude=${RUN_SKILL_HAS_PIPESTATUS} codex=${CRS_EPICGATE_HAS_PIPESTATUS}"
+fi
+
 # ---------------------------------------------------------------------------
 echo "== Task issueテンプレートの「## 対象ファイル」節の必須化（#215） =="
 
@@ -17417,6 +17472,80 @@ else
   fail "codex-agents/planner.toml: 正本の「## 対象ファイル」追記内容が反映されている（#215）" \
     "見つかりません: ${DOC215_CODEX_AGENT_PLANNER}"
 fi
+
+# ---------------------------------------------------------------------------
+echo "== #230 で変わった編成規則が core/roles/planner.md に反映されていること（#238） =="
+
+# #230 の修正方針は「仕様上どうしても保証できない範囲が残るなら、その限界を
+# plan-waves.sh ヘッダと planner.md に明記する」と求めていたが、明記されたのは
+# plan-waves.sh のヘッダコメントだけで、core/roles/planner.md は#216時点の記述の
+# まま取り残されていた（レビュー指摘 #238）。
+
+DOC238_PLANNER_ROLE="${REPO_ROOT}/core/roles/planner.md"
+DOC238_PLAN_WAVES="${REPO_ROOT}/scripts/plan-waves.sh"
+DOC238_AGENT_PLANNER="${REPO_ROOT}/agents/planner.md"
+DOC238_CODEX_AGENT_PLANNER="${REPO_ROOT}/codex-agents/planner.toml"
+
+# --- core/roles/planner.md: #216時点の古い記述（別サブバッチに分かれ、並列度が
+#     不必要に落ちる）が置き換えられ、残っていないこと ---
+if grep -Fq '別サブバッチに分かれ、並列度が不必要に落ちる' "$DOC238_PLANNER_ROLE"; then
+  fail "core/roles/planner.md: #216時点の古い記述（別サブバッチに分かれる旨）が置き換えられている（#238）" \
+    "$(grep -n '別サブバッチに分かれ' "$DOC238_PLANNER_ROLE")"
+else
+  pass "core/roles/planner.md: #216時点の古い記述（別サブバッチに分かれる旨）が置き換えられている（#238）"
+fi
+
+# --- core/roles/planner.md: 重なるタスクは専用サブバッチへ単独配置され、
+#     重なるタスク同士は必ず同一レーンで逐次実行される旨が明記されている ---
+if grep -Fq '専用サブバッチへ単独配置' "$DOC238_PLANNER_ROLE" && grep -Fq '重なるタスク同士は必ず同一レーン' "$DOC238_PLANNER_ROLE"; then
+  pass "core/roles/planner.md: 重なるタスクが専用サブバッチへ単独配置され同一レーンで逐次実行される旨が明記されている（#238）"
+else
+  fail "core/roles/planner.md: 重なるタスクが専用サブバッチへ単独配置され同一レーンで逐次実行される旨が明記されている（#238）"
+fi
+
+# --- core/roles/planner.md: 独立した重なりグループが複数あっても全てレーン1に
+#     直列化される（並列度が1まで落ちうる）旨が明記されている ---
+if grep -Fq '独立した重なりグループが複数あっても' "$DOC238_PLANNER_ROLE" && grep -Fq '全てレーン1に直列化される' "$DOC238_PLANNER_ROLE"; then
+  pass "core/roles/planner.md: 独立した重なりグループが複数あっても全てレーン1に直列化される旨が明記されている（#238）"
+else
+  fail "core/roles/planner.md: 独立した重なりグループが複数あっても全てレーン1に直列化される旨が明記されている（#238）"
+fi
+
+# --- core/roles/planner.md: 過剰列挙・宣言漏れのコストが「別サブバッチに分かれる」
+#     ではなく「ウェーブ全体の直列化」であると明記されている ---
+if grep -Fq 'ウェーブ全体の直列化' "$DOC238_PLANNER_ROLE"; then
+  pass "core/roles/planner.md: 過剰列挙・宣言漏れのコストが『ウェーブ全体の直列化』と明記されている（#238）"
+else
+  fail "core/roles/planner.md: 過剰列挙・宣言漏れのコストが『ウェーブ全体の直列化』と明記されている（#238）"
+fi
+
+# --- core/roles/planner.md の#238追記はadapters/*/build.shの再生成対象であるため、
+#     生成物側にも同じ記述が反映されていることを固定する（生成漏れの検出。#215の同種テストと同じ形） ---
+if [ -f "$DOC238_AGENT_PLANNER" ] && grep -Fq '専用サブバッチへ単独配置' "$DOC238_AGENT_PLANNER" && grep -Fq 'ウェーブ全体の直列化' "$DOC238_AGENT_PLANNER"; then
+  pass "agents/planner.md: 正本（core/roles/planner.md）の#238追記内容が反映されている（#238）"
+else
+  fail "agents/planner.md: 正本（core/roles/planner.md）の#238追記内容が反映されている（#238）" \
+    "見つかりません: ${DOC238_AGENT_PLANNER}"
+fi
+
+if [ -f "$DOC238_CODEX_AGENT_PLANNER" ] && grep -Fq '専用サブバッチへ単独配置' "$DOC238_CODEX_AGENT_PLANNER" && grep -Fq 'ウェーブ全体の直列化' "$DOC238_CODEX_AGENT_PLANNER"; then
+  pass "codex-agents/planner.toml: 正本の#238追記内容が反映されている（#238）"
+else
+  fail "codex-agents/planner.toml: 正本の#238追記内容が反映されている（#238）" \
+    "見つかりません: ${DOC238_CODEX_AGENT_PLANNER}"
+fi
+
+# --- scripts/plan-waves.sh: ヘッダの「実効並列度の低下は file-overlap-summary 警告で
+#     報告される」が、最大サブバッチ人数が落ちない場合はsummaryが出ないことを踏まえた
+#     表現に改められていること ---
+PLAN_WAVES_HEADER="$(sed -n '1,120p' "$DOC238_PLAN_WAVES")"
+case "$PLAN_WAVES_HEADER" in
+  *"最大サブバッチ人数が落ちない場合"*)
+    pass "scripts/plan-waves.sh: ヘッダが『最大サブバッチ人数が落ちない場合はsummaryが出ない』ことを踏まえた表現になっている（#238）" ;;
+  *)
+    fail "scripts/plan-waves.sh: ヘッダが『最大サブバッチ人数が落ちない場合はsummaryが出ない』ことを踏まえた表現になっている（#238）" \
+      "$PLAN_WAVES_HEADER" ;;
+esac
 
 # scripts/doctor.sh（環境診断を1コマンドにまとめる。#218）
 #
@@ -18130,6 +18259,121 @@ if grep -qF '/dev-workflow:setup' "${REPO_ROOT}/README.md"; then
 else
   fail "README.md: /dev-workflow:setup への導線がある（#221）"
 fi
+
+# ---------------------------------------------------------------------------
+# skills/run/SKILL.md: 競合で見送ったレーンを次ウェーブで扱う手順（回帰防止 #226）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== skills/run/SKILL.md（見送られたレーンの次ウェーブでの扱い #226） =="
+
+H226_RS_STEP3="$(awk '/^### Step 3:/{f=1} /^### Step 4:/{f=0} f' "$RUN_SKILL_FLAT")"
+# 「### Step 8:」見出しは skills/run/references/recovery.md にも同名の見出しがあり
+# RUN_SKILL_FLAT では SKILL.md 本体のあとに全 references/*.md が連結されるため、単純に
+# 「### Step 8:」〜次の見出しで区切るとrecovery.md側の同名見出しを拾って以降の全参照ファイルまで
+# 範囲が漏れる。SKILL.md にのみ存在する固有の見出し・文言で区切る。
+H226_RS_STEP8="$(awk '/^#### 見送られたレーンの次ウェーブでの扱い（#226）/{f=1} /^\*\*ウェーブ内では再試行しない。\*\*/{f=0} f' "$RUN_SKILL_FLAT")"
+
+# --- Step 3 に「前ウェーブで見送られたタスクの載せ替え」手順があり、git rebase を使う ---
+case "$H226_RS_STEP3" in
+  *'見送られたタスク'*'git rebase'*)
+    pass "SKILL.md: Step 3 に前ウェーブで見送られたタスクの載せ替え手順（git rebase）がある（#226）" ;;
+  *)
+    fail "SKILL.md: Step 3 に前ウェーブで見送られたタスクの載せ替え手順（git rebase）がある（#226）" \
+      "$H226_RS_STEP3" ;;
+esac
+
+# --- コミットを持つレーンに対して git reset --hard を使わない旨が明記されている ---
+case "$H226_RS_STEP3" in
+  *'git reset --hard'*'使わず'*)
+    pass "SKILL.md: Step 3 の載せ替え手順で git reset --hard を使わない旨が明記されている（#226）" ;;
+  *)
+    fail "SKILL.md: Step 3 の載せ替え手順で git reset --hard を使わない旨が明記されている（#226）" \
+      "$H226_RS_STEP3" ;;
+esac
+
+# --- レーンがコミットを持つかの判定手段（git log WAVE_BASE..レーンブランチ）が示されている ---
+case "$H226_RS_STEP3" in
+  *'git log --oneline "[WAVE_BASE]".."[前ウェーブの作業ブランチ]"'*)
+    pass "SKILL.md: Step 3 にレーンがコミットを持つかの判定手段（git log）が示されている（#226）" ;;
+  *)
+    fail "SKILL.md: Step 3 にレーンがコミットを持つかの判定手段（git log）が示されている（#226）" \
+      "$H226_RS_STEP3" ;;
+esac
+
+# --- 競合解決時に先行レーンの変更を消してはならない旨が明記されている ---
+case "$H226_RS_STEP3" in
+  *'先に取り込まれたレーンの変更を消して'*)
+    pass "SKILL.md: Step 3 の載せ替え手順に先行レーンの変更を消してはならない旨がある（#226）" ;;
+  *)
+    fail "SKILL.md: Step 3 の載せ替え手順に先行レーンの変更を消してはならない旨がある（#226）" \
+      "$H226_RS_STEP3" ;;
+esac
+
+# --- Step 8 に、コミットを持つレーンと持たないレーンの分岐が明記されている ---
+case "$H226_RS_STEP8" in
+  *'コミットを持たないレーン'*'コミットを持つレーン'*)
+    pass "SKILL.md: Step 8 にコミットを持つレーンと持たないレーンの分岐が明記されている（#226）" ;;
+  *)
+    fail "SKILL.md: Step 8 にコミットを持つレーンと持たないレーンの分岐が明記されている（#226）" \
+      "$H226_RS_STEP8" ;;
+esac
+
+# --- Step 8 でも、コミットを持つレーンに git reset --hard を使ってはならない旨が明記されている ---
+case "$H226_RS_STEP8" in
+  *'git reset --hard'*'使ってはならない'*)
+    pass "SKILL.md: Step 8 にコミットを持つレーンで git reset --hard を使ってはならない旨がある（#226）" ;;
+  *)
+    fail "SKILL.md: Step 8 にコミットを持つレーンで git reset --hard を使ってはならない旨がある（#226）" \
+      "$H226_RS_STEP8" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# skills/run/references/review.md: Review issueテンプレートの「- 前提:」「## 対象ファイル」
+# 節の欠落によりR3の指摘対応ループが完全逐次化する問題（回帰防止 #232）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== skills/run/references/review.md（Review issueテンプレートの前提・対象ファイル #232） =="
+
+H232_REVIEW_REF="${REPO_ROOT}/skills/run/references/review.md"
+H232_R2_SECTION="$(awk '/^### R2: 指摘をissue化/{f=1} /^### 指摘対応時に「性質」を言語化させる/{f=0} f' "$H232_REVIEW_REF")"
+
+# --- テンプレートのheredocに「- 前提: なし」が含まれている ---
+case "$H232_R2_SECTION" in
+  *'- 前提: なし'*)
+    pass "review.md: Review issueテンプレートに「- 前提: なし」が含まれている（#232）" ;;
+  *)
+    fail "review.md: Review issueテンプレートに「- 前提: なし」が含まれている（#232）" \
+      "$H232_R2_SECTION" ;;
+esac
+
+# --- 依存がある場合に「- 前提: #N」へ書き換える旨が注記されている ---
+case "$H232_R2_SECTION" in
+  *'依存'*'- 前提: #N'*)
+    pass "review.md: 依存がある場合「- 前提: #N」へ書き換える旨が注記されている（#232）" ;;
+  *)
+    fail "review.md: 依存がある場合「- 前提: #N」へ書き換える旨が注記されている（#232）" \
+      "$H232_R2_SECTION" ;;
+esac
+
+# --- テンプレートのheredocに「## 対象ファイル」節が含まれている ---
+case "$H232_R2_SECTION" in
+  *'## 対象ファイル'*)
+    pass "review.md: Review issueテンプレートに「## 対象ファイル」節が含まれている（#232）" ;;
+  *)
+    fail "review.md: Review issueテンプレートに「## 対象ファイル」節が含まれている（#232）" \
+      "$H232_R2_SECTION" ;;
+esac
+
+# --- 「## 対象ファイル」節がlocationから得られるファイルを列挙する旨が説明されている ---
+case "$H232_R2_SECTION" in
+  *'location'*'対象ファイル'*)
+    pass "review.md: 「## 対象ファイル」節がlocationから列挙する旨が説明されている（#232）" ;;
+  *)
+    fail "review.md: 「## 対象ファイル」節がlocationから列挙する旨が説明されている（#232）" \
+      "$H232_R2_SECTION" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 結果集計
