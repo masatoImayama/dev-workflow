@@ -16791,8 +16791,10 @@ case "$(cat "$DOCTOR_OK_OUT")" in
 esac
 
 case "$(cat "$DOCTOR_OK_OUT")" in
-  *"pip install code-review-graph"*) pass "doctor.sh: code-review-graph未導入時に貼り付け可能な導入コマンドが出る（#218）" ;;
-  *) fail "doctor.sh: code-review-graph未導入時に貼り付け可能な導入コマンドが出る（#218）" "$(cat "$DOCTOR_OK_OUT")" ;;
+  *"bash scripts/install-optional-mcp.sh"*"--only code-review-graph"*) \
+    pass "doctor.sh: code-review-graph未導入時にinstall-optional-mcp.sh経由の案内が出る（環境依存のコマンドを固定文字列で案内しない。#233）" ;;
+  *) fail "doctor.sh: code-review-graph未導入時にinstall-optional-mcp.sh経由の案内が出る（環境依存のコマンドを固定文字列で案内しない。#233）" \
+    "$(cat "$DOCTOR_OK_OUT")" ;;
 esac
 
 case "$(cat "$DOCTOR_OK_OUT")" in

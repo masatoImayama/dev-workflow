@@ -79,10 +79,16 @@ echo "=== 任意依存（未導入でも dev-workflow は従来どおり動作�
 # 「## 対象ツール」節・「## 申し送りに対してどう応えたか（#80 レビュー対応）」節。
 # ここではハードコードして表示するが、正本は docs/optional-mcp-tools.md であり、
 # 齟齬が出た場合はこのスクリプトではなく docs/optional-mcp-tools.md 側を直すこと。
+#
+# code-review-graph の導入コマンドは環境（pip/pip3/pipx/uvx のいずれが入っているか）に
+# よって変わるため、ここでは特定のコマンドをハードコードしない（#233）。代わりに、
+# 実行時に前提を検出して正しいコマンドを組み立てる scripts/install-optional-mcp.sh の
+# 実行を案内する。この性質（利用者に貼り付けさせる導入コマンドは、その環境で実際に
+# 実行可能なものであること）は #234 でも問題になった。
 CONTEXT7_PACKAGE="@upstash/context7-mcp"
 CONTEXT7_INSTALL_CMD="npm install -g @upstash/context7-mcp"
 CODE_REVIEW_GRAPH_PACKAGE="code-review-graph"
-CODE_REVIEW_GRAPH_INSTALL_CMD="pip install code-review-graph"
+CODE_REVIEW_GRAPH_INSTALL_CMD="bash scripts/install-optional-mcp.sh --apply --only code-review-graph"
 
 if command -v context7-mcp >/dev/null 2>&1; then
   echo "[OK] context7 (${CONTEXT7_PACKAGE}): 導入済み ($(command -v context7-mcp))"
