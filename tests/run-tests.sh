@@ -17473,6 +17473,80 @@ else
     "見つかりません: ${DOC215_CODEX_AGENT_PLANNER}"
 fi
 
+# ---------------------------------------------------------------------------
+echo "== #230 で変わった編成規則が core/roles/planner.md に反映されていること（#238） =="
+
+# #230 の修正方針は「仕様上どうしても保証できない範囲が残るなら、その限界を
+# plan-waves.sh ヘッダと planner.md に明記する」と求めていたが、明記されたのは
+# plan-waves.sh のヘッダコメントだけで、core/roles/planner.md は#216時点の記述の
+# まま取り残されていた（レビュー指摘 #238）。
+
+DOC238_PLANNER_ROLE="${REPO_ROOT}/core/roles/planner.md"
+DOC238_PLAN_WAVES="${REPO_ROOT}/scripts/plan-waves.sh"
+DOC238_AGENT_PLANNER="${REPO_ROOT}/agents/planner.md"
+DOC238_CODEX_AGENT_PLANNER="${REPO_ROOT}/codex-agents/planner.toml"
+
+# --- core/roles/planner.md: #216時点の古い記述（別サブバッチに分かれ、並列度が
+#     不必要に落ちる）が置き換えられ、残っていないこと ---
+if grep -Fq '別サブバッチに分かれ、並列度が不必要に落ちる' "$DOC238_PLANNER_ROLE"; then
+  fail "core/roles/planner.md: #216時点の古い記述（別サブバッチに分かれる旨）が置き換えられている（#238）" \
+    "$(grep -n '別サブバッチに分かれ' "$DOC238_PLANNER_ROLE")"
+else
+  pass "core/roles/planner.md: #216時点の古い記述（別サブバッチに分かれる旨）が置き換えられている（#238）"
+fi
+
+# --- core/roles/planner.md: 重なるタスクは専用サブバッチへ単独配置され、
+#     重なるタスク同士は必ず同一レーンで逐次実行される旨が明記されている ---
+if grep -Fq '専用サブバッチへ単独配置' "$DOC238_PLANNER_ROLE" && grep -Fq '重なるタスク同士は必ず同一レーン' "$DOC238_PLANNER_ROLE"; then
+  pass "core/roles/planner.md: 重なるタスクが専用サブバッチへ単独配置され同一レーンで逐次実行される旨が明記されている（#238）"
+else
+  fail "core/roles/planner.md: 重なるタスクが専用サブバッチへ単独配置され同一レーンで逐次実行される旨が明記されている（#238）"
+fi
+
+# --- core/roles/planner.md: 独立した重なりグループが複数あっても全てレーン1に
+#     直列化される（並列度が1まで落ちうる）旨が明記されている ---
+if grep -Fq '独立した重なりグループが複数あっても' "$DOC238_PLANNER_ROLE" && grep -Fq '全てレーン1に直列化される' "$DOC238_PLANNER_ROLE"; then
+  pass "core/roles/planner.md: 独立した重なりグループが複数あっても全てレーン1に直列化される旨が明記されている（#238）"
+else
+  fail "core/roles/planner.md: 独立した重なりグループが複数あっても全てレーン1に直列化される旨が明記されている（#238）"
+fi
+
+# --- core/roles/planner.md: 過剰列挙・宣言漏れのコストが「別サブバッチに分かれる」
+#     ではなく「ウェーブ全体の直列化」であると明記されている ---
+if grep -Fq 'ウェーブ全体の直列化' "$DOC238_PLANNER_ROLE"; then
+  pass "core/roles/planner.md: 過剰列挙・宣言漏れのコストが『ウェーブ全体の直列化』と明記されている（#238）"
+else
+  fail "core/roles/planner.md: 過剰列挙・宣言漏れのコストが『ウェーブ全体の直列化』と明記されている（#238）"
+fi
+
+# --- core/roles/planner.md の#238追記はadapters/*/build.shの再生成対象であるため、
+#     生成物側にも同じ記述が反映されていることを固定する（生成漏れの検出。#215の同種テストと同じ形） ---
+if [ -f "$DOC238_AGENT_PLANNER" ] && grep -Fq '専用サブバッチへ単独配置' "$DOC238_AGENT_PLANNER" && grep -Fq 'ウェーブ全体の直列化' "$DOC238_AGENT_PLANNER"; then
+  pass "agents/planner.md: 正本（core/roles/planner.md）の#238追記内容が反映されている（#238）"
+else
+  fail "agents/planner.md: 正本（core/roles/planner.md）の#238追記内容が反映されている（#238）" \
+    "見つかりません: ${DOC238_AGENT_PLANNER}"
+fi
+
+if [ -f "$DOC238_CODEX_AGENT_PLANNER" ] && grep -Fq '専用サブバッチへ単独配置' "$DOC238_CODEX_AGENT_PLANNER" && grep -Fq 'ウェーブ全体の直列化' "$DOC238_CODEX_AGENT_PLANNER"; then
+  pass "codex-agents/planner.toml: 正本の#238追記内容が反映されている（#238）"
+else
+  fail "codex-agents/planner.toml: 正本の#238追記内容が反映されている（#238）" \
+    "見つかりません: ${DOC238_CODEX_AGENT_PLANNER}"
+fi
+
+# --- scripts/plan-waves.sh: ヘッダの「実効並列度の低下は file-overlap-summary 警告で
+#     報告される」が、最大サブバッチ人数が落ちない場合はsummaryが出ないことを踏まえた
+#     表現に改められていること ---
+PLAN_WAVES_HEADER="$(sed -n '1,120p' "$DOC238_PLAN_WAVES")"
+case "$PLAN_WAVES_HEADER" in
+  *"最大サブバッチ人数が落ちない場合"*)
+    pass "scripts/plan-waves.sh: ヘッダが『最大サブバッチ人数が落ちない場合はsummaryが出ない』ことを踏まえた表現になっている（#238）" ;;
+  *)
+    fail "scripts/plan-waves.sh: ヘッダが『最大サブバッチ人数が落ちない場合はsummaryが出ない』ことを踏まえた表現になっている（#238）" \
+      "$PLAN_WAVES_HEADER" ;;
+esac
+
 # scripts/doctor.sh（環境診断を1コマンドにまとめる。#218）
 #
 # 必須依存（gh/docker）・任意依存（context7-mcp/code-review-graph）・サンドボックス
