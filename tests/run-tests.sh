@@ -17338,6 +17338,61 @@ case "$RUN_SKILL_EPICGATE" in
       "$RUN_SKILL_EPICGATE" ;;
 esac
 
+# --- ケース10d: skills-codex/dev-workflow-run/SKILL.md（Codex用ミラー）のEpic統合ゲートも
+#     同様にPIPESTATUS/pipefailで終了コードを取り出し、GATE_RCで合否判定していること（#236）。
+#     #228でskills/run/SKILL.mdは修正済みだが、手書きミラーであるskills-codex/側は
+#     adapters/*/build.shの生成物ではないため--checkでは検出できず、ここで明示的に
+#     担保する必要がある。終了コードを失うとテストが落ちていても統合ゲートが通過と
+#     判定される（偽陰性）。 ---
+CRS_EPICGATE_FRESH="$(awk '/^## Epic 統合ゲート/{f=1} /^## Epic一括レビュー/{f=0} f' "$CODEX_RUN_SKILL")"
+
+CRS_EPICGATE_HAS_PIPESTATUS=false
+case "$CRS_EPICGATE_FRESH" in
+  *PIPESTATUS*|*"set -o pipefail"*) CRS_EPICGATE_HAS_PIPESTATUS=true ;;
+esac
+if [ "$CRS_EPICGATE_HAS_PIPESTATUS" = true ]; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: Epic統合ゲートのテスト実行パイプがPIPESTATUS/pipefailで終了コードを取り出している（#236）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: Epic統合ゲートのテスト実行パイプがPIPESTATUS/pipefailで終了コードを取り出している（#236）" \
+    "$CRS_EPICGATE_FRESH"
+fi
+
+CRS_EPICGATE_GATE_RC_COUNT="$(printf '%s\n' "$CRS_EPICGATE_FRESH" | grep -c 'GATE_RC')"
+if [ "$CRS_EPICGATE_GATE_RC_COUNT" -ge 2 ]; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: Epic統合ゲートの合否判定がGATE_RC（PIPESTATUS由来の終了コード）を参照している（#236）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: Epic統合ゲートの合否判定がGATE_RC（PIPESTATUS由来の終了コード）を参照している（#236）" \
+    "count=${CRS_EPICGATE_GATE_RC_COUNT}"
+fi
+
+# --- ケース10e: 既存のログ専用tee箇所（BASE_EVIDENCE_FILE / EVIDENCE_FILE）まで
+#     不要に書き換えていないこと（#236の完了条件「ログ目的だけのtee箇所を不要に
+#     書き換えていない」）。これらの箇所にGATE_RCが紛れ込んでいないことを確認する。 ---
+CRS_BASE_EVIDENCE_BLOCK="$(awk '/BASE_EVIDENCE_FILE/{print}' "$CODEX_RUN_SKILL")"
+case "$CRS_BASE_EVIDENCE_BLOCK" in
+  *GATE_RC*)
+    fail "skills-codex/dev-workflow-run/SKILL.md: ログ専用のBASE_EVIDENCE_FILE箇所にGATE_RCを混入させていない（#236）" \
+      "$CRS_BASE_EVIDENCE_BLOCK" ;;
+  *)
+    pass "skills-codex/dev-workflow-run/SKILL.md: ログ専用のBASE_EVIDENCE_FILE箇所にGATE_RCを混入させていない（#236）" ;;
+esac
+
+# --- ケース10f: Claude用（skills/run/SKILL.md）とCodex用（skills-codex/dev-workflow-run/SKILL.md）
+#     の両方に同じ性質（PIPESTATUS/pipefailで終了コードを取り出し、GATE_RCで合否判定する）が
+#     あることを確認する。将来また一方だけ直して他方が取り残される乖離を防ぐための
+#     突き合わせ検査（#236の設計上の注意「両者が将来また乖離しないよう、テストは
+#     『Claude用とCodex用の両方に同じ性質があること』を検査する形が望ましい」に対応）。 ---
+RUN_SKILL_HAS_PIPESTATUS=false
+case "$RUN_SKILL_EPICGATE" in
+  *PIPESTATUS*|*"set -o pipefail"*) RUN_SKILL_HAS_PIPESTATUS=true ;;
+esac
+if [ "$RUN_SKILL_HAS_PIPESTATUS" = true ] && [ "$CRS_EPICGATE_HAS_PIPESTATUS" = true ]; then
+  pass "skills/run/SKILL.mdとskills-codex/dev-workflow-run/SKILL.mdの両方でEpic統合ゲートがPIPESTATUS/pipefailを使っている（乖離防止 #236）"
+else
+  fail "skills/run/SKILL.mdとskills-codex/dev-workflow-run/SKILL.mdの両方でEpic統合ゲートがPIPESTATUS/pipefailを使っている（乖離防止 #236）" \
+    "claude=${RUN_SKILL_HAS_PIPESTATUS} codex=${CRS_EPICGATE_HAS_PIPESTATUS}"
+fi
+
 # ---------------------------------------------------------------------------
 echo "== Task issueテンプレートの「## 対象ファイル」節の必須化（#215） =="
 

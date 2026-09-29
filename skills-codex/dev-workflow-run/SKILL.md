@@ -501,9 +501,15 @@ git checkout "${EPIC_BRANCH}"
 
 # 1) テスト（Docker sandbox内）— 1回にまとめる。落ちたら不合格
 # 固定パスは複数ウェーブ・並列実行間で衝突しうるため mktemp で一意化する（issue #145）
+# `| tee` へ単純にパイプへ流すと、パイプライン全体の終了コードは最後のコマンド
+# （tee、ほぼ常に0）のものになり、テスト実行コマンドの終了コードが失われる
+# （issue #236。Claude版skills/run/SKILL.mdの#228対応と同種の回帰）。
+# PIPESTATUSで明示的に取り出し、GATE_RCとして保持してから合否判定に使うこと
 EPIC_GATE_TEST_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-epic-gate-test-output.XXXXXX")"
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" '[全テストを走らせるコマンド]' \
   2>&1 | tee "$EPIC_GATE_TEST_LOG"
+GATE_RC=${PIPESTATUS[0]}
+echo "GATE_RC=${GATE_RC}"
 
 # 1b) SKIP件数はgeneratorの自己申告に依存せず、run自身がcount-skips.shで機械的に数える。
 #     0件でも必ず表示する（黙って省略しない）
@@ -513,6 +519,12 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/count-skips.sh" --file "$EPIC_GATE_TEST_LOG"
 # 2) 可読性ガード — Epicブランチの差分に対して実行（PostToolUseフックと同じ判定）
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-readability.sh" --git
 ```
+
+**合否は `GATE_RC`（PIPESTATUS由来のテスト実行コマンドの終了コード）で判定する。**
+`tee` 越しの標準出力にテスト失敗の文字列が見えていても、終了コードを読み落として
+「出力に FAIL が無かったから合格」と誤読しない。`GATE_RC` が非0、または
+`check-readability.sh --git` が非0で終了した場合は不合格として扱い、下記
+「失敗時の扱い」へ進む。
 
 **対象の選択を generator に委ねない。** ゲートで走らせるのは**プロジェクトの全テスト**とする。
 `make test` 等のプロジェクト標準ターゲットがあればそれを優先する。
