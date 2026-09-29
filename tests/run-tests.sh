@@ -3790,6 +3790,106 @@ assert_eq "#216 gh モード: #601にmissing-files警告が出る" "1" \
   "$(printf '%s\n' "$PW216_GH_OUTPUT" | grep -c '^warn	missing-files	601$')"
 
 # ---------------------------------------------------------------------------
+# plan-waves.sh: #230（満杯サブバッチ経由で重なり判定がスキップされ並列実行される不具合の修正）
+#
+# issue本文の実測ケースをそのまま再現する: --lanes 2 で #1=a.txt, #2=b.txt, #3=b.txt を
+# 与えると、旧実装ではサブバッチ1が{#1,#2}で満杯（lanes=2）になり、#3を配置しようとした際
+# サブバッチ1は「空きが無い」ため重なり判定自体がスキップされる。結果、#2はsubbatch1
+# （レーンB）、#3はsubbatch2（レーンA）に分かれ、b.txtを共有するにもかかわらず並列実行
+# されてしまっていた（warn file-overlapも出ないため人間が気付く手段も無かった）。
+# ---------------------------------------------------------------------------
+
+echo "== plan-waves.sh（#230: 満杯サブバッチ経由の重なり検出漏れの修正） =="
+
+PW230_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw230.XXXXXX")"
+{
+  printf '1101\topen\t- 前提: なし\ta.txt\n'
+  printf '1102\topen\t- 前提: なし\tb.txt\n'
+  printf '1103\topen\t- 前提: なし\tb.txt\n'
+} > "$PW230_FIXTURE"
+
+PW230_OUTPUT="$(bash "$PLAN_WAVES_SCRIPT" --from-file "$PW230_FIXTURE" --lanes 2)"
+
+assert_eq "#230実測再現: #1101(a.txt、重なり無し)はsubbatch1" "1" \
+  "$(pw_value 1101 subbatch "$PW230_OUTPUT")"
+assert_eq "#230実測再現: #1102(b.txt)は対象ファイルの重なりにより単独の新規サブバッチ(2)へ" \
+  "2" "$(pw_value 1102 subbatch "$PW230_OUTPUT")"
+assert_eq "#230実測再現: #1103(b.txt)は#1102と重なるため単独の新規サブバッチ(3)へ（満杯経由のスキップで見落とされない）" \
+  "3" "$(pw_value 1103 subbatch "$PW230_OUTPUT")"
+assert_eq "#230実測再現: file-overlap警告に#1103と#1102がb.txtで重なった旨が出る" "1" \
+  "$(printf '%s\n' "$PW230_OUTPUT" | grep -c '^warn	file-overlap	1103	1102	b.txt$')"
+assert_eq "#230実測再現: file-overlap-summaryで実効並列度1・指定lanes2が出る" "1" \
+  "$(printf '%s\n' "$PW230_OUTPUT" | grep -c '^warn	file-overlap-summary	1	3	1	2$')"
+
+# #1102と#1103はどちらも「単独のサブバッチ」に入る（それぞれのサブバッチ内の唯一のメンバー
+# ＝常に順位1＝同一レーン）ため、サブバッチをまたいでも同一レーンで逐次実行される。
+# 対象ファイルが重ならない#1101が#1102・#1103のいずれとも同居していないことも確認する
+# （単独化されたサブバッチには誰も同居させない）。
+if printf '%s\n' "$PW230_OUTPUT" | grep -q '^task	1101	wave	1	subbatch	2	'; then
+  fail "#230実測再現: #1101は#1102の単独サブバッチに同居しない" "output=[${PW230_OUTPUT}]"
+else
+  pass "#230実測再現: #1101は#1102の単独サブバッチに同居しない"
+fi
+
+# ---------------------------------------------------------------------------
+# plan-waves.sh: #231（対象ファイル宣言の表記ゆれの正規化、「- なし」の予約語化）
+# ---------------------------------------------------------------------------
+
+echo "== plan-waves.sh（#231: 対象ファイル宣言の表記ゆれ正規化） =="
+
+# --- 表記ゆれ（バッククォート付き/前後空白/先頭./）が混在していても同一ファイルとして
+#     重なりが検出される（実データで確認済みの表記: `` `scripts/sandbox-exec.sh` ``） ---
+PW231_NORM_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw231-norm.XXXXXX")"
+{
+  printf '1401\topen\t- 前提: なし\t`scripts/sandbox-exec.sh`\n'
+  printf '1402\topen\t- 前提: なし\t./scripts/sandbox-exec.sh\n'
+  printf '1403\topen\t- 前提: なし\t scripts/sandbox-exec.sh \n'
+} > "$PW231_NORM_FIXTURE"
+
+PW231_NORM_OUTPUT="$(bash "$PLAN_WAVES_SCRIPT" --from-file "$PW231_NORM_FIXTURE" --lanes 3)"
+
+assert_eq "#231: バッククォート付き表記の#1401はsubbatch1" "1" \
+  "$(pw_value 1401 subbatch "$PW231_NORM_OUTPUT")"
+assert_eq "#231: ./接頭表記の#1402は正規化後#1401と同一ファイルとして重なり、単独サブバッチ2へ" \
+  "2" "$(pw_value 1402 subbatch "$PW231_NORM_OUTPUT")"
+assert_eq "#231: 前後空白付き表記の#1403も正規化後#1401・#1402と同一ファイルとして重なり、単独サブバッチ3へ" \
+  "3" "$(pw_value 1403 subbatch "$PW231_NORM_OUTPUT")"
+assert_eq "#231: file-overlap警告は正規化済みのパス(バッククォート等を含まない)で出る" "1" \
+  "$(printf '%s\n' "$PW231_NORM_OUTPUT" | grep -c '^warn	file-overlap	1402	1401	scripts/sandbox-exec.sh$')"
+
+# --- 「- なし」は対象ファイル0件の明示宣言として扱われ、実ファイルパス「なし」としては
+#     扱われない: (a) 宣言済みの実ファイルとは重ならない (b) 宣言漏れ（安全側）とも重ならない
+#     (c) 「- なし」同士も、文字列「なし」の一致では重ならない ---
+PW231_NASHI_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw231-nashi.XXXXXX")"
+{
+  printf '1501\topen\t- 前提: なし\tなし\n'
+  printf '1502\topen\t- 前提: なし\tscripts/z.sh\n'
+  printf '1503\topen\t- 前提: なし\t\n'
+  printf '1504\topen\t- 前提: なし\tなし\n'
+} > "$PW231_NASHI_FIXTURE"
+
+PW231_NASHI_OUTPUT="$(bash "$PLAN_WAVES_SCRIPT" --from-file "$PW231_NASHI_FIXTURE" --lanes 3)"
+
+assert_eq "#231 なし: #1501（- なし）は対象ファイルが無いため重ならず、フリーのsubbatch1に入る" \
+  "1" "$(pw_value 1501 subbatch "$PW231_NASHI_OUTPUT")"
+assert_eq "#231 なし: #1502（scripts/z.sh宣言）は#1503（宣言漏れ）と安全側で重なり単独subbatch2へ" \
+  "2" "$(pw_value 1502 subbatch "$PW231_NASHI_OUTPUT")"
+assert_eq "#231 なし: #1503（宣言漏れ）は#1502と重なるため単独subbatch3へ" \
+  "3" "$(pw_value 1503 subbatch "$PW231_NASHI_OUTPUT")"
+assert_eq "#231 なし: #1504（- なし）も対象ファイルが無いため重ならず、#1501と同居できるフリーのsubbatch1に入る" \
+  "1" "$(pw_value 1504 subbatch "$PW231_NASHI_OUTPUT")"
+
+if printf '%s\n' "$PW231_NASHI_OUTPUT" | grep -q '^warn	file-overlap	.*1501'; then
+  fail "#231 なし: 「- なし」の#1501はどのタスクとも重ならず警告が出ない" "output=[${PW231_NASHI_OUTPUT}]"
+else
+  pass "#231 なし: 「- なし」の#1501はどのタスクとも重ならず警告が出ない"
+fi
+assert_eq "#231 なし: 「- なし」宣言済みの#1501にはmissing-files警告が出ない（節自体はある）" "0" \
+  "$(printf '%s\n' "$PW231_NASHI_OUTPUT" | grep -c '^warn	missing-files	1501$')"
+assert_eq "#231 なし: 宣言漏れ（節が無い）の#1503にはmissing-files警告が出る" "1" \
+  "$(printf '%s\n' "$PW231_NASHI_OUTPUT" | grep -c '^warn	missing-files	1503$')"
+
+# ---------------------------------------------------------------------------
 # merge-lane.sh（merge-base 検証と wave ブランチ統合。Task #16）
 #
 # 一時 git リポジトリを組み立てて検証する（Docker 非依存）。scripts/merge-lane.sh は

@@ -38,7 +38,9 @@
 #   4列目（対象ファイル）はカンマ区切りのファイルパス一覧（例: "scripts/a.sh,docs/b.md"）。
 #   空文字列は「## 対象ファイル」節そのものが無い＝宣言漏れを意味する（Task #216）。
 #   4列目自体を省略した行（旧形式のフィクスチャ）も同じく空文字列として扱われ、既存Epicとの
-#   後方互換を保つ。
+#   後方互換を保つ。要素は比較前に正規化される（前後の空白・バッククォート・先頭の "./" を
+#   除去。#231）。要素が「なし」（正規化後の完全一致）の場合はその要素を実ファイルパスとして
+#   扱わない（対象ファイル0件の明示宣言。core/roles/planner.md「触るファイルが無いタスク」参照）。
 #
 # --lanes N: 既定3。環境変数 DEV_WORKFLOW_MAX_LANES があればそれを既定にする。
 # --skipped: カンマ区切りの issue 番号。それらに依存するタスクは推移的にスキップする。
@@ -49,13 +51,37 @@
 #   同一ウェーブ内でサブバッチを割り当てる際、対象ファイルが重なる2タスクを同一サブバッチに
 #   入れない（依存グラフ＝ウェーブの決定そのものは変えない。あくまでサブバッチ分割の追加制約）。
 #   判定は次のとおり:
-#     - 両方が宣言済みでファイルが重なる     -> 重なり。別サブバッチにする
+#     - 両方が宣言済みでファイルが重なる     -> 重なり
 #     - 両方が宣言済みでファイルが重ならない -> 従来どおり同居可能
-#     - 片方が宣言漏れ・もう片方が宣言済み（1件以上）-> 安全側に倒し、別サブバッチにする
+#     - 片方が宣言漏れ・もう片方が宣言済み（1件以上）-> 安全側に倒し重なり扱い
 #       （宣言漏れタスクが何を触るか不明なため）
 #     - 両方が宣言漏れ                       -> 従来どおり同居可能（後方互換。「## 対象ファイル」
 #       導入前の既存Epicで編成が変わらないようにするための扱い）
-#   この宣言は実装前の見積もりであり、実際に触るファイルと乖離しうる。節を書いた
+#     - 片方または両方が「- なし」（対象ファイル0件の明示宣言、#231）のみ  -> 重なりなし
+#       （実ファイル0件は何とも重ならない。宣言漏れの安全側ルールは適用しない）
+#   ファイルパスの比較前に正規化する（#231）: 前後の空白・バッククォート・先頭の "./" を
+#   除去してから比較する。real Task issue にバッククォート付き表記（`` `path` ``）と
+#   素のパス表記が混在していても同一ファイルとして検出できるようにするため
+#   （正規化しないと表記ゆれにより重なりが検出されず、危険側＝並列実行してしまう）。
+#
+#   レーン割当は「レーン L には各サブバッチの L 番目（サブバッチ内の昇順順位）のタスクが
+#   順に割り当てられる」という位置写像であり（skills/run/SKILL.md Step 3）、サブバッチ間に
+#   バリアは無い。そのため「別サブバッチにする」だけでは、たまたま別サブバッチの別順位
+#   （＝別レーン）に落ちると並列実行されてしまう（#230）。現在の出力形式（タスクごとの
+#   サブバッチ番号のみ。順位はサブバッチ内の昇順順位から事後計算される）では、いったん
+#   確定したタスクの順位を後から変更できない。そのため対象ファイルが1件でも重なるタスクは
+#   常に「新規かつそのタスク専用のサブバッチ」に単独で入れる。新規サブバッチの先頭（順位1）に
+#   単独で入る限り、そのタスクは常に順位1（レーン1）になるため、重なるタスク同士はサブバッチを
+#   またいでも必ず同一レーンに落ち、逐次実行が保証される。
+#
+#   既知の限界（仕様上どうしても保証できない範囲、#230）: 対象ファイルが重ならない独立した
+#   複数の「重なりグループ」が同一ウェーブに複数存在する場合、この方式では全グループが
+#   レーン1に直列化される（本来は別レーンに割ってよいはずの並列性を犠牲にする）。
+#   複数の独立したグループをそれぞれ別レーンに保ったまま安全に並列化するには、サブバッチ内の
+#   順位を予約する仕組み（出力形式の拡張）が必要であり、現在のplan-waves.shは対応していない。
+#   実効並列度の低下は file-overlap-summary 警告で報告される。
+#
+#   さらに、この宣言は実装前の見積もりであり、実際に触るファイルと乖離しうる。節を書いた
 #   （かつファイルが重ならない）からといって競合が起きない保証にはならない。makimaki-sso
 #   Epic #1 のウェーブ11では、実際に3レーン中2本が競合して見送りになった実例がある一方、
 #   その原因ファイル（tests/run-tests.sh 等）が当該タスクの「## 対象ファイル」節に
@@ -321,15 +347,54 @@ for _n in "${PLAN_LIST[@]}"; do
 done
 unset _n
 
+normalize_file_token() {
+  # normalize_file_token <1件のファイルトークン>
+  # 前後の空白・バッククォートの除去、先頭の "./" の除去（#231）。標準出力に正規化済みの
+  # トークンを返す。実在 Task issue の表記ゆれ（バッククォート付き/無しの混在、行末の空白、
+  # ./ 接頭）を吸収し、同一ファイルが表記違いで「重ならない」と誤判定されるのを防ぐ。
+  local t="$1"
+  t="${t#"${t%%[![:space:]]*}"}"
+  t="${t%"${t##*[![:space:]]}"}"
+  t="${t#\`}"
+  t="${t%\`}"
+  case "$t" in
+    ./*) t="${t#./}" ;;
+  esac
+  printf '%s' "$t"
+}
+
+split_files_normalized() {
+  # split_files_normalized <カンマ区切り生文字列>
+  # 戻り値は無い。グローバル配列 SPLIT_FILES_RESULT に正規化済みの実ファイルパスだけを積む。
+  # 「なし」（正規化後の完全一致。core/roles/planner.md「触るファイルが無いタスク」参照）は
+  # 「対象ファイル0件の明示宣言」を意味する予約語として扱い、実ファイルパスとして積まない
+  # （#231: 文字列「なし」がパスとして重なり判定に使われ、別タスクの「なし」と誤って
+  # 重なり判定されるのを防ぐ）。
+  local raw="$1" tok
+  SPLIT_FILES_RESULT=()
+  [ -n "$raw" ] || return 0
+  local arr=()
+  IFS=',' read -r -a arr <<< "$raw"
+  for tok in "${arr[@]}"; do
+    tok="$(normalize_file_token "$tok")"
+    [ -n "$tok" ] || continue
+    [ "$tok" != "なし" ] || continue
+    SPLIT_FILES_RESULT+=("$tok")
+  done
+}
+
 files_overlap() {
   # files_overlap <task_a> <task_b>
   # 戻り値 0=重なりあり（安全側判定含む。OVERLAP_FILE に理由/ファイル名を積む） 1=重なりなし
   #
   # 判定表（core/roles/planner.md「対象ファイル宣言（## 対象ファイル）の必須化」参照）:
-  #   両方宣言済みで重なるファイルがある   -> 重なり（OVERLAP_FILE=そのファイル）
-  #   両方宣言済みで重ならない             -> 重なりなし
-  #   片方が宣言漏れ・もう片方が1件以上宣言 -> 安全側に倒し重なり扱い（OVERLAP_FILE=理由文字列）
-  #   両方が宣言漏れ                       -> 重なりなし（既存Epicとの後方互換）
+  #   両方宣言済みで重なるファイルがある     -> 重なり（OVERLAP_FILE=そのファイル）
+  #   両方宣言済みで重ならない               -> 重なりなし
+  #   片方が宣言漏れ・もう片方が1件以上宣言   -> 安全側に倒し重なり扱い（OVERLAP_FILE=理由文字列）
+  #   片方が宣言漏れ・もう片方が「なし」のみ -> 重なりなし（#231: 「なし」は実ファイル0件が
+  #                                              明示されているため、宣言漏れ側が不明でも
+  #                                              重なりようがない）
+  #   両方が宣言漏れ                         -> 重なりなし（既存Epicとの後方互換）
   local a="$1" b="$2"
   local a_files="${FILES_LINE[$a]:-}" b_files="${FILES_LINE[$b]:-}"
   OVERLAP_FILE=""
@@ -337,19 +402,34 @@ files_overlap() {
   if [ -z "$a_files" ] && [ -z "$b_files" ]; then
     return 1
   fi
+
+  local a_arr=() b_arr=()
+  if [ -n "$a_files" ]; then
+    split_files_normalized "$a_files"
+    a_arr=("${SPLIT_FILES_RESULT[@]}")
+  fi
+  if [ -n "$b_files" ]; then
+    split_files_normalized "$b_files"
+    b_arr=("${SPLIT_FILES_RESULT[@]}")
+  fi
+
   if [ -z "$a_files" ] || [ -z "$b_files" ]; then
-    local declared="${a_files}${b_files}"
-    if [ -n "$declared" ]; then
-      OVERLAP_FILE="(宣言漏れのため不明。安全側に倒しています)"
-      return 0
+    # 片方は「## 対象ファイル」節そのものが無い（宣言漏れ）。もう片方の宣言側が「なし」
+    # のみ（実ファイル0件）なら、宣言漏れ側が何を触るか不明でも重なりようがない（#231）
+    local declared_arr=()
+    if [ -n "$a_files" ]; then
+      declared_arr=("${a_arr[@]}")
+    else
+      declared_arr=("${b_arr[@]}")
     fi
-    return 1
+    if [ "${#declared_arr[@]}" -eq 0 ]; then
+      return 1
+    fi
+    OVERLAP_FILE="(宣言漏れのため不明。安全側に倒しています)"
+    return 0
   fi
 
   local f g
-  local a_arr=() b_arr=()
-  IFS=',' read -r -a a_arr <<< "$a_files"
-  IFS=',' read -r -a b_arr <<< "$b_files"
   for f in "${a_arr[@]}"; do
     [ -n "$f" ] || continue
     for g in "${b_arr[@]}"; do
@@ -484,49 +564,88 @@ while [ "$_w" -le "$MAX_WAVE" ]; do
   done
   # ACTIVE_LIST は PLAN_LIST（昇順整列済み）由来の順序をそのまま保つため既に昇順
   #
-  # サブバッチ割当は貪欲な first-fit で行う（Task #216）。対象ファイルが重ならない限り、
-  # 先頭から LANES 件ずつ詰める従来のチャンク分割（i/LANES+1）と完全に同じ結果になる
-  # （先頭の空いているサブバッチに常に詰められるため）。対象ファイルが重なるタスクだけ、
-  # その相手がいるサブバッチを避けて次のサブバッチへ回す。
+  # サブバッチ割当（Task #216、#230で修正）。
+  #
+  # run側のレーン割当は「レーン L = 各サブバッチの L 番目（サブバッチ内の昇順順位）」という
+  # 位置写像であり、サブバッチ間にバリアは無い（skills/run/SKILL.md Step 3）。そのため、
+  # 対象ファイルが重なる2タスクを「別サブバッチに分ける」だけでは、順位（レーン）が
+  # 一致しない限り並列実行されうる。現在の出力形式（タスクごとのサブバッチ番号のみ）では
+  # 一度確定した順位を後から変えられないため、対象ファイルが1件でも重なるタスクは常に
+  # 「新規かつそのタスク専用のサブバッチ」に単独で入れる（＝常に順位1＝レーン1になる）。
+  # これにより、重なるタスク同士はサブバッチをまたいでも必ず同一レーンに落ち、逐次実行が
+  # 保証される（ヘッダコメント「対象ファイルの重なりによるサブバッチ分割」参照。既知の
+  # 限界も同所に記載）。
+  #
+  # 重なりが無いタスク（従来どおり）は貪欲な first-fit で、単独化されていないサブバッチへ
+  # 詰める。対象ファイルが重なるタスクが1件も無いウェーブでは、先頭から LANES 件ずつ詰める
+  # 従来のチャンク分割（i/LANES+1）と完全に同じ結果になる（後方互換）。
   declare -A _sb_members   # サブバッチ番号 -> "n1,n2,..."（そのサブバッチに入っているタスク）
+  declare -A _sb_solo      # サブバッチ番号 -> 1（対象ファイルの重なりにより単独化されたサブバッチ）
+  declare -A _has_conflict # タスク番号 -> 1（ウェーブ内の他タスクと対象ファイルが1件でも重なる）
   _sb_count=0
+
+  # 挿入順序に依存させないため、ウェーブ全体を対象に先に総当たりで重なりの有無だけを判定する
+  # （どの相手と重なるかは配置時に改めて files_overlap で確認し、FILE_OVERLAP_DETAIL に積む）
   for _n in "${_tasks[@]}"; do
-    _placed=0
-    _s=1
-    while [ "$_s" -le "$_sb_count" ]; do
-      _members_csv="${_sb_members[$_s]}"
-      IFS=',' read -r -a _members_arr <<< "$_members_csv"
-      if [ "${#_members_arr[@]}" -lt "$LANES" ]; then
-        _conflict=0
-        for _m in "${_members_arr[@]}"; do
-          [ -n "$_m" ] || continue
-          if files_overlap "$_n" "$_m"; then
-            _conflict=1
-            FILE_OVERLAP_DETAIL+=("${_n}:${_m}:${OVERLAP_FILE}")
-            FILE_OVERLAP_TASKS+=("$_n")
-          fi
-        done
-        if [ "$_conflict" -eq 0 ]; then
-          _sb_members[$_s]="${_members_csv:+${_members_csv},}${_n}"
-          SUBBATCH_OF["$_n"]="$_s"
-          _placed=1
-          break
-        fi
+    _has_conflict["$_n"]=0
+  done
+  _ti=0
+  while [ "$_ti" -lt "${#_tasks[@]}" ]; do
+    _tj=$((_ti + 1))
+    while [ "$_tj" -lt "${#_tasks[@]}" ]; do
+      if files_overlap "${_tasks[$_ti]}" "${_tasks[$_tj]}"; then
+        _has_conflict["${_tasks[$_ti]}"]=1
+        _has_conflict["${_tasks[$_tj]}"]=1
       fi
-      _s=$((_s + 1))
+      _tj=$((_tj + 1))
     done
-    if [ "$_placed" -eq 0 ]; then
+    _ti=$((_ti + 1))
+  done
+
+  for _n in "${_tasks[@]}"; do
+    if [ "${_has_conflict[$_n]}" -eq 1 ]; then
+      # 重なりあり: 必ず新規サブバッチに単独で入れる（常に順位1＝レーン1にする）
       _sb_count=$((_sb_count + 1))
       _sb_members[$_sb_count]="$_n"
+      _sb_solo[$_sb_count]=1
       SUBBATCH_OF["$_n"]="$_sb_count"
+      for _m in "${_tasks[@]}"; do
+        [ "$_m" != "$_n" ] || break   # 昇順のため、自分に到達したら以降は未配置（まだ見ない）
+        if files_overlap "$_n" "$_m"; then
+          FILE_OVERLAP_DETAIL+=("${_n}:${_m}:${OVERLAP_FILE}")
+          FILE_OVERLAP_TASKS+=("$_n")
+        fi
+      done
+    else
+      # 重なりなし: 空きがあり、かつ単独化されていないサブバッチへ貪欲に詰める
+      _placed=0
+      _s=1
+      while [ "$_s" -le "$_sb_count" ]; do
+        if [ -z "${_sb_solo[$_s]:-}" ]; then
+          _members_csv="${_sb_members[$_s]}"
+          IFS=',' read -r -a _members_arr <<< "$_members_csv"
+          if [ "${#_members_arr[@]}" -lt "$LANES" ]; then
+            _sb_members[$_s]="${_members_csv:+${_members_csv},}${_n}"
+            SUBBATCH_OF["$_n"]="$_s"
+            _placed=1
+            break
+          fi
+        fi
+        _s=$((_s + 1))
+      done
+      if [ "$_placed" -eq 0 ]; then
+        _sb_count=$((_sb_count + 1))
+        _sb_members[$_sb_count]="$_n"
+        SUBBATCH_OF["$_n"]="$_sb_count"
+      fi
     fi
   done
-  unset _sb_members
+  unset _sb_members _sb_solo _has_conflict
   _joined="$(IFS=,; printf '%s' "${_tasks[*]:-}")"
   WAVE_TASKS[_w]="$_joined"
   _w=$((_w + 1))
 done
-unset _w _n _tasks _joined _s _sb_count _placed _conflict _m _members_csv _members_arr
+unset _w _n _tasks _joined _s _sb_count _placed _m _members_csv _members_arr _ti _tj
 
 # ---------------------------------------------------------------------------
 # 実効並列度（宣言漏れ警告で使う。min(指定lanes, 各ウェーブに属するタスク数の最大値)）
