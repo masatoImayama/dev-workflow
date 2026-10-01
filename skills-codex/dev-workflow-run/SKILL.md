@@ -863,6 +863,7 @@ blast radius を使う場合の指示例（R1 の基本形に1行加えるだけ
 ```
 Epic #<epic番号> の全変更をレビューしてください。
 - モード: epic-review
+- 応答言語: [RESOLVED_LANG]（人間向け出力はこの言語で書くこと。コミット種別・JSON のキーと enum 値・`## 対象ファイル` 等の機械可読な要素は英語規約のまま変えないこと）
 - 差分範囲: main...<EPIC_BRANCH>
 - 変更ファイル数が50超のため、code-review-graph の blast radius の算出を使って読む優先順位を付けてよい
 - 最後に必ずJSON（verdict / reviewed_commit / findings）を出力すること
@@ -872,6 +873,7 @@ code-review-graph が未導入の場合（従来どおり Phase 単位に分割�
 
 ```
 Epic #<epic番号> のうち Phase 1 の変更をレビューしてください。
+- 応答言語: [RESOLVED_LANG]（人間向け出力はこの言語で書くこと。コミット種別・JSON のキーと enum 値・`## 対象ファイル` 等の機械可読な要素は英語規約のまま変えないこと）
 - 差分範囲: main...<EPIC_BRANCH> のうち <Phase1で変更されたファイル群>
 ```
 

@@ -18557,6 +18557,76 @@ assert_eq "出力順序: 2行目がsource=" "source" "$RL_ORDER_LINE2"
 assert_eq "出力順序: 3行目がnote=" "note" "$RL_ORDER_LINE3"
 assert_eq "出力順序: 必ず3行" "3" "$RL_ORDER_LINECOUNT"
 
+echo ""
+echo "== skills/run: evaluator/generator 起動プロンプト雛形に応答言語への言及があること（#258） =="
+
+# #252/#253でR1基本形には「- 応答言語: [RESOLVED_LANG]」行を追加したが、変更50ファイル超時の
+# 代替プロンプト（blast radius版 / Phase単位分割版）には追加漏れがあった（#258）。
+# 「個別の行を直す」だけでは、新しい起動プロンプトを追加したときの書き忘れに誰も気づかない
+# ため、個別ケースの回帰テストにはせず、「`@evaluator`/`@generator` で始まる起動プロンプト
+# 雛形には必ず応答言語への言及がある」ことをリポジトリ全体に対して検査する。
+#
+# 検査対象は Claude版の `@evaluator` / `@generator` マーカー（行頭一致）に限定する。
+# Codex版（skills-codex/dev-workflow-run/SKILL.md）はこのマーカーを使わず、起動プロンプトを
+# 他の素のbash/JSONコードブロックと機械的に区別する確実な手段が無いため対象外とする
+# （誤検知で将来の正当な記述をブロックしないことを、広く拾うことより優先する。#258）。
+# 正本の内容検査・生成物への伝播検査は #256 の担当であり、ここでは重複させない。
+#
+# 4観点並列で2本目以降を「（同上。- 観点: xxx）」のように直前の完全な雛形を参照する省略記法
+# （skills/run/SKILL.md のR1本体が使う）は、応答言語の文言そのものは含まないため、
+# "応答言語" に加えて "同上" も許容語として扱う（正当な省略記法を誤検知しないため）。
+LANG_LAUNCH_BLOCKS="$(awk '
+  /^@evaluator$/ || /^@generator$/ {
+    if (block != "") { print start_line "\x01" block }
+    start_line = NR
+    block = $0
+    next
+  }
+  block != "" && NF == 0 {
+    print start_line "\x01" block
+    block = ""
+    next
+  }
+  block != "" {
+    block = block "@@NL@@" $0
+  }
+  END {
+    if (block != "") print start_line "\x01" block
+  }
+' "$RUN_SKILL_FLAT")"
+
+LANG_LAUNCH_TOTAL=0
+LANG_LAUNCH_MISSING=0
+LANG_LAUNCH_DETAIL=""
+if [ -n "$LANG_LAUNCH_BLOCKS" ]; then
+  while IFS=$'\x01' read -r _ll_line _ll_block; do
+    LANG_LAUNCH_TOTAL=$((LANG_LAUNCH_TOTAL + 1))
+    case "$_ll_block" in
+      *応答言語*|*同上*) ;;
+      *)
+        LANG_LAUNCH_MISSING=$((LANG_LAUNCH_MISSING + 1))
+        LANG_LAUNCH_DETAIL="${LANG_LAUNCH_DETAIL}flat-line ${_ll_line}: ${_ll_block//@@NL@@/ | }
+"
+        ;;
+    esac
+  done <<< "$LANG_LAUNCH_BLOCKS"
+fi
+
+# 検出件数そのものが0件になっていないことを確認する（マーカーの記法が変わって検査が
+# 静かに空振りする事故を防ぐ。見つからなくなった場合はこのテストの正規表現を見直すこと）。
+if [ "$LANG_LAUNCH_TOTAL" -ge 1 ]; then
+  pass "@evaluator/@generator 起動プロンプト雛形を1件以上検出した（#258）"
+else
+  fail "@evaluator/@generator 起動プロンプト雛形を1件以上検出した（#258）" \
+    "0件検出。マーカー記法（行頭の ^@evaluator\$ / ^@generator\$）が変わった場合はこのテストの正規表現も更新すること"
+fi
+
+if [ "$LANG_LAUNCH_MISSING" -eq 0 ]; then
+  pass "全ての起動プロンプト雛形が応答言語に言及している（#258）"
+else
+  fail "全ての起動プロンプト雛形が応答言語に言及している（#258）" "$LANG_LAUNCH_DETAIL"
+fi
+
 # ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
