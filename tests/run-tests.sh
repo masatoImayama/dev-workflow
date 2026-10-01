@@ -18860,10 +18860,17 @@ fi
 # Epic issueに記録する実装例（gh issue comment）を伴っていることを、見出しブロック単位で見る。
 
 l246_extract_heading_block() {
-  # l246_extract_heading_block <file> <開始見出し（行頭一致の正規表現）>
-  local file="$1" start_re="$2"
-  awk -v start="$start_re" '
-    $0 ~ ("^" start) { flag = 1; next }
+  # l246_extract_heading_block <file> <開始見出し（行頭一致の正規表現）> [出現回数（既定1）]
+  # 第3引数は、同一の見出し接頭辞（例: "#### 応答言語の照合"）が複数回登場するファイルで
+  # N番目の出現を狙って抽出するためのもの。省略時は従来どおり1番目（既存呼び出しは無変更）。
+  local file="$1" start_re="$2" occurrence="${3:-1}"
+  awk -v start="$start_re" -v want="$occurrence" '
+    $0 ~ ("^" start) {
+      count++
+      if (count == want) { flag = 1; next }
+      if (flag) { exit }
+      next
+    }
     flag && /^#/ { exit }
     flag { print }
   ' "$file"
@@ -18913,6 +18920,16 @@ L246_MATCH_CODEX="$(l246_extract_heading_block "$L246_CODEX_SKILL" '#### 応答�
 l246_assert_match_block \
   "skills-codex/dev-workflow-run/SKILL.md: 同上（Codex版。Claude版だけが直ってCodex版が取り残される回帰の検知）（#246・#253）" \
   "$L246_MATCH_CODEX"
+
+# delta-review用ブロック（811行目台）はR1用ブロックと同じ見出し接頭辞「#### 応答言語の照合」を
+# 持つため、l246_extract_heading_block は行頭一致の正規表現だけでは最初の出現（R1用）しか
+# 拾えない（flag && /^#/ { exit } が次の見出しで打ち切るため）。見出し末尾の "D1 / #259" の
+# ような付随テキストは今後の書き換えで変わりうるので、そこをマーカーにするより、同一接頭辞の
+# 2番目の出現を狙う方が壊れにくいと判断し、第3引数（出現回数）で区別する（#261）。
+L246_MATCH_CODEX_DELTA="$(l246_extract_heading_block "$L246_CODEX_SKILL" '#### 応答言語の照合' 2)"
+l246_assert_match_block \
+  "skills-codex/dev-workflow-run/SKILL.md: delta-review用ブロックも同上（R1用ブロックしか拾えず、ここが静かに回帰する穴を塞ぐ）（#246・#259・#261）" \
+  "$L246_MATCH_CODEX_DELTA"
 
 echo "== 応答言語規約: skills/epic/SKILL.md のテンプレートが機械可読な字面を保っている（#246） =="
 
