@@ -18376,6 +18376,115 @@ case "$H232_R2_SECTION" in
 esac
 
 # ---------------------------------------------------------------------------
+# resolve-lang.sh（応答言語の解決、Task #247、Epic #246）
+#
+# 言語の解決（許容リストの判定・不正値のフォールバック・記録用メッセージの生成）を
+# run・scripts/doctor.sh・各エージェントの3か所で三重実装しないよう、1つのスクリプトに
+# 集約した。不正値・空文字でも exit 0 で ja に倒すことが核心（doctor.sh が終了コードで
+# 必須依存の有無を判定するため、1を返すと診断全体が失敗扱いになる）。
+# ---------------------------------------------------------------------------
+
+echo "== scripts/resolve-lang.sh（応答言語の解決、#247） =="
+
+RESOLVE_LANG_SCRIPT="${REPO_ROOT}/scripts/resolve-lang.sh"
+
+rl_field() {
+  # rl_field <フィールド名(lang|source|note)> <resolve-lang.shの出力全体>
+  printf '%s\n' "$2" | grep -E "^$1=" | head -1 | sed "s/^$1=//"
+}
+
+# --- bash -n が通る ---
+if bash -n "$RESOLVE_LANG_SCRIPT" 2>/dev/null; then
+  pass "resolve-lang.sh: bash -n の構文チェックが通る（#247）"
+else
+  fail "resolve-lang.sh: bash -n の構文チェックが通る（#247）"
+fi
+
+# --- 許容リストが1変数（SUPPORTED_LANGS）に定義されている（将来の言語追加が1語追加で
+#     済むことの構造的な固定） ---
+if grep -qE '^SUPPORTED_LANGS=' "$RESOLVE_LANG_SCRIPT"; then
+  pass "resolve-lang.sh: 許容リストが SUPPORTED_LANGS の1変数に定義されている（#247）"
+else
+  fail "resolve-lang.sh: 許容リストが SUPPORTED_LANGS の1変数に定義されている（#247）"
+fi
+
+# --- ケース1: DEV_WORKFLOW_LANG 未設定 → lang=ja / source=default / exit 0 ---
+RL_DEFAULT_OUTPUT="$(env -u DEV_WORKFLOW_LANG bash "$RESOLVE_LANG_SCRIPT")"
+RL_DEFAULT_EXIT=$?
+assert_eq "未設定: lang=ja" "ja" "$(rl_field lang "$RL_DEFAULT_OUTPUT")"
+assert_eq "未設定: source=default" "default" "$(rl_field source "$RL_DEFAULT_OUTPUT")"
+assert_exit_code "未設定: exit 0" 0 "$RL_DEFAULT_EXIT"
+
+# --- ケース2: DEV_WORKFLOW_LANG=en → lang=en / source=env / exit 0 ---
+RL_EN_OUTPUT="$(DEV_WORKFLOW_LANG=en bash "$RESOLVE_LANG_SCRIPT")"
+RL_EN_EXIT=$?
+assert_eq "DEV_WORKFLOW_LANG=en: lang=en" "en" "$(rl_field lang "$RL_EN_OUTPUT")"
+assert_eq "DEV_WORKFLOW_LANG=en: source=env" "env" "$(rl_field source "$RL_EN_OUTPUT")"
+assert_exit_code "DEV_WORKFLOW_LANG=en: exit 0" 0 "$RL_EN_EXIT"
+
+# --- ケース3: DEV_WORKFLOW_LANG=ja → lang=ja / source=env / exit 0 ---
+RL_JA_OUTPUT="$(DEV_WORKFLOW_LANG=ja bash "$RESOLVE_LANG_SCRIPT")"
+RL_JA_EXIT=$?
+assert_eq "DEV_WORKFLOW_LANG=ja: lang=ja" "ja" "$(rl_field lang "$RL_JA_OUTPUT")"
+assert_eq "DEV_WORKFLOW_LANG=ja: source=env" "env" "$(rl_field source "$RL_JA_OUTPUT")"
+assert_exit_code "DEV_WORKFLOW_LANG=ja: exit 0" 0 "$RL_JA_EXIT"
+
+# --- ケース4: DEV_WORKFLOW_LANG=fr（未サポート） → lang=ja / source=fallback /
+#     note が none 以外 / exit 0（停止しない） ---
+RL_FR_OUTPUT="$(DEV_WORKFLOW_LANG=fr bash "$RESOLVE_LANG_SCRIPT")"
+RL_FR_EXIT=$?
+assert_eq "DEV_WORKFLOW_LANG=fr（未サポート): lang=ja" "ja" "$(rl_field lang "$RL_FR_OUTPUT")"
+assert_eq "DEV_WORKFLOW_LANG=fr（未サポート): source=fallback" "fallback" "$(rl_field source "$RL_FR_OUTPUT")"
+RL_FR_NOTE="$(rl_field note "$RL_FR_OUTPUT")"
+if [ -n "$RL_FR_NOTE" ] && [ "$RL_FR_NOTE" != "none" ]; then
+  pass "DEV_WORKFLOW_LANG=fr（未サポート): noteに事実が記録される（#247）"
+else
+  fail "DEV_WORKFLOW_LANG=fr（未サポート): noteに事実が記録される（#247）" "note=${RL_FR_NOTE}"
+fi
+assert_exit_code "DEV_WORKFLOW_LANG=fr（未サポート): exit 0（停止しない）" 0 "$RL_FR_EXIT"
+
+# --- ケース5: DEV_WORKFLOW_LANG=""（空文字） → lang=ja / source=fallback / exit 0 ---
+RL_EMPTY_OUTPUT="$(DEV_WORKFLOW_LANG="" bash "$RESOLVE_LANG_SCRIPT")"
+RL_EMPTY_EXIT=$?
+assert_eq "DEV_WORKFLOW_LANG=空文字: lang=ja" "ja" "$(rl_field lang "$RL_EMPTY_OUTPUT")"
+assert_eq "DEV_WORKFLOW_LANG=空文字: source=fallback" "fallback" "$(rl_field source "$RL_EMPTY_OUTPUT")"
+assert_exit_code "DEV_WORKFLOW_LANG=空文字: exit 0" 0 "$RL_EMPTY_EXIT"
+
+# --- ケース6: --lang en は DEV_WORKFLOW_LANG=ja より優先される（lang=en / source=arg） ---
+RL_ARG_OUTPUT="$(DEV_WORKFLOW_LANG=ja bash "$RESOLVE_LANG_SCRIPT" --lang en)"
+RL_ARG_EXIT=$?
+assert_eq "--lang en（env=jaより優先): lang=en" "en" "$(rl_field lang "$RL_ARG_OUTPUT")"
+assert_eq "--lang en（env=jaより優先): source=arg" "arg" "$(rl_field source "$RL_ARG_OUTPUT")"
+assert_exit_code "--lang en（env=jaより優先): exit 0" 0 "$RL_ARG_EXIT"
+
+# --- ケース7: --lang zz（不正な明示値） → lang=ja / source=fallback / exit 0 ---
+RL_BADARG_OUTPUT="$(bash "$RESOLVE_LANG_SCRIPT" --lang zz)"
+RL_BADARG_EXIT=$?
+assert_eq "--lang zz（不正な明示値): lang=ja" "ja" "$(rl_field lang "$RL_BADARG_OUTPUT")"
+assert_eq "--lang zz（不正な明示値): source=fallback" "fallback" "$(rl_field source "$RL_BADARG_OUTPUT")"
+assert_exit_code "--lang zz（不正な明示値): exit 0" 0 "$RL_BADARG_EXIT"
+
+# --- ケース8: --help が exit 0 で使い方を表示する ---
+RL_HELP_OUTPUT="$(bash "$RESOLVE_LANG_SCRIPT" --help)"
+RL_HELP_EXIT=$?
+case "$RL_HELP_OUTPUT" in
+  *'使い方'*) pass "resolve-lang.sh --help: 使い方が表示される（#247）" ;;
+  *) fail "resolve-lang.sh --help: 使い方が表示される（#247）" "$RL_HELP_OUTPUT" ;;
+esac
+assert_exit_code "resolve-lang.sh --help: exit 0" 0 "$RL_HELP_EXIT"
+
+# --- ケース9: 出力が必ず lang= / source= / note= の3行であること（順序を含めて固定する） ---
+RL_ORDER_OUTPUT="$(env -u DEV_WORKFLOW_LANG bash "$RESOLVE_LANG_SCRIPT")"
+RL_ORDER_LINE1="$(printf '%s\n' "$RL_ORDER_OUTPUT" | sed -n '1p' | cut -d= -f1)"
+RL_ORDER_LINE2="$(printf '%s\n' "$RL_ORDER_OUTPUT" | sed -n '2p' | cut -d= -f1)"
+RL_ORDER_LINE3="$(printf '%s\n' "$RL_ORDER_OUTPUT" | sed -n '3p' | cut -d= -f1)"
+RL_ORDER_LINECOUNT="$(printf '%s\n' "$RL_ORDER_OUTPUT" | wc -l | tr -d ' ')"
+assert_eq "出力順序: 1行目がlang=" "lang" "$RL_ORDER_LINE1"
+assert_eq "出力順序: 2行目がsource=" "source" "$RL_ORDER_LINE2"
+assert_eq "出力順序: 3行目がnote=" "note" "$RL_ORDER_LINE3"
+assert_eq "出力順序: 必ず3行" "3" "$RL_ORDER_LINECOUNT"
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
