@@ -81,6 +81,17 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
   --note "model=[JSONのmodelフィールド。読み取れなければ'unknown']" --tokens [読み取ったトークン数]
 ```
 
+**モデル上書きの空振り検知と同じ位置で、応答言語の空振り検知（Epic #246 D1 / #255）も
+扱う。** 確度判定役が返した判定JSONのトップレベル `lang` を `RESOLVED_LANG` と照合する。
+値の妥当性判定は条件分岐を自前で書かず `bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-lang.sh"
+--lang "[返ってきた値]"` の出力で行う（R1と同じ。許容リストの二重管理を避ける）。食い違い・
+欠落（`lang`を返さない旧形式のJSONも含む）があれば、その事実を1件のコメントとして Epic
+issue に記録し、そのまま先へ進む（「記録して進む」に分類。run は止めない）:
+
+```bash
+gh issue comment "$ARGUMENTS" --body "応答言語の空振り検知（confidence-check）: 返ってきたlang=[値。欠落はunknown]が解決値${RESOLVED_LANG}と食い違っています"
+```
+
 **起動時モデル上書きが技術的に実現できなかった場合（`model`パラメータ自体が使えない等）**は、
 確度判定を発見役と同一モデル（sonnet）のまま据え置いて実行し、その事実を Epic issue と PR 本文に
 記録する（ADR-0006 決定Cと同じ「記録して進む」枠。据え置きであってもステップ自体は省略しない。
@@ -197,6 +208,16 @@ R1と同じ作法でこのdelta-review呼び出しのトークン消費も記録
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
   --epic "$EPIC_NUM" --role evaluator --mode delta-review --tokens [読み取ったトークン数]
+```
+
+**応答言語の空振り検知（Epic #246 D1 / #255）も同じ位置で行う。** 返ってきた判定JSONの
+トップレベル `lang` を `RESOLVED_LANG` と照合する。値の妥当性判定は条件分岐を自前で書かず
+`bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-lang.sh" --lang "[返ってきた値]"` の出力で行う。
+食い違い・欠落（`lang`を返さない旧形式のJSONも含む）があれば1件のコメントとして Epic
+issue に記録し、そのまま先へ進む（「記録して進む」に分類。run は止めない）:
+
+```bash
+gh issue comment "$ARGUMENTS" --body "応答言語の空振り検知（delta-review）: 返ってきたlang=[値。欠落はunknown]が解決値${RESOLVED_LANG}と食い違っています"
 ```
 
 3. `APPROVE` → PR作成へ / `REQUEST_CHANGES` → R2 に戻る

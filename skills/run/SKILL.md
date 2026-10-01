@@ -891,8 +891,10 @@ DONE_TASK_COUNT=$((DONE_TASK_COUNT + N))   # N = 直前の「取り込めたレ�
    high/mediumの指摘を `review` issue化する（`- Epic: #$ARGUMENTS` と `- 前提: なし` を必ず書く。
    書式は [references/review.md](references/review.md) の R2 と同じ）。evaluator の起動自体が
    失敗した／JSON が読み取れなかった場合は `REVIEWED_COMMIT` を進めない（次の wave-review、
-   最終的には Epic 末レビューが拾う）。詳細は
-   [references/wave-review.md](references/wave-review.md) を参照する。
+   最終的には Epic 末レビューが拾う）。**応答言語の空振り検知（返却JSONの `lang` と
+   `RESOLVED_LANG` の照合）もここで行う**（R1と同じ「記録して進む」扱い。詳細・コメント
+   書式は [references/wave-review.md](references/wave-review.md)「応答言語の照合」を参照）。
+   詳細は [references/wave-review.md](references/wave-review.md) を参照する。
    その後 `PREV_WAVE_INCORPORATED=true` にする（次ウェーブの Step 3 で wave-review を起動する条件）。
 5. → Step 1 に戻る（次のウェーブへ）
 
@@ -1162,6 +1164,43 @@ Epic #$ARGUMENTS の全変更をレビューしてください。
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
   --epic "$EPIC_NUM" --role evaluator --mode epic-review --note "focus=[観点]" --tokens [読み取ったトークン数]
 ```
+
+#### 応答言語の照合（空振り検知。Epic #246 D1 / #255）
+
+トークン消費の記録と同じ位置づけの後処理として、4本それぞれが返した判定JSONの
+**トップレベル `lang`** を読み、`RESOLVED_LANG` と照合する。ADR-0006で確認されたとおり、
+プロンプト本文に書いた指示は空振りしても気付けないことがあるため、この照合が唯一の
+検知手段である。**食い違った観点・`lang` が欠落していた観点があれば、1件のコメントとして
+Epic issue に記録し、そのまま先へ進む。**（「記録して進む」に分類する。停止しない。`verdict`
+の扱い・issue化・PR作成の判断は一切変えない）。4本すべてが `RESOLVED_LANG` と一致していれば
+このコメントは出さない。
+
+値の妥当性判定（`ja`/`en` 以外が返ってきた場合）は条件分岐を自前で書かず、
+`bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-lang.sh" --lang "[返ってきた値]"` の出力
+（`source=arg` なら妥当な値、`source=fallback` なら不正値）で判定する（許容リストの
+二重管理を避ける）。
+
+食い違い・欠落が1件でもあった場合のみ、4本まとめて1回だけコメントする（観点ごとに
+4件投げない）:
+
+```bash
+gh issue comment "$ARGUMENTS" --body "$(cat <<'BODY'
+## 応答言語の空振り検知（R1）
+
+- run の解決値: [RESOLVED_LANG]（source=[LANG_SOURCE]）
+- correctness: [返ってきたlang。欠落はunknown]
+- readability: [同上]
+- over-engineering: [同上]
+- security: [同上]
+
+応答言語の指示が一部の観点で空振りした可能性がある。人間向け出力の言語が意図と異なる
+だけで、判定・指摘の内容には影響しない。
+BODY
+)"
+```
+
+`lang` フィールドを返さない evaluator（本Epic以前の定義・他ベンダー実装のJSON）が相手でも
+**run は止まらない。** 欠落は不一致と区別して `unknown` と記録する（後方互換。仕様書第10節）。
 
 4本の結果のマージ・重複排除（同一 `location` の統合・severity 採用・verdict 合成・
 `reviewed_commit` 食い違い時の扱い・1本失敗時の扱い）は

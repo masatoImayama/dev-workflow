@@ -80,6 +80,24 @@ Step 7 で取り込まれた直後の値と一致する。したがって `REVIE
 low の指摘は issue 化せず、PR 本文の「レビューで挙がった軽微な指摘」に合流させる（Epic 末レビュー
 の指摘と同じ扱い）。
 
+## 応答言語の照合（空振り検知。Epic #246 D1 / #255）
+
+wave-review の evaluator が返した判定JSONのトップレベル `lang` を、Step 3 で渡した
+`RESOLVED_LANG` と照合する。R1と同じ「記録して進む」扱いであり、**食い違い・欠落が
+あっても run は止めない。** `lang` を返さない evaluator（本Epic以前の定義）が相手でも
+後方互換のまま進む（欠落は `unknown` と記録する）。
+
+値の妥当性判定（`ja`/`en` 以外が返ってきた場合）は条件分岐を自前で書かず、
+`bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-lang.sh" --lang "[返ってきた値]"` の出力で
+判定する（R1と同じ。許容リストの二重管理を避ける）。
+
+食い違い・欠落があった場合のみ、**このウェーブぶんで1件**コメントする（ウェーブごとに
+蓄積して複数件投げない）:
+
+```bash
+gh issue comment "$ARGUMENTS" --body "応答言語の空振り検知（wave-review、ウェーブ$WAVE_NO）: 返ってきたlang=[値。欠落はunknown]が解決値${RESOLVED_LANG}と食い違っています"
+```
+
 ## 最終ウェーブとEpic全体整合はEpic末レビューが見る
 
 最終ウェーブの差分は「次のウェーブ」が存在しないため wave-review されない。この取りこぼしは
