@@ -17562,12 +17562,14 @@ DOCTOR_SCRIPT_SRC="${REPO_ROOT}/scripts/doctor.sh"
 copy_doctor_scripts() {
   # copy_doctor_scripts <dest_repo_dir>
   # doctor.sh とその依存スクリプト（check-prerequisites.sh / check-repo-hygiene.sh /
-  # sandbox-exec.sh / resolve-sandbox.sh / lib）を検証対象の一時リポジトリへ複製してコミットする。
+  # sandbox-exec.sh / resolve-sandbox.sh / resolve-lang.sh / lib）を検証対象の
+  # 一時リポジトリへ複製してコミットする。
   local dest="$1"
   copy_sandbox_scripts "$dest"
   cp "${REPO_ROOT}/scripts/doctor.sh"              "${dest}/scripts/doctor.sh"
   cp "${REPO_ROOT}/scripts/check-prerequisites.sh" "${dest}/scripts/check-prerequisites.sh"
   cp "${REPO_ROOT}/scripts/check-repo-hygiene.sh"  "${dest}/scripts/check-repo-hygiene.sh"
+  cp "${REPO_ROOT}/scripts/resolve-lang.sh"        "${dest}/scripts/resolve-lang.sh"
   (
     cd "$dest" || exit 1
     git add scripts
@@ -17770,6 +17772,77 @@ DOCTOR_SIDEEFFECT_EXCLUDE_AFTER=""
 [ -f "$DOCTOR_SIDEEFFECT_EXCLUDE" ] && DOCTOR_SIDEEFFECT_EXCLUDE_AFTER="$(cat "$DOCTOR_SIDEEFFECT_EXCLUDE")"
 assert_eq "doctor.sh: .git/info/exclude を書き換えない（衛生チェックを--checkで呼ぶ。#218）" \
   "$DOCTOR_SIDEEFFECT_EXCLUDE_BEFORE" "$DOCTOR_SIDEEFFECT_EXCLUDE_AFTER"
+
+# --- ケース8: bash -n が通る（#254） ---
+if bash -n "$DOCTOR_SCRIPT_SRC" 2>/dev/null; then
+  pass "doctor.sh: bash -n の構文チェックが通る（#254）"
+else
+  fail "doctor.sh: bash -n の構文チェックが通る（#254）"
+fi
+
+# --- ケース9: 応答言語の節（scripts/resolve-lang.shを呼ぶだけで判定ロジックを再実装しない。#254） ---
+#     判定ロジックの二重実装を防ぐため、resolve-lang.sh への直接呼び出し以外で
+#     SUPPORTED_LANGS を参照していないことを確認する。
+if grep -qE 'SUPPORTED_LANGS' "$DOCTOR_SCRIPT_SRC"; then
+  fail "doctor.sh: 言語の許容リスト判定を再実装していない（#254）" \
+    "doctor.sh 内に SUPPORTED_LANGS への直接参照が見つかりました（resolve-lang.sh を呼ぶだけにすること）"
+else
+  pass "doctor.sh: 言語の許容リスト判定を再実装していない（#254）"
+fi
+
+if grep -qE 'resolve-lang\.sh' "$DOCTOR_SCRIPT_SRC"; then
+  pass "doctor.sh: scripts/resolve-lang.sh を呼んでいる（#254）"
+else
+  fail "doctor.sh: scripts/resolve-lang.sh を呼んでいる（#254）" "$(cat "$DOCTOR_SCRIPT_SRC")"
+fi
+
+# --- ケース10: DEV_WORKFLOW_LANG 未設定 → 「応答言語」節に lang=ja が表示される（#254） ---
+DOCTOR_LANG_DEFAULT_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  env -u DEV_WORKFLOW_LANG HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_LANG_DEFAULT_OUT" 2>&1
+)
+case "$(cat "$DOCTOR_LANG_DEFAULT_OUT")" in
+  *"応答言語"*"lang=ja"*) pass "doctor.sh: DEV_WORKFLOW_LANG未設定で応答言語の節にlang=jaが表示される（#254）" ;;
+  *) fail "doctor.sh: DEV_WORKFLOW_LANG未設定で応答言語の節にlang=jaが表示される（#254）" \
+    "$(cat "$DOCTOR_LANG_DEFAULT_OUT")" ;;
+esac
+
+# --- ケース11: DEV_WORKFLOW_LANG=en → lang=en が表示される（#254） ---
+DOCTOR_LANG_EN_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  DEV_WORKFLOW_LANG=en HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_LANG_EN_OUT" 2>&1
+)
+case "$(cat "$DOCTOR_LANG_EN_OUT")" in
+  *"lang=en"*) pass "doctor.sh: DEV_WORKFLOW_LANG=enでlang=enが表示される（#254）" ;;
+  *) fail "doctor.sh: DEV_WORKFLOW_LANG=enでlang=enが表示される（#254）" "$(cat "$DOCTOR_LANG_EN_OUT")" ;;
+esac
+
+# --- ケース12: DEV_WORKFLOW_LANG=fr（不正値） → lang=ja と警告が表示され、
+#     doctor.sh の終了コードが不正値によって変化しない（#254） ---
+DOCTOR_LANG_FR_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+DOCTOR_LANG_FR_EXIT=0
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  DEV_WORKFLOW_LANG=fr HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_LANG_FR_OUT" 2>&1
+) || DOCTOR_LANG_FR_EXIT=$?
+
+case "$(cat "$DOCTOR_LANG_FR_OUT")" in
+  *"lang=ja"*) pass "doctor.sh: DEV_WORKFLOW_LANG=fr（不正値）でlang=jaに倒れる（#254）" ;;
+  *) fail "doctor.sh: DEV_WORKFLOW_LANG=fr（不正値）でlang=jaに倒れる（#254）" "$(cat "$DOCTOR_LANG_FR_OUT")" ;;
+esac
+case "$(cat "$DOCTOR_LANG_FR_OUT")" in
+  *"[警告]"*) pass "doctor.sh: DEV_WORKFLOW_LANG=fr（不正値）で警告が表示される（#254）" ;;
+  *) fail "doctor.sh: DEV_WORKFLOW_LANG=fr（不正値）で警告が表示される（#254）" "$(cat "$DOCTOR_LANG_FR_OUT")" ;;
+esac
+# gh/docker は揃っている（DOCTOR_OK_BIN）ため、言語の不正値だけでは exit 1 にならない
+# ことを確認する（応答言語の不正値は REQUIRED_MISSING に影響させない契約。#254）。
+assert_exit_code "doctor.sh: DEV_WORKFLOW_LANG=fr（不正値）でも終了コードが変化しない（#254）" \
+  0 "$DOCTOR_LANG_FR_EXIT"
 
 # ---------------------------------------------------------------------------
 # scripts/install-optional-mcp.sh（任意MCPの導入。既定 dry-run。Task #219）
