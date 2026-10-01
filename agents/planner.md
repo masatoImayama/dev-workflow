@@ -289,6 +289,7 @@ git push -u origin "epic/epic[番号]/[機能名]"
 
 ## 行動原則
 
+- 仕様ヒアリング・確認・提案など、人間向け出力の言語は共通ルールの「応答言語」節に従う
 - コードベースを十分に調査してから計画する
 - Phase間の依存関係を尊重する
 - プロジェクトの指示ファイルに記載されたルールに従う
@@ -458,6 +459,81 @@ run は全タスク完了まで長時間動き続けるため、無応答・ス�
 
 - **watchdog は検知して通知するだけであり、自動でエージェントを打ち切らない。打ち切りは人間が行う**
   （`watchdog.sh --abort "理由"`、またはセッションの中断）
+
+## 応答言語
+
+人間向け出力の言語は `DEV_WORKFLOW_LANG` で切り替える。**この節が正本であり、対象・対象外の
+表はここだけに置く。** `core/roles/planner.md` / `generator.md` / `evaluator.md` は、
+この節を参照する1行を持つだけで、表を複製しない。
+
+```bash
+export DEV_WORKFLOW_LANG=ja   # or en。未設定・空・不正値なら ja
+```
+
+### 設定と解決の優先順位
+
+| 段 | 経路 | 内容 |
+|---|---|---|
+| 1 | 経路B（基本） | 起動プロンプトに `- 応答言語: <値>` が渡されていればそれに従う |
+| 2 | 経路A（保険） | 無ければ `bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-lang.sh"` を**1回だけ**実行して解決する（run を経由しない起動でも効かせるため） |
+| 3 | 既定 | 無ければ `ja` |
+
+- 許容値は `ja` / `en` の2値。**不正値・未サポート値・空文字は `ja` に倒し、その事実を
+  記録する**（本文書「停止させるものと、記録して進めるもの」の「記録して進む」に分類する。
+  停止しない）
+- 経路Aの実行は**1回だけ**であること（タスクごと・報告ごとに呼び直さない）
+
+### 言語設定の対象（`DEV_WORKFLOW_LANG` に従う）
+
+| 対象 | 該当箇所 |
+|---|---|
+| planner の仕様ヒアリング・確認・提案 | `core/roles/planner.md` |
+| 仕様書・実装計画書の本文 | Epic issue 本文 |
+| Task issue のタイトル・本文 | `skills/epic/SKILL.md` |
+| generator の進捗報告・完了報告・issue コメント | `core/roles/generator.md` |
+| evaluator の人間向けサマリー（判定・良い点・テスト結果） | `core/roles/evaluator.md` |
+| `findings[].title` / `detail` / `fix` | 同上（issue 本文になるため対象） |
+| run の進捗表示・PR 本文・Epic issue へのコメント | `skills/run/SKILL.md` |
+| feedback の `learnings.md`・還流 issue 本文 | `skills/feedback/SKILL.md` |
+
+### 言語設定の対象外（英語・規約のまま変えない）
+
+| 対象外 | 理由 |
+|---|---|
+| 機械可読 JSON の**キー名**（`verdict` / `findings` / `severity` / `focus` / `reviewed_commit` / `lang` ...） | run がパースする |
+| JSON の**enum 値**（`APPROVE` / `REQUEST_CHANGES` / `high` / `medium` / `low` / `high-confidence` / `low-confidence` / `all` / `correctness` / `readability` / `over-engineering` / `security`） | 同上 |
+| ラベル名（`epic` / `task` / `review`） | `gh issue list --label` が引く |
+| コミットメッセージの種別（`feat` / `fix` / `refactor` / `test` / `docs` / `chore`） | コミット規約 |
+| Epic / Task 本文の**節見出し**（`## 対象ファイル` / `## 準備コマンド` / `## 共有ディレクトリ` / `## SKIPパターン` / `## 編集時チェック`） | run / `plan-waves.sh` が文字列一致で読む |
+| `- 前提: #N` / `- 前提: なし` / `- Epic: #N` / `- 想定時間:` の**行頭キー** | `plan-waves.sh` がパースする |
+| ブランチ命名規則（`epic/epicN/...` / `wave/epicN/N`） | ブランチ戦略 |
+| `readability-guard:allow` マーカー | `check-readability.sh` が引く |
+| `resolve-lang.sh` の出力キー（`lang=` / `source=` / `note=`）と値 | 呼び出し側が機械的に読む |
+| コード・識別子・型名・ファイル名 | 当然 |
+
+> **`## 対象ファイル` と `- 前提:` は「日本語だが機械可読」である。** `plan-waves.sh` は
+> `## 対象ファイル` を完全一致で探し、直後の `- ` 行を素のパスとして読む。`- 前提:` も
+> 行頭一致でパースする。**言語設定の対象に引きずり込まないよう、実装時にここを最も注意する。**
+> 翻訳すると依存グラフが壊れ、ウェーブ編成が黙って誤る（フェイルオープンで無関係な
+> タスクが混入しうる）。
+
+### 既存文脈への例外を置かない
+
+**常に設定値に従う。** 「既存ファイル・既存 issue の既存言語に合わせる」という例外規定は
+**置かない**。`DEV_WORKFLOW_LANG=en` に切り替えたあとは、日本語で立っている既存 Epic への
+コメントも英語で書く。
+
+**理由**: 規則を単純に保ち、実装とテストを明快にするため。その結果として同一 issue 内で
+日英が混在しうるが、**それは意識的に受け入れたトレードオフである**。この判断を後から
+蒸し返さないために、理由ごとここに残す（「既存言語に合わせるべきでは」という再提案は、
+この節を根拠に却下できる状態にする）。
+
+### bash スクリプトのメッセージはスコープ外
+
+`DEV_WORKFLOW_LANG` は**エージェントの応答にのみ効き、`scripts/*.sh` が出すメッセージ
+（`check-readability.sh` / `edit-check.sh` / `notify-slack.sh` / `watchdog.sh` /
+`doctor.sh` / `check-prerequisites.sh` / 各 `build.sh` 等）は対象外**である。
+bash への i18n は割に合わないため第1版では入れない。
 
 ## コミットメッセージ規約
 
