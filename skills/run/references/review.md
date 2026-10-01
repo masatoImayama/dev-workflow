@@ -56,6 +56,9 @@ Epic #$ARGUMENTS のレビュー指摘の確度を判定してください。
 - 対象: 以下はR1マージ後のfindings（high/mediumのみ）
 [マージ済みfindingsのJSON配列をそのまま貼る]
 - 差分範囲: main...[epic/epicXX/機能名]
+- 応答言語: [RESOLVED_LANG]（`findings[].title` / `detail` / `fix` など issue 本文になる
+  人間向けテキストはこの言語で書くこと。`verdict` / `severity` / `focus` / `confidence` /
+  `lang` の値は英語 enum のまま返すこと）
 - 各findingについて実際にコードを確認し、confidence（high-confidence / low-confidence）を判定すること
 - 新しい指摘を追加しないこと（発見はR1が完了済み。ここでの役割は確度判定のみ）
 - 最後に必ずJSONブロック（各findingに`confidence`フィールドを追加したfindings配列。
@@ -182,6 +185,9 @@ evaluator側の対応する確認観点は `core/references/review-checklist-cor
 Epic #$ARGUMENTS の指摘対応を確認してください。
 - モード: delta-review
 - 差分範囲: [R1のreviewed_commit]..[epic/epicXX/機能名]
+- 応答言語: [RESOLVED_LANG]（`findings[].title` / `detail` / `fix` など issue 本文になる
+  人間向けテキストはこの言語で書くこと。`verdict` / `severity` / `focus` / `lang` の値は
+  英語 enum のまま返すこと）
 - 指定範囲外の蒸し返しはしないこと
 - 最後に必ずJSONブロックを出力すること
 ```

@@ -55,6 +55,9 @@ wave-review の起動メッセージには次を渡す。
 - モード: wave-review
 - 差分範囲: [REVIEWED_COMMIT]..[WAVE_BASE]（＝直前に取り込まれたウェーブまでの未レビュー分）
 - 作業ディレクトリ: .claude/worktrees/[epicN]
+- 応答言語: [RESOLVED_LANG]（`findings[].title` / `detail` / `fix` など issue 本文になる
+  人間向けテキストはこの言語で書くこと。`verdict` / `severity` / `focus` / `lang` の値は
+  英語 enum のまま返すこと）
 ```
 
 `WAVE_BASE` は Step 2 で記録した「今回のウェーブが分岐する Epic tip」であり、直前のウェーブが
