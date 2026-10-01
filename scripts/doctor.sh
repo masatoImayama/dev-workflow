@@ -111,6 +111,23 @@ else
 fi
 
 echo
+echo "=== 応答言語（scripts/resolve-lang.sh） ==="
+# 解決ロジックは resolve-lang.sh の単一の正本を呼ぶだけで、ここでは二重実装しない
+# （Epic #246。許容リスト判定・不正値のフォールバックは resolve-lang.sh 側に閉じる）。
+# resolve-lang.sh は常に exit 0 を返す契約であり、不正値（source=fallback）であっても
+# REQUIRED_MISSING には影響させない（「記録して進む」観測項目であり、診断全体を
+# 失敗扱いにしてはならない）。
+RESOLVE_LANG_OUT="$(bash "${SCRIPT_DIR}/resolve-lang.sh")"
+RESOLVE_LANG_VALUE="$(printf '%s\n' "$RESOLVE_LANG_OUT" | sed -n 's/^lang=//p')"
+RESOLVE_LANG_SOURCE="$(printf '%s\n' "$RESOLVE_LANG_OUT" | sed -n 's/^source=//p')"
+RESOLVE_LANG_NOTE="$(printf '%s\n' "$RESOLVE_LANG_OUT" | sed -n 's/^note=//p')"
+echo "  lang=${RESOLVE_LANG_VALUE}"
+echo "  source=${RESOLVE_LANG_SOURCE}"
+if [ "$RESOLVE_LANG_NOTE" != "none" ]; then
+  echo "[警告] ${RESOLVE_LANG_NOTE}"
+fi
+
+echo
 echo "=== サンドボックス（scripts/sandbox-exec.sh --print-plan） ==="
 SANDBOX_PLAN="$(bash "${SCRIPT_DIR}/sandbox-exec.sh" --print-plan 2>&1)"
 SANDBOX_EXIT=$?
