@@ -727,9 +727,11 @@ evaluator が返した判定JSONの `lang` を `$RESOLVED_LANG` と照合する�
 
 ```bash
 RETURNED_LANG="$(jq -r '.lang // empty' /tmp/verdict.json 2>/dev/null)"
+LANG_CHECK_OUT="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-lang.sh" --lang "${RETURNED_LANG:-}")"
+LANG_CHECK_SOURCE="$(printf '%s\n' "$LANG_CHECK_OUT" | sed -n 's/^source=//p')"
 if [ -z "$RETURNED_LANG" ]; then
   gh issue comment <epic番号> --body "応答言語の空振り検知: evaluatorの判定JSONにlangフィールドが欠落していました（期待値: ${RESOLVED_LANG}）"
-elif [ "$RETURNED_LANG" != "$RESOLVED_LANG" ]; then
+elif [ "$LANG_CHECK_SOURCE" != "arg" ] || [ "$RETURNED_LANG" != "$RESOLVED_LANG" ]; then
   gh issue comment <epic番号> --body "応答言語の空振り検知: evaluatorが返したlang=${RETURNED_LANG}が解決値${RESOLVED_LANG}と食い違っています"
 fi
 ```
@@ -738,6 +740,11 @@ fi
 ヘッドレス起動（`--output-schema`）での欠落は原則起きない。それでも検知したら記録する
 （空振り検知の目的は「気付けること」である）。サブエージェント起動（ヘッドレスでない場合）で
 判定JSONをファイルに保存していない場合は、応答から読み取った `lang` の値を同じ条件で照合する。
+
+値の妥当性判定（`ja`/`en` 以外が返ってきた場合）は自前で `ja|en` を判定するコードを書かず、
+`scripts/resolve-lang.sh --lang` に委譲する（`source=arg` なら妥当な値、`source=fallback`
+なら不正値。許容リストの二重管理を避ける）。delta-review（後述「R3: 指摘対応」節）も
+同じ照合を行う。
 
 トークン数が取得できた場合のみ記録する（取得できない場合はその事実を明記し、記録をスキップする。
 Task #76・自律ループは止めない）:
