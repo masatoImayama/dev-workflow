@@ -285,10 +285,14 @@ Epic #$ARGUMENTS の全変更をレビューしてください。
 - モード: epic-review
 - 観点: correctness
 - 差分範囲: main...[epic/epicXX/機能名]
+- 応答言語: [RESOLVED_LANG]（`findings[].title` / `detail` / `fix` など issue 本文になる
+  人間向けテキストはこの言語で書くこと。`verdict` / `severity` / `focus` / `lang` の値は
+  英語 enum のまま返すこと）
 - 変更ファイル数が50超のため、code-review-graphのblast radiusの算出を使って読む優先順位を付けてよい
 - 最後に必ずJSONブロック（verdict / reviewed_commit / focus / findings）を出力すること
 
-（readability / over-engineering / security も同様に3本続けて同一メッセージで起動する）
+（readability / over-engineering / security も同様に3本続けて同一メッセージで起動する。
+  応答言語も同じ値を渡す）
 ```
 
 code-review-graphが未導入の場合（従来どおりPhase単位に分割する既存の回避策。Phaseごとに
@@ -299,7 +303,11 @@ code-review-graphが未導入の場合（従来どおりPhase単位に分割す�
 Epic #$ARGUMENTS のうち Phase 1 の変更をレビューしてください。
 - 観点: correctness
 - 差分範囲: main...[epic-branch] のうち [Phase1で変更されたファイル群]
+- 応答言語: [RESOLVED_LANG]（`findings[].title` / `detail` / `fix` など issue 本文になる
+  人間向けテキストはこの言語で書くこと。`verdict` / `severity` / `focus` / `lang` の値は
+  英語 enum のまま返すこと）
 
-（readability / over-engineering / security も同様。Phase 2 以降も同じ形で続ける）
+（readability / over-engineering / security も同様。Phase 2 以降も同じ形で続ける。
+  応答言語も同じ値を渡す）
 ```
 
