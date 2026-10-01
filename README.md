@@ -1296,6 +1296,7 @@ DEV_WORKFLOW_FEEDBACK_HOME=path              # フィードバック台帳の親
 DEV_WORKFLOW_FEEDBACK_DIR=path               # 台帳ディレクトリを直接上書きする（テスト用）
 DEV_WORKFLOW_FEEDBACK_THRESHOLD=3            # 反映・還流を提案するまでの再現回数（昇格閾値）
 DEV_WORKFLOW_UPSTREAM_REPO=owner/repo        # 還流先（既定: プラグインのマニフェストの repository）
+DEV_WORKFLOW_LANG=ja                         # 人間向け出力の言語（ja|en。未設定・空・不正値なら ja）
 ```
 
 ## Slack通知
@@ -1511,6 +1512,43 @@ bash scripts/feedback-ledger.sh render-upstream --key <slug>   # 本文（redact
 - 同じキーの issue が既にある場合は新規作成せず既存 issue へコメントする（本文にキーが埋まっているので `gh issue list --search` で拾える）
 
 還流した issue は `/dev-workflow:plan` → `/dev-workflow:run` で処理される。**ハーネスの改善をハーネス自身で回すのがこのループの外周**にあたる。
+
+## 応答言語
+
+**人間向け出力の言語は `DEV_WORKFLOW_LANG` で切り替える。** 既定は `ja`。未設定なら
+従来どおり日本語で応答します。
+
+```bash
+export DEV_WORKFLOW_LANG=en   # ja|en。未設定・空・不正値なら ja
+```
+
+**対象**: planner のヒアリング・確認・提案、仕様書・計画書、Epic / Task issue の本文、
+generator の進捗報告・完了報告・issue コメント、evaluator の人間向けサマリーと
+`findings[].title` / `detail` / `fix`、run の進捗表示・PR 本文・Epic issue へのコメント、
+feedback の `learnings.md`・還流 issue 本文。
+
+**対象外**: 機械可読 JSON のキー名・enum 値、ラベル名（`epic` / `task` / `review`）、
+コミットメッセージの種別（`feat` / `fix` 等）、Epic / Task 本文の節見出し
+（`## 対象ファイル` / `## 準備コマンド` / `## 共有ディレクトリ` / `## SKIPパターン` /
+`## 編集時チェック`）、`- 前提:` / `- Epic:` / `- 想定時間:` の行頭キー、
+ブランチ命名規則、`readability-guard:allow` マーカー。これらは `plan-waves.sh` や
+`run` が文字列一致・ラベル検索でパースするため、翻訳すると依存グラフやウェーブ編成が
+黙って壊れます。対象・対象外の完全な表は `core/instructions.md` の「応答言語」節が
+**正本**です。
+
+**`DEV_WORKFLOW_LANG` はエージェントの応答にのみ効きます。** `check-readability.sh` /
+`edit-check.sh` / `notify-slack.sh` / `watchdog.sh` / `doctor.sh` /
+`check-prerequisites.sh` / 各 `build.sh` のような **bash スクリプトが出すメッセージは
+対象外**です（第1版の意識的な制約。日本語ハードコードのまま変更しません。対象に含める
+なら別 Epic）。
+
+不正値・未サポート値・空文字は `ja` に倒し、その事実を記録します（停止しません）。
+解決された値は `bash scripts/doctor.sh` の表示で確認できます。
+
+**既存の Epic / Task issue への追記にも、既存言語に合わせる例外は置かず常に設定値に
+従います。** `DEV_WORKFLOW_LANG=en` に切り替えたあとは、日本語で立っている既存 issue への
+コメントも英語で書きます。そのため同一 issue 内で日英が混在することがありますが、
+規則を単純に保ち実装とテストを明快にするための意識的なトレードオフです。
 
 ## プロジェクト固有のカスタマイズ
 
