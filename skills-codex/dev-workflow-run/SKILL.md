@@ -721,7 +721,9 @@ codex exec --output-schema "${CLAUDE_PLUGIN_ROOT}/adapters/codex/schemas/evaluat
 
 evaluator が返した判定JSONの `lang` を `$RESOLVED_LANG` と照合する。食い違う・欠落して
 いる場合は、その事実を Epic issue にコメントし、**そのまま進む**（停止しない。「記録して
-進む」に分類する）。**Codex版は evaluator が1本なので照合も1回だけ**である。
+進む」に分類する）。**Codex版は R1内の evaluator が1本なので、R1の照合もこの1回だけ**で
+済む（Claude版の観点別4本のような複数本の照合は不要）。**delta-review が実行された場合は
+そこでも同じ照合を行う**（「R3: 指摘対応」節「応答言語の照合」参照。#259）。
 
 ```bash
 RETURNED_LANG="$(jq -r '.lang // empty' /tmp/verdict.json 2>/dev/null)"
@@ -804,7 +806,33 @@ Epic #<epic番号> の指摘対応を確認してください。
 ```
 
 delta-review も `evaluator-verdict.json` の `required` に `lang` を含むため、R1と同じ理由で
-応答言語を渡す（Codex版の照合はR1の直後の1回だけであり、delta-reviewでは照合しない）。
+応答言語を渡す。
+
+#### 応答言語の照合（空振り検知。Epic #246 D1 / #259）
+
+**R1と同じ照合を delta-review の判定JSONにも行う。** R1直後の1回だけに限定すると、
+R1通過後の指摘対応（review issue対応）で言語指示が再度空振りしても気付けない
+（確定事項D1は「検知手段なしに実装してはならない」としている。evaluator呼び出しが
+複数回ある構成で一部だけ検知対象外にすると取りこぼしになる）。
+
+```bash
+RETURNED_LANG="$(jq -r '.lang // empty' /tmp/verdict-delta.json 2>/dev/null)"
+LANG_CHECK_OUT="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-lang.sh" --lang "${RETURNED_LANG:-}")"
+LANG_CHECK_SOURCE="$(printf '%s\n' "$LANG_CHECK_OUT" | sed -n 's/^source=//p')"
+if [ -z "$RETURNED_LANG" ]; then
+  gh issue comment <epic番号> --body "応答言語の空振り検知（delta-review）: evaluatorの判定JSONにlangフィールドが欠落していました（期待値: ${RESOLVED_LANG}）"
+elif [ "$LANG_CHECK_SOURCE" != "arg" ] || [ "$RETURNED_LANG" != "$RESOLVED_LANG" ]; then
+  gh issue comment <epic番号> --body "応答言語の空振り検知（delta-review）: evaluatorが返したlang=${RETURNED_LANG}が解決値${RESOLVED_LANG}と食い違っています"
+fi
+```
+
+値の妥当性判定（`ja`/`en` 以外が返ってきた場合）は自前で `ja|en` を判定するコードを書かず、
+`scripts/resolve-lang.sh --lang` に委譲する（`source=arg` なら妥当な値、`source=fallback`
+なら不正値。許容リストの二重管理を避ける）。`lang` を返さない evaluator（本Epic以前の定義・
+旧形式の判定JSON）が相手でも**run は止まらない**。欠落（`lang` フィールド自体が無い）と
+食い違い（値はあるが解決値と異なる）は別のメッセージで区別して記録する（後方互換。
+仕様書第10節）。サブエージェント起動（ヘッドレスでない場合）で判定JSONをファイルに
+保存していない場合は、応答から読み取った `lang` の値を同じ条件で照合する。
 
 R1と同じ作法でこのdelta-review呼び出しのトークン消費も記録する（取得できた場合のみ。
 取得できなければスキップし、自律ループは止めない）:
