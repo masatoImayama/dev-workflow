@@ -17562,12 +17562,14 @@ DOCTOR_SCRIPT_SRC="${REPO_ROOT}/scripts/doctor.sh"
 copy_doctor_scripts() {
   # copy_doctor_scripts <dest_repo_dir>
   # doctor.sh とその依存スクリプト（check-prerequisites.sh / check-repo-hygiene.sh /
-  # sandbox-exec.sh / resolve-sandbox.sh / lib）を検証対象の一時リポジトリへ複製してコミットする。
+  # sandbox-exec.sh / resolve-sandbox.sh / resolve-lang.sh / lib）を検証対象の
+  # 一時リポジトリへ複製してコミットする。
   local dest="$1"
   copy_sandbox_scripts "$dest"
   cp "${REPO_ROOT}/scripts/doctor.sh"              "${dest}/scripts/doctor.sh"
   cp "${REPO_ROOT}/scripts/check-prerequisites.sh" "${dest}/scripts/check-prerequisites.sh"
   cp "${REPO_ROOT}/scripts/check-repo-hygiene.sh"  "${dest}/scripts/check-repo-hygiene.sh"
+  cp "${REPO_ROOT}/scripts/resolve-lang.sh"        "${dest}/scripts/resolve-lang.sh"
   (
     cd "$dest" || exit 1
     git add scripts
@@ -17770,6 +17772,77 @@ DOCTOR_SIDEEFFECT_EXCLUDE_AFTER=""
 [ -f "$DOCTOR_SIDEEFFECT_EXCLUDE" ] && DOCTOR_SIDEEFFECT_EXCLUDE_AFTER="$(cat "$DOCTOR_SIDEEFFECT_EXCLUDE")"
 assert_eq "doctor.sh: .git/info/exclude を書き換えない（衛生チェックを--checkで呼ぶ。#218）" \
   "$DOCTOR_SIDEEFFECT_EXCLUDE_BEFORE" "$DOCTOR_SIDEEFFECT_EXCLUDE_AFTER"
+
+# --- ケース8: bash -n が通る（#254） ---
+if bash -n "$DOCTOR_SCRIPT_SRC" 2>/dev/null; then
+  pass "doctor.sh: bash -n の構文チェックが通る（#254）"
+else
+  fail "doctor.sh: bash -n の構文チェックが通る（#254）"
+fi
+
+# --- ケース9: 応答言語の節（scripts/resolve-lang.shを呼ぶだけで判定ロジックを再実装しない。#254） ---
+#     判定ロジックの二重実装を防ぐため、resolve-lang.sh への直接呼び出し以外で
+#     SUPPORTED_LANGS を参照していないことを確認する。
+if grep -qE 'SUPPORTED_LANGS' "$DOCTOR_SCRIPT_SRC"; then
+  fail "doctor.sh: 言語の許容リスト判定を再実装していない（#254）" \
+    "doctor.sh 内に SUPPORTED_LANGS への直接参照が見つかりました（resolve-lang.sh を呼ぶだけにすること）"
+else
+  pass "doctor.sh: 言語の許容リスト判定を再実装していない（#254）"
+fi
+
+if grep -qE 'resolve-lang\.sh' "$DOCTOR_SCRIPT_SRC"; then
+  pass "doctor.sh: scripts/resolve-lang.sh を呼んでいる（#254）"
+else
+  fail "doctor.sh: scripts/resolve-lang.sh を呼んでいる（#254）" "$(cat "$DOCTOR_SCRIPT_SRC")"
+fi
+
+# --- ケース10: DEV_WORKFLOW_LANG 未設定 → 「応答言語」節に lang=ja が表示される（#254） ---
+DOCTOR_LANG_DEFAULT_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  env -u DEV_WORKFLOW_LANG HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_LANG_DEFAULT_OUT" 2>&1
+)
+case "$(cat "$DOCTOR_LANG_DEFAULT_OUT")" in
+  *"応答言語"*"lang=ja"*) pass "doctor.sh: DEV_WORKFLOW_LANG未設定で応答言語の節にlang=jaが表示される（#254）" ;;
+  *) fail "doctor.sh: DEV_WORKFLOW_LANG未設定で応答言語の節にlang=jaが表示される（#254）" \
+    "$(cat "$DOCTOR_LANG_DEFAULT_OUT")" ;;
+esac
+
+# --- ケース11: DEV_WORKFLOW_LANG=en → lang=en が表示される（#254） ---
+DOCTOR_LANG_EN_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  DEV_WORKFLOW_LANG=en HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_LANG_EN_OUT" 2>&1
+)
+case "$(cat "$DOCTOR_LANG_EN_OUT")" in
+  *"lang=en"*) pass "doctor.sh: DEV_WORKFLOW_LANG=enでlang=enが表示される（#254）" ;;
+  *) fail "doctor.sh: DEV_WORKFLOW_LANG=enでlang=enが表示される（#254）" "$(cat "$DOCTOR_LANG_EN_OUT")" ;;
+esac
+
+# --- ケース12: DEV_WORKFLOW_LANG=fr（不正値） → lang=ja と警告が表示され、
+#     doctor.sh の終了コードが不正値によって変化しない（#254） ---
+DOCTOR_LANG_FR_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+DOCTOR_LANG_FR_EXIT=0
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  DEV_WORKFLOW_LANG=fr HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_LANG_FR_OUT" 2>&1
+) || DOCTOR_LANG_FR_EXIT=$?
+
+case "$(cat "$DOCTOR_LANG_FR_OUT")" in
+  *"lang=ja"*) pass "doctor.sh: DEV_WORKFLOW_LANG=fr（不正値）でlang=jaに倒れる（#254）" ;;
+  *) fail "doctor.sh: DEV_WORKFLOW_LANG=fr（不正値）でlang=jaに倒れる（#254）" "$(cat "$DOCTOR_LANG_FR_OUT")" ;;
+esac
+case "$(cat "$DOCTOR_LANG_FR_OUT")" in
+  *"[警告]"*) pass "doctor.sh: DEV_WORKFLOW_LANG=fr（不正値）で警告が表示される（#254）" ;;
+  *) fail "doctor.sh: DEV_WORKFLOW_LANG=fr（不正値）で警告が表示される（#254）" "$(cat "$DOCTOR_LANG_FR_OUT")" ;;
+esac
+# gh/docker は揃っている（DOCTOR_OK_BIN）ため、言語の不正値だけでは exit 1 にならない
+# ことを確認する（応答言語の不正値は REQUIRED_MISSING に影響させない契約。#254）。
+assert_exit_code "doctor.sh: DEV_WORKFLOW_LANG=fr（不正値）でも終了コードが変化しない（#254）" \
+  0 "$DOCTOR_LANG_FR_EXIT"
 
 # ---------------------------------------------------------------------------
 # scripts/install-optional-mcp.sh（任意MCPの導入。既定 dry-run。Task #219）
@@ -18374,6 +18447,555 @@ case "$H232_R2_SECTION" in
     fail "review.md: 「## 対象ファイル」節がlocationから列挙する旨が説明されている（#232）" \
       "$H232_R2_SECTION" ;;
 esac
+
+# ---------------------------------------------------------------------------
+# resolve-lang.sh（応答言語の解決、Task #247、Epic #246）
+#
+# 言語の解決（許容リストの判定・不正値のフォールバック・記録用メッセージの生成）を
+# run・scripts/doctor.sh・各エージェントの3か所で三重実装しないよう、1つのスクリプトに
+# 集約した。不正値・空文字でも exit 0 で ja に倒すことが核心（doctor.sh が終了コードで
+# 必須依存の有無を判定するため、1を返すと診断全体が失敗扱いになる）。
+# ---------------------------------------------------------------------------
+
+echo "== scripts/resolve-lang.sh（応答言語の解決、#247） =="
+
+RESOLVE_LANG_SCRIPT="${REPO_ROOT}/scripts/resolve-lang.sh"
+
+rl_field() {
+  # rl_field <フィールド名(lang|source|note)> <resolve-lang.shの出力全体>
+  printf '%s\n' "$2" | grep -E "^$1=" | head -1 | sed "s/^$1=//"
+}
+
+# --- bash -n が通る ---
+if bash -n "$RESOLVE_LANG_SCRIPT" 2>/dev/null; then
+  pass "resolve-lang.sh: bash -n の構文チェックが通る（#247）"
+else
+  fail "resolve-lang.sh: bash -n の構文チェックが通る（#247）"
+fi
+
+# --- 許容リストが1変数（SUPPORTED_LANGS）に定義されている（将来の言語追加が1語追加で
+#     済むことの構造的な固定） ---
+if grep -qE '^SUPPORTED_LANGS=' "$RESOLVE_LANG_SCRIPT"; then
+  pass "resolve-lang.sh: 許容リストが SUPPORTED_LANGS の1変数に定義されている（#247）"
+else
+  fail "resolve-lang.sh: 許容リストが SUPPORTED_LANGS の1変数に定義されている（#247）"
+fi
+
+# --- ケース1: DEV_WORKFLOW_LANG 未設定 → lang=ja / source=default / exit 0 ---
+RL_DEFAULT_OUTPUT="$(env -u DEV_WORKFLOW_LANG bash "$RESOLVE_LANG_SCRIPT")"
+RL_DEFAULT_EXIT=$?
+assert_eq "未設定: lang=ja" "ja" "$(rl_field lang "$RL_DEFAULT_OUTPUT")"
+assert_eq "未設定: source=default" "default" "$(rl_field source "$RL_DEFAULT_OUTPUT")"
+assert_exit_code "未設定: exit 0" 0 "$RL_DEFAULT_EXIT"
+
+# --- ケース2: DEV_WORKFLOW_LANG=en → lang=en / source=env / exit 0 ---
+RL_EN_OUTPUT="$(DEV_WORKFLOW_LANG=en bash "$RESOLVE_LANG_SCRIPT")"
+RL_EN_EXIT=$?
+assert_eq "DEV_WORKFLOW_LANG=en: lang=en" "en" "$(rl_field lang "$RL_EN_OUTPUT")"
+assert_eq "DEV_WORKFLOW_LANG=en: source=env" "env" "$(rl_field source "$RL_EN_OUTPUT")"
+assert_exit_code "DEV_WORKFLOW_LANG=en: exit 0" 0 "$RL_EN_EXIT"
+
+# --- ケース3: DEV_WORKFLOW_LANG=ja → lang=ja / source=env / exit 0 ---
+RL_JA_OUTPUT="$(DEV_WORKFLOW_LANG=ja bash "$RESOLVE_LANG_SCRIPT")"
+RL_JA_EXIT=$?
+assert_eq "DEV_WORKFLOW_LANG=ja: lang=ja" "ja" "$(rl_field lang "$RL_JA_OUTPUT")"
+assert_eq "DEV_WORKFLOW_LANG=ja: source=env" "env" "$(rl_field source "$RL_JA_OUTPUT")"
+assert_exit_code "DEV_WORKFLOW_LANG=ja: exit 0" 0 "$RL_JA_EXIT"
+
+# --- ケース4: DEV_WORKFLOW_LANG=fr（未サポート） → lang=ja / source=fallback /
+#     note が none 以外 / exit 0（停止しない） ---
+RL_FR_OUTPUT="$(DEV_WORKFLOW_LANG=fr bash "$RESOLVE_LANG_SCRIPT")"
+RL_FR_EXIT=$?
+assert_eq "DEV_WORKFLOW_LANG=fr（未サポート): lang=ja" "ja" "$(rl_field lang "$RL_FR_OUTPUT")"
+assert_eq "DEV_WORKFLOW_LANG=fr（未サポート): source=fallback" "fallback" "$(rl_field source "$RL_FR_OUTPUT")"
+RL_FR_NOTE="$(rl_field note "$RL_FR_OUTPUT")"
+if [ -n "$RL_FR_NOTE" ] && [ "$RL_FR_NOTE" != "none" ]; then
+  pass "DEV_WORKFLOW_LANG=fr（未サポート): noteに事実が記録される（#247）"
+else
+  fail "DEV_WORKFLOW_LANG=fr（未サポート): noteに事実が記録される（#247）" "note=${RL_FR_NOTE}"
+fi
+assert_exit_code "DEV_WORKFLOW_LANG=fr（未サポート): exit 0（停止しない）" 0 "$RL_FR_EXIT"
+
+# --- ケース5: DEV_WORKFLOW_LANG=""（空文字） → lang=ja / source=fallback / exit 0 ---
+RL_EMPTY_OUTPUT="$(DEV_WORKFLOW_LANG="" bash "$RESOLVE_LANG_SCRIPT")"
+RL_EMPTY_EXIT=$?
+assert_eq "DEV_WORKFLOW_LANG=空文字: lang=ja" "ja" "$(rl_field lang "$RL_EMPTY_OUTPUT")"
+assert_eq "DEV_WORKFLOW_LANG=空文字: source=fallback" "fallback" "$(rl_field source "$RL_EMPTY_OUTPUT")"
+assert_exit_code "DEV_WORKFLOW_LANG=空文字: exit 0" 0 "$RL_EMPTY_EXIT"
+
+# --- ケース6: --lang en は DEV_WORKFLOW_LANG=ja より優先される（lang=en / source=arg） ---
+RL_ARG_OUTPUT="$(DEV_WORKFLOW_LANG=ja bash "$RESOLVE_LANG_SCRIPT" --lang en)"
+RL_ARG_EXIT=$?
+assert_eq "--lang en（env=jaより優先): lang=en" "en" "$(rl_field lang "$RL_ARG_OUTPUT")"
+assert_eq "--lang en（env=jaより優先): source=arg" "arg" "$(rl_field source "$RL_ARG_OUTPUT")"
+assert_exit_code "--lang en（env=jaより優先): exit 0" 0 "$RL_ARG_EXIT"
+
+# --- ケース7: --lang zz（不正な明示値） → lang=ja / source=fallback / exit 0 ---
+RL_BADARG_OUTPUT="$(bash "$RESOLVE_LANG_SCRIPT" --lang zz)"
+RL_BADARG_EXIT=$?
+assert_eq "--lang zz（不正な明示値): lang=ja" "ja" "$(rl_field lang "$RL_BADARG_OUTPUT")"
+assert_eq "--lang zz（不正な明示値): source=fallback" "fallback" "$(rl_field source "$RL_BADARG_OUTPUT")"
+assert_exit_code "--lang zz（不正な明示値): exit 0" 0 "$RL_BADARG_EXIT"
+
+# --- ケース8: --help が exit 0 で使い方を表示する ---
+RL_HELP_OUTPUT="$(bash "$RESOLVE_LANG_SCRIPT" --help)"
+RL_HELP_EXIT=$?
+case "$RL_HELP_OUTPUT" in
+  *'使い方'*) pass "resolve-lang.sh --help: 使い方が表示される（#247）" ;;
+  *) fail "resolve-lang.sh --help: 使い方が表示される（#247）" "$RL_HELP_OUTPUT" ;;
+esac
+assert_exit_code "resolve-lang.sh --help: exit 0" 0 "$RL_HELP_EXIT"
+
+# --- ケース9: 出力が必ず lang= / source= / note= の3行であること（順序を含めて固定する） ---
+RL_ORDER_OUTPUT="$(env -u DEV_WORKFLOW_LANG bash "$RESOLVE_LANG_SCRIPT")"
+RL_ORDER_LINE1="$(printf '%s\n' "$RL_ORDER_OUTPUT" | sed -n '1p' | cut -d= -f1)"
+RL_ORDER_LINE2="$(printf '%s\n' "$RL_ORDER_OUTPUT" | sed -n '2p' | cut -d= -f1)"
+RL_ORDER_LINE3="$(printf '%s\n' "$RL_ORDER_OUTPUT" | sed -n '3p' | cut -d= -f1)"
+RL_ORDER_LINECOUNT="$(printf '%s\n' "$RL_ORDER_OUTPUT" | wc -l | tr -d ' ')"
+assert_eq "出力順序: 1行目がlang=" "lang" "$RL_ORDER_LINE1"
+assert_eq "出力順序: 2行目がsource=" "source" "$RL_ORDER_LINE2"
+assert_eq "出力順序: 3行目がnote=" "note" "$RL_ORDER_LINE3"
+assert_eq "出力順序: 必ず3行" "3" "$RL_ORDER_LINECOUNT"
+
+echo ""
+echo "== skills/run: evaluator/generator 起動プロンプト雛形に応答言語への言及があること（#258） =="
+
+# #252/#253でR1基本形には「- 応答言語: [RESOLVED_LANG]」行を追加したが、変更50ファイル超時の
+# 代替プロンプト（blast radius版 / Phase単位分割版）には追加漏れがあった（#258）。
+# 「個別の行を直す」だけでは、新しい起動プロンプトを追加したときの書き忘れに誰も気づかない
+# ため、個別ケースの回帰テストにはせず、「`@evaluator`/`@generator` で始まる起動プロンプト
+# 雛形には必ず応答言語への言及がある」ことをリポジトリ全体に対して検査する。
+#
+# 検査対象は Claude版の `@evaluator` / `@generator` マーカー（行頭一致）に限定する。
+# Codex版（skills-codex/dev-workflow-run/SKILL.md）はこのマーカーを使わず、起動プロンプトを
+# 他の素のbash/JSONコードブロックと機械的に区別する確実な手段が無いため対象外とする
+# （誤検知で将来の正当な記述をブロックしないことを、広く拾うことより優先する。#258）。
+# 正本の内容検査・生成物への伝播検査は #256 の担当であり、ここでは重複させない。
+#
+# 4観点並列で2本目以降を「（同上。- 観点: xxx）」のように直前の完全な雛形を参照する省略記法
+# （skills/run/SKILL.md のR1本体が使う）は、応答言語の文言そのものは含まないため、
+# "応答言語" に加えて "同上" も許容語として扱う（正当な省略記法を誤検知しないため）。
+LANG_LAUNCH_BLOCKS="$(awk '
+  /^@evaluator$/ || /^@generator$/ {
+    if (block != "") { print start_line "\x01" block }
+    start_line = NR
+    block = $0
+    next
+  }
+  block != "" && NF == 0 {
+    print start_line "\x01" block
+    block = ""
+    next
+  }
+  block != "" {
+    block = block "@@NL@@" $0
+  }
+  END {
+    if (block != "") print start_line "\x01" block
+  }
+' "$RUN_SKILL_FLAT")"
+
+LANG_LAUNCH_TOTAL=0
+LANG_LAUNCH_MISSING=0
+LANG_LAUNCH_DETAIL=""
+if [ -n "$LANG_LAUNCH_BLOCKS" ]; then
+  while IFS=$'\x01' read -r _ll_line _ll_block; do
+    LANG_LAUNCH_TOTAL=$((LANG_LAUNCH_TOTAL + 1))
+    case "$_ll_block" in
+      *応答言語*|*同上*) ;;
+      *)
+        LANG_LAUNCH_MISSING=$((LANG_LAUNCH_MISSING + 1))
+        LANG_LAUNCH_DETAIL="${LANG_LAUNCH_DETAIL}flat-line ${_ll_line}: ${_ll_block//@@NL@@/ | }
+"
+        ;;
+    esac
+  done <<< "$LANG_LAUNCH_BLOCKS"
+fi
+
+# 検出件数そのものが0件になっていないことを確認する（マーカーの記法が変わって検査が
+# 静かに空振りする事故を防ぐ。見つからなくなった場合はこのテストの正規表現を見直すこと）。
+if [ "$LANG_LAUNCH_TOTAL" -ge 1 ]; then
+  pass "@evaluator/@generator 起動プロンプト雛形を1件以上検出した（#258）"
+else
+  fail "@evaluator/@generator 起動プロンプト雛形を1件以上検出した（#258）" \
+    "0件検出。マーカー記法（行頭の ^@evaluator\$ / ^@generator\$）が変わった場合はこのテストの正規表現も更新すること"
+fi
+
+if [ "$LANG_LAUNCH_MISSING" -eq 0 ]; then
+  pass "全ての起動プロンプト雛形が応答言語に言及している（#258）"
+else
+  fail "全ての起動プロンプト雛形が応答言語に言及している（#258）" "$LANG_LAUNCH_DETAIL"
+fi
+
+# ---------------------------------------------------------------------------
+# 応答言語規約の検証（Epic #246・Task #256）
+#
+# resolve-lang.sh の解決ロジック自体（#247）と doctor.sh の表示（#254）は既にテスト済み
+# のため、ここでは重複させない。このEpicで最も危険な回帰は「対象外（機械可読な字面）の
+# 翻訳」である。`## 対象ファイル` / `- 前提:` / ラベル名 / JSON の enum を翻訳すると
+# scripts/plan-waves.sh とウェーブ編成が黙って誤る（フェイルオープンで無関係なタスクが
+# 混入しうる）。
+#
+# run からの割り当てにより、「正本の内容検査・対象外の字面検査・生成物への伝播検査・
+# 一元化検査」がこのタスクの担当範囲であり、「起動プロンプト雛形に - 応答言語: が
+# 網羅されているか」は #258（skills/run: evaluator/generator起動プロンプト雛形への
+# 言及の構造テスト）の担当範囲である。重複実装を避けるため、本節では起動プロンプト
+# 雛形の網羅検査は追加しない（lang照合の記録挙動・正本の内容・伝播・一元化に限定する）。
+# ---------------------------------------------------------------------------
+
+echo "== 応答言語規約: 正本（core/instructions.md「応答言語」節）の記述（#246） =="
+
+L246_LANG_SECTION="$(awk '
+  $0 == "## 応答言語" { flag = 1; next }
+  flag && /^## / { exit }
+  flag { print }
+' "$CORE_INSTRUCTIONS_FLAT")"
+
+if [ -n "$L246_LANG_SECTION" ]; then
+  pass "core/instructions.md: 「応答言語」節が存在する（#246）"
+else
+  fail "core/instructions.md: 「応答言語」節が存在する（#246）" "CORE_INSTRUCTIONS_FLAT に見出しが見つかりません"
+fi
+
+l246_section_contains() {
+  # l246_section_contains <説明> <検査文字列>
+  local desc="$1" needle="$2"
+  if printf '%s' "$L246_LANG_SECTION" | grep -Fq -- "$needle"; then
+    pass "$desc"
+  else
+    fail "$desc" "「応答言語」節に見つかりません: ${needle}"
+  fi
+}
+
+l246_section_contains "core/instructions.md「応答言語」節: DEV_WORKFLOW_LANG が書かれている（#246）" "DEV_WORKFLOW_LANG"
+l246_section_contains "core/instructions.md「応答言語」節: この節が正本であると明記されている（#246）" "この節が正本であり"
+l246_section_contains "core/instructions.md「応答言語」節: 解決の優先順位1段目（経路B）が書かれている（#246）" "経路B（基本）"
+l246_section_contains "core/instructions.md「応答言語」節: 解決の優先順位2段目（経路A・resolve-lang.sh）が書かれている（#246）" "経路A（保険）"
+l246_section_contains "core/instructions.md「応答言語」節: 解決の優先順位3段目（既定ja）が書かれている（#246）" '| 3 | 既定 | 無ければ `ja` |'
+l246_section_contains "core/instructions.md「応答言語」節: 不正値・未サポート値・空文字をjaに倒す旨が書かれている（#246）" '不正値・未サポート値・空文字は `ja` に倒し'
+l246_section_contains "core/instructions.md「応答言語」節: 不正値の扱いが「記録して進む」に分類される旨が書かれている（#246）" "記録して進む"
+l246_section_contains "core/instructions.md「応答言語」節: 不正値の扱いで停止しない旨が明記されている（#246）" "停止しない"
+l246_section_contains "core/instructions.md「応答言語」節: 既存文脈への例外を置かない判断（D3）の節がある（#246）" "### 既存文脈への例外を置かない"
+l246_section_contains "core/instructions.md「応答言語」節: 常に設定値に従う旨（D3）が書かれている（#246）" "常に設定値に従う"
+l246_section_contains "core/instructions.md「応答言語」節: D3の判断理由（トレードオフ）が書かれている（#246）" "トレードオフ"
+l246_section_contains "core/instructions.md「応答言語」節: bashスクリプトのメッセージがスコープ外（D2）の節がある（#246）" "### bash スクリプトのメッセージはスコープ外"
+
+# --- 対象外（機械可読な字面）の表に、plan-waves.sh / ラベル検索 / JSON enum / コミット規約 /
+#     readability-guard が期待する字面がすべて含まれている（この Epic で最も危険な回帰） ---
+
+L246_EXCLUDE_BLOCK="$(awk '
+  $0 ~ /^### 言語設定の対象外/ { flag = 1; next }
+  flag && /^### / { exit }
+  flag { print }
+' "$CORE_INSTRUCTIONS_FLAT")"
+
+L246_TARGET_TOKENS=(
+  '## 対象ファイル'
+  '- 前提:'
+  '- Epic:'
+  '## 準備コマンド'
+  '## 共有ディレクトリ'
+  '## SKIPパターン'
+  '## 編集時チェック'
+  '`epic` / `task` / `review`'
+  '`APPROVE`'
+  '`REQUEST_CHANGES`'
+  '`high-confidence`'
+  '`feat` / `fix` / `refactor` / `test` / `docs` / `chore`'
+  '`readability-guard:allow`'
+)
+
+for L246_TOK in "${L246_TARGET_TOKENS[@]}"; do
+  if printf '%s' "$L246_EXCLUDE_BLOCK" | grep -Fq -- "$L246_TOK"; then
+    pass "core/instructions.md「言語設定の対象外」表: 字面 [${L246_TOK}] が含まれている（#246。翻訳するとplan-waves.sh・ウェーブ編成が黙って壊れる）"
+  else
+    fail "core/instructions.md「言語設定の対象外」表: 字面 [${L246_TOK}] が含まれている（#246。翻訳するとplan-waves.sh・ウェーブ編成が黙って壊れる）" \
+      "対象外表に見つかりません: ${L246_TOK}"
+  fi
+done
+unset L246_TOK
+
+echo "== 応答言語規約: 正本の一元化（role定義・skillsが参照のみで表を複製していない）（#246） =="
+
+# 正本の対象・対象外表の一部（複製されたら検知したいフレーズ）。
+# 「複製したら落ちる」形のアサーションにするため、表の見出し行・理由列の字面を使う。
+L246_DUP_MARKERS=(
+  '対象外 | 理由'
+  '`gh issue list --label` が引く'
+  '`readability-guard:allow` マーカー | `check-readability.sh` が引く'
+)
+
+l246_check_reference_only() {
+  # l246_check_reference_only <ラベル> <ファイル> <参照確認に使う文字列>
+  local label="$1" file="$2" ref_needle="$3"
+  if [ ! -f "$file" ]; then
+    fail "${label}: ファイルが存在する（#246）" "見つかりません: ${file}"
+    return
+  fi
+  if grep -Fq -- "$ref_needle" "$file"; then
+    pass "${label}: 正本（core/instructions.md「応答言語」節）を参照している（#246）"
+  else
+    fail "${label}: 正本（core/instructions.md「応答言語」節）を参照している（#246）" \
+      "参照行が見つかりません: ${ref_needle}"
+  fi
+  local marker hit
+  for marker in "${L246_DUP_MARKERS[@]}"; do
+    hit="$(grep -Fn -- "$marker" "$file" || true)"
+    if [ -n "$hit" ]; then
+      fail "${label}: 正本の対象・対象外の表を複製していない（#246）" \
+        "正本の表の一部がこのファイルに複製されています: ${hit}"
+      return
+    fi
+  done
+  pass "${label}: 正本の対象・対象外の表を複製していない（#246）"
+}
+
+l246_check_reference_only "core/roles/planner.md" "${REPO_ROOT}/core/roles/planner.md" "「応答言語」節に従う"
+l246_check_reference_only "core/roles/generator.md" "${REPO_ROOT}/core/roles/generator.md" "「応答言語」節に従う"
+l246_check_reference_only "core/roles/evaluator.md" "${REPO_ROOT}/core/roles/evaluator.md" "「応答言語」節に従う"
+
+# skills側（#257で正本参照1行＋機械可読は対象外、という形に統一済み）も同じ観点で検査する。
+# skills/feedback/SKILL.md の台帳キー（scope/category/key/severity）は正本の対象外表に
+# 含まれない feedback-ledger.sh 固有の値であり、#257のコメントで「正本の表の複製には
+# 該当しない」と判断済みのため、L246_DUP_MARKERS との不一致は意図した結果である。
+l246_check_reference_only "skills/plan/SKILL.md" "${REPO_ROOT}/skills/plan/SKILL.md" "応答言語の規約に"
+l246_check_reference_only "skills/spec/SKILL.md" "${REPO_ROOT}/skills/spec/SKILL.md" "応答言語の規約に"
+l246_check_reference_only "skills/epic/SKILL.md" "${REPO_ROOT}/skills/epic/SKILL.md" "応答言語の規約に"
+l246_check_reference_only "skills/feedback/SKILL.md" "${REPO_ROOT}/skills/feedback/SKILL.md" "応答言語の規約に"
+
+echo "== 応答言語規約: 生成物への伝播（agents/・codex-agents/。再生成漏れの検知）（#246） =="
+
+# build.sh --check 自体の合格検査は既存テスト（#55/#154/#157）が広く検証済みのため、
+# ここでは重複追加しない。「応答言語」節の内容が生成物側に反映されているかだけを見る。
+
+l246_check_propagation() {
+  local label="$1" file="$2"
+  if [ ! -f "$file" ]; then
+    fail "${label}: 「応答言語」節が反映されている（#246）" "見つかりません: ${file}"
+    return
+  fi
+  if grep -Fq '## 応答言語' "$file" && grep -Fq 'DEV_WORKFLOW_LANG' "$file"; then
+    pass "${label}: 「応答言語」節が反映されている（#246）"
+  else
+    fail "${label}: 「応答言語」節が反映されている（#246）" "見出しまたはDEV_WORKFLOW_LANGが見つかりません"
+  fi
+}
+
+l246_check_propagation "agents/planner.md" "${REPO_ROOT}/agents/planner.md"
+l246_check_propagation "agents/generator.md" "${REPO_ROOT}/agents/generator.md"
+l246_check_propagation "agents/evaluator.md" "${REPO_ROOT}/agents/evaluator.md"
+l246_check_propagation "codex-agents/planner.toml" "${REPO_ROOT}/codex-agents/planner.toml"
+l246_check_propagation "codex-agents/generator.toml" "${REPO_ROOT}/codex-agents/generator.toml"
+l246_check_propagation "codex-agents/evaluator.toml" "${REPO_ROOT}/codex-agents/evaluator.toml"
+
+echo "== 応答言語規約: evaluatorの lang フィールド（出力フォーマット・生成物・JSON schema）（#246） =="
+
+for L246_EVAL_FILE in \
+  "${REPO_ROOT}/core/roles/evaluator.md" \
+  "${REPO_ROOT}/agents/evaluator.md" \
+  "${REPO_ROOT}/codex-agents/evaluator.toml"
+do
+  if [ -f "$L246_EVAL_FILE" ] && grep -Fq '`lang`' "$L246_EVAL_FILE"; then
+    pass "${L246_EVAL_FILE#"${REPO_ROOT}/"}: 出力フォーマットに lang フィールドの説明がある（#246）"
+  else
+    fail "${L246_EVAL_FILE#"${REPO_ROOT}/"}: 出力フォーマットに lang フィールドの説明がある（#246）" \
+      "見つかりません: ${L246_EVAL_FILE}"
+  fi
+done
+unset L246_EVAL_FILE
+
+L246_SCHEMA="${REPO_ROOT}/adapters/codex/schemas/evaluator-verdict.json"
+
+l246_schema_lang_ok() {
+  # l246_schema_lang_ok <schemaファイル>
+  # 可能なら python3 でJSONを構造的にパースして properties.lang / required を確認する
+  # （文字列grepより構造確認を優先。#246タスク#256の指示）。python3が無い環境では、
+  # "lang" プロパティブロックに限定したgrep（範囲限定・無条件passにはしない）へ落とす。
+  local file="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$file" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(1)
+
+lang = data.get("properties", {}).get("lang", {})
+ok = (
+    lang.get("type") == "string"
+    and lang.get("enum") == ["ja", "en"]
+    and "lang" in data.get("required", [])
+)
+sys.exit(0 if ok else 1)
+PY
+    return $?
+  fi
+  grep -A 3 '"lang": {' "$file" 2>/dev/null | grep -Fq '"enum": ["ja", "en"]' \
+    && grep -F '"required"' "$file" 2>/dev/null | grep -Fq '"lang"'
+}
+
+if [ -f "$L246_SCHEMA" ] && l246_schema_lang_ok "$L246_SCHEMA"; then
+  pass "adapters/codex/schemas/evaluator-verdict.json: properties.lang が enum=[ja,en] かつ required に含まれている（#246・#249）"
+else
+  fail "adapters/codex/schemas/evaluator-verdict.json: properties.lang が enum=[ja,en] かつ required に含まれている（#246・#249）" \
+    "$(cat "$L246_SCHEMA" 2>&1)"
+fi
+
+echo "== 応答言語規約: run側の受け渡しと空振り検知の照合（Claude版）（#246） =="
+
+# 「起動プロンプト雛形に - 応答言語: が網羅されているか」はこのタスクの担当外であり、
+# #258（skills/run: evaluator/generator起動プロンプト雛形への言及の構造テスト）の担当範囲
+# である。ここで個別アンカーの重複検査を追加しない（run からの割り当て、#256作業時のコメント）。
+
+if grep -Fq 'resolve-lang.sh' "$RUN_SKILL_FLAT"; then
+  pass "skills/run/SKILL.md: resolve-lang.sh の呼び出しがある（#246・#252）"
+else
+  fail "skills/run/SKILL.md: resolve-lang.sh の呼び出しがある（#246・#252）"
+fi
+
+# 応答言語の空振り検知（lang照合）が「記録して進む（止めない/停止しない）」であり、
+# Epic issueに記録する実装例（gh issue comment）を伴っていることを、見出しブロック単位で見る。
+
+l246_extract_heading_block() {
+  # l246_extract_heading_block <file> <開始見出し（行頭一致の正規表現）> [出現回数（既定1）]
+  # 第3引数は、同一の見出し接頭辞（例: "#### 応答言語の照合"）が複数回登場するファイルで
+  # N番目の出現を狙って抽出するためのもの。省略時は従来どおり1番目（既存呼び出しは無変更）。
+  local file="$1" start_re="$2" occurrence="${3:-1}"
+  awk -v start="$start_re" -v want="$occurrence" '
+    $0 ~ ("^" start) {
+      count++
+      if (count == want) { flag = 1; next }
+      if (flag) { exit }
+      next
+    }
+    flag && /^#/ { exit }
+    flag { print }
+  ' "$file"
+}
+
+l246_assert_match_block() {
+  # l246_assert_match_block <説明> <ブロック本文>
+  local desc="$1" block="$2"
+  if [ -z "$block" ]; then
+    fail "$desc" "見出しブロックが空（見出し自体が見つからない可能性）"
+    return
+  fi
+  if printf '%s' "$block" | grep -Eq '停止しない|止めない' \
+    && printf '%s' "$block" | grep -Fq 'gh issue comment'; then
+    pass "$desc"
+  else
+    fail "$desc" "「停止しない/止めない」または「gh issue comment」が見つかりません"
+  fi
+}
+
+L246_MATCH_CLAUDE="$(l246_extract_heading_block "${REPO_ROOT}/skills/run/SKILL.md" '#### 応答言語の照合')"
+l246_assert_match_block \
+  "skills/run/SKILL.md: lang照合の空振り検知が「記録して進む（停止しない）」で、Epic issueに記録する実装例がある（#246・#255）" \
+  "$L246_MATCH_CLAUDE"
+
+L246_MATCH_WAVE="$(l246_extract_heading_block "${REPO_ROOT}/skills/run/references/wave-review.md" '## 応答言語の照合')"
+l246_assert_match_block \
+  "skills/run/references/wave-review.md: 同上（wave-review版）（#246・#255）" \
+  "$L246_MATCH_WAVE"
+
+echo "== 応答言語規約: run側の受け渡しと空振り検知の照合（Codex版。#236と同じ位置づけ）（#246） =="
+
+L246_CODEX_SKILL="${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md"
+
+if grep -Fq 'resolve-lang.sh' "$L246_CODEX_SKILL"; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: resolve-lang.sh の呼び出しがある（#246・#253）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: resolve-lang.sh の呼び出しがある（#246・#253）"
+fi
+
+# Codex版の起動プロンプト雛形への「- 応答言語:」網羅も#258の担当範囲（#258のコメントにより
+# Codex版は`@evaluator`/`@generator`マーカーを持たず機械的に区別できないため対象外とされて
+# いるが、その判断自体の是非を含めてここでは再検査しない。網羅検査を増やすとこのタスクと
+# #258の責務分担が崩れるため、lang照合の記録挙動のみを見る）。
+
+L246_MATCH_CODEX="$(l246_extract_heading_block "$L246_CODEX_SKILL" '#### 応答言語の照合')"
+l246_assert_match_block \
+  "skills-codex/dev-workflow-run/SKILL.md: 同上（Codex版。Claude版だけが直ってCodex版が取り残される回帰の検知）（#246・#253）" \
+  "$L246_MATCH_CODEX"
+
+# delta-review用ブロック（811行目台）はR1用ブロックと同じ見出し接頭辞「#### 応答言語の照合」を
+# 持つため、l246_extract_heading_block は行頭一致の正規表現だけでは最初の出現（R1用）しか
+# 拾えない（flag && /^#/ { exit } が次の見出しで打ち切るため）。見出し末尾の "D1 / #259" の
+# ような付随テキストは今後の書き換えで変わりうるので、そこをマーカーにするより、同一接頭辞の
+# 2番目の出現を狙う方が壊れにくいと判断し、第3引数（出現回数）で区別する（#261）。
+L246_MATCH_CODEX_DELTA="$(l246_extract_heading_block "$L246_CODEX_SKILL" '#### 応答言語の照合' 2)"
+l246_assert_match_block \
+  "skills-codex/dev-workflow-run/SKILL.md: delta-review用ブロックも同上（R1用ブロックしか拾えず、ここが静かに回帰する穴を塞ぐ）（#246・#259・#261）" \
+  "$L246_MATCH_CODEX_DELTA"
+
+echo "== 応答言語規約: skills/epic/SKILL.md のテンプレートが機械可読な字面を保っている（#246） =="
+
+# 言語設定の対象（Task issueのタイトル・本文）に引きずり込まれて、plan-waves.sh が読む
+# 機械可読な行頭キーまで翻訳対象にされていないことを固定する。
+
+L246_EPIC_SKILL="${REPO_ROOT}/skills/epic/SKILL.md"
+
+for L246_TOK in '## 対象ファイル' '- 前提:' '- Epic:'; do
+  if grep -Fq -- "$L246_TOK" "$L246_EPIC_SKILL"; then
+    pass "skills/epic/SKILL.md: Task issueテンプレートの字面 [${L246_TOK}] が保たれている（#246。言語設定の対象に引きずり込まれていない）"
+  else
+    fail "skills/epic/SKILL.md: Task issueテンプレートの字面 [${L246_TOK}] が保たれている（#246。言語設定の対象に引きずり込まれていない）" \
+      "見つかりません: ${L246_TOK}"
+  fi
+done
+unset L246_TOK
+
+echo "== 応答言語規約: README（DEV_WORKFLOW_LANG・bashスクリプトのスコープ外）（#246） =="
+
+L246_README="${REPO_ROOT}/README.md"
+
+L246_README_ENVVARS="$(awk '
+  $0 == "### 環境変数一覧" { flag = 1; next }
+  flag && /^## / { exit }
+  flag { print }
+' "$L246_README")"
+
+if printf '%s' "$L246_README_ENVVARS" | grep -Fq 'DEV_WORKFLOW_LANG'; then
+  pass "README.md: 環境変数一覧に DEV_WORKFLOW_LANG が載っている（#246・#251）"
+else
+  fail "README.md: 環境変数一覧に DEV_WORKFLOW_LANG が載っている（#246・#251）"
+fi
+
+if grep -Fq 'エージェントの応答にのみ効きます' "$L246_README" \
+  && grep -Fq 'bash スクリプトが出すメッセージは' "$L246_README" \
+  && grep -Fq '対象外' "$L246_README"; then
+  pass "README.md: bashスクリプトが出すメッセージが対象外である旨が書かれている（#246・#251）"
+else
+  fail "README.md: bashスクリプトが出すメッセージが対象外である旨が書かれている（#246・#251）"
+fi
+
+echo "== 応答言語規約: 機械可読な字面の回帰検査（scripts/plan-waves.sh。このEpicで最も危険な回帰）（#246） =="
+
+# scripts/plan-waves.sh 自身が依存グラフ構築に使う字面（jqフィルタのリテラル）が
+# 変わっていないこと。skills/epic/SKILL.md のテンプレート側の同じ字面は、直前の
+# 「skills/epic/SKILL.md のテンプレートが機械可読な字面を保っている」節で検査済みのため、
+# ここでは重複させない（#215の同種テストにも乗る）。
+
+L246_PLAN_WAVES="${REPO_ROOT}/scripts/plan-waves.sh"
+
+for L246_TOK in '"## 対象ファイル"' '"- 前提:"' '"- Epic:"'; do
+  if grep -Fq -- "$L246_TOK" "$L246_PLAN_WAVES"; then
+    pass "scripts/plan-waves.sh: 依存グラフ構築が読む字面 ${L246_TOK} が変わっていない（#246）"
+  else
+    fail "scripts/plan-waves.sh: 依存グラフ構築が読む字面 ${L246_TOK} が変わっていない（#246）" \
+      "見つかりません: ${L246_TOK}"
+  fi
+done
+unset L246_TOK
+
+if grep -Fq '## 対象ファイル' "${REPO_ROOT}/core/roles/planner.md"; then
+  pass "core/roles/planner.md: plan-waves.sh が期待する「## 対象ファイル」宣言の必須化が記述されている（#246。#215の同種テストに乗る）"
+else
+  fail "core/roles/planner.md: plan-waves.sh が期待する「## 対象ファイル」宣言の必須化が記述されている（#246）"
+fi
 
 # ---------------------------------------------------------------------------
 # 結果集計

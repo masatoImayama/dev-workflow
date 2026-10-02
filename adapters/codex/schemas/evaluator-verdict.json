@@ -4,12 +4,17 @@
   "description": "Epic一括レビュー／delta-review の判定結果。codex exec --output-schema で最終応答の形状を強制するために使う。",
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "reviewed_commit", "focus", "findings"],
+  "required": ["verdict", "reviewed_commit", "focus", "findings", "lang"],
   "properties": {
     "verdict": {
       "type": "string",
       "enum": ["APPROVE", "REQUEST_CHANGES"],
       "description": "high または medium の指摘があれば REQUEST_CHANGES。low のみ／指摘なしなら APPROVE。"
+    },
+    "lang": {
+      "type": "string",
+      "enum": ["ja", "en"],
+      "description": "起動時に渡された応答言語（人間向け出力に使う言語）。渡されなかった場合は実際に使った言語を返す。run が自分の解決値と照合して空振りを検知するためのフィールドである。"
     },
     "reviewed_commit": {
       "type": "string",

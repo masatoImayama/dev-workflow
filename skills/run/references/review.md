@@ -56,6 +56,9 @@ Epic #$ARGUMENTS のレビュー指摘の確度を判定してください。
 - 対象: 以下はR1マージ後のfindings（high/mediumのみ）
 [マージ済みfindingsのJSON配列をそのまま貼る]
 - 差分範囲: main...[epic/epicXX/機能名]
+- 応答言語: [RESOLVED_LANG]（`findings[].title` / `detail` / `fix` など issue 本文になる
+  人間向けテキストはこの言語で書くこと。`verdict` / `severity` / `focus` / `confidence` /
+  `lang` の値は英語 enum のまま返すこと）
 - 各findingについて実際にコードを確認し、confidence（high-confidence / low-confidence）を判定すること
 - 新しい指摘を追加しないこと（発見はR1が完了済み。ここでの役割は確度判定のみ）
 - 最後に必ずJSONブロック（各findingに`confidence`フィールドを追加したfindings配列。
@@ -76,6 +79,17 @@ issue化せず記録のみ）へ格下げして記録する。** 既存の low s
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
   --epic "$EPIC_NUM" --role evaluator --mode confidence-check \
   --note "model=[JSONのmodelフィールド。読み取れなければ'unknown']" --tokens [読み取ったトークン数]
+```
+
+**モデル上書きの空振り検知と同じ位置で、応答言語の空振り検知（Epic #246 D1 / #255）も
+扱う。** 確度判定役が返した判定JSONのトップレベル `lang` を `RESOLVED_LANG` と照合する。
+値の妥当性判定は条件分岐を自前で書かず `bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-lang.sh"
+--lang "[返ってきた値]"` の出力で行う（R1と同じ。許容リストの二重管理を避ける）。食い違い・
+欠落（`lang`を返さない旧形式のJSONも含む）があれば、その事実を1件のコメントとして Epic
+issue に記録し、そのまま先へ進む（「記録して進む」に分類。run は止めない）:
+
+```bash
+gh issue comment "$ARGUMENTS" --body "応答言語の空振り検知（confidence-check）: 返ってきたlang=[値。欠落はunknown]が解決値${RESOLVED_LANG}と食い違っています"
 ```
 
 **起動時モデル上書きが技術的に実現できなかった場合（`model`パラメータ自体が使えない等）**は、
@@ -182,6 +196,9 @@ evaluator側の対応する確認観点は `core/references/review-checklist-cor
 Epic #$ARGUMENTS の指摘対応を確認してください。
 - モード: delta-review
 - 差分範囲: [R1のreviewed_commit]..[epic/epicXX/機能名]
+- 応答言語: [RESOLVED_LANG]（`findings[].title` / `detail` / `fix` など issue 本文になる
+  人間向けテキストはこの言語で書くこと。`verdict` / `severity` / `focus` / `lang` の値は
+  英語 enum のまま返すこと）
 - 指定範囲外の蒸し返しはしないこと
 - 最後に必ずJSONブロックを出力すること
 ```
@@ -191,6 +208,16 @@ R1と同じ作法でこのdelta-review呼び出しのトークン消費も記録
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
   --epic "$EPIC_NUM" --role evaluator --mode delta-review --tokens [読み取ったトークン数]
+```
+
+**応答言語の空振り検知（Epic #246 D1 / #255）も同じ位置で行う。** 返ってきた判定JSONの
+トップレベル `lang` を `RESOLVED_LANG` と照合する。値の妥当性判定は条件分岐を自前で書かず
+`bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-lang.sh" --lang "[返ってきた値]"` の出力で行う。
+食い違い・欠落（`lang`を返さない旧形式のJSONも含む）があれば1件のコメントとして Epic
+issue に記録し、そのまま先へ進む（「記録して進む」に分類。run は止めない）:
+
+```bash
+gh issue comment "$ARGUMENTS" --body "応答言語の空振り検知（delta-review）: 返ってきたlang=[値。欠落はunknown]が解決値${RESOLVED_LANG}と食い違っています"
 ```
 
 3. `APPROVE` → PR作成へ / `REQUEST_CHANGES` → R2 に戻る
@@ -258,10 +285,14 @@ Epic #$ARGUMENTS の全変更をレビューしてください。
 - モード: epic-review
 - 観点: correctness
 - 差分範囲: main...[epic/epicXX/機能名]
+- 応答言語: [RESOLVED_LANG]（`findings[].title` / `detail` / `fix` など issue 本文になる
+  人間向けテキストはこの言語で書くこと。`verdict` / `severity` / `focus` / `lang` の値は
+  英語 enum のまま返すこと）
 - 変更ファイル数が50超のため、code-review-graphのblast radiusの算出を使って読む優先順位を付けてよい
 - 最後に必ずJSONブロック（verdict / reviewed_commit / focus / findings）を出力すること
 
-（readability / over-engineering / security も同様に3本続けて同一メッセージで起動する）
+（readability / over-engineering / security も同様に3本続けて同一メッセージで起動する。
+  応答言語も同じ値を渡す）
 ```
 
 code-review-graphが未導入の場合（従来どおりPhase単位に分割する既存の回避策。Phaseごとに
@@ -272,7 +303,11 @@ code-review-graphが未導入の場合（従来どおりPhase単位に分割す�
 Epic #$ARGUMENTS のうち Phase 1 の変更をレビューしてください。
 - 観点: correctness
 - 差分範囲: main...[epic-branch] のうち [Phase1で変更されたファイル群]
+- 応答言語: [RESOLVED_LANG]（`findings[].title` / `detail` / `fix` など issue 本文になる
+  人間向けテキストはこの言語で書くこと。`verdict` / `severity` / `focus` / `lang` の値は
+  英語 enum のまま返すこと）
 
-（readability / over-engineering / security も同様。Phase 2 以降も同じ形で続ける）
+（readability / over-engineering / security も同様。Phase 2 以降も同じ形で続ける。
+  応答言語も同じ値を渡す）
 ```
 

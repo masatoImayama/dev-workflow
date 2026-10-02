@@ -168,7 +168,7 @@ markdown + bash 主体のリポジトリでは、Tree-sitterから情報が出�
 
 ## 重要度の基準
 
-共通ルールの「レビュー基準」の3段階（high / medium / low）に従って機械的に分類する。
+共通ルールの「レビュー基準」の3段階（high / medium / low）に従って機械的に分類する。人間向けサマリーと `findings[].title` / `detail` / `fix` の言語は共通ルールの「応答言語」節に従う。
 
 ## 出力フォーマット
 
@@ -181,6 +181,7 @@ markdown + bash 主体のリポジトリでは、Tree-sitterから情報が出�
   "verdict": "REQUEST_CHANGES",
   "reviewed_commit": "[レビュー時点のepicブランチのHEAD SHA]",
   "focus": "security",
+  "lang": "ja",
   "findings": [
     {
       "severity": "high",
@@ -208,6 +209,7 @@ markdown + bash 主体のリポジトリでは、Tree-sitterから情報が出�
 - `findings[].focus` — その指摘がどの観点から来たかを示す。トップレベルの `focus` と同じ値になる
   （観点未指定なら `"all"`）。run側がマージ・重複排除する際、同一 location の指摘がどの観点から
   来たかを併記できるようにするための追加フィールド
+- `lang` — トップレベルの追加フィールド。値は `ja` / `en`。**起動時プロンプトで渡された応答言語をそのまま返す（渡されなかった場合は実際に使った言語）。** runが解決値と照合し食い違い（空振り。ADR-0006と同型）を検知するためのもの。キー名・値とも言語設定の対象外
 - 指摘が1件もない場合は `"findings": []` とする（キー自体を省略しない。既存の規約。変更なし）
 
 ## 判定基準

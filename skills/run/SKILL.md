@@ -72,6 +72,38 @@ grep -E '"(model|advisorModel|effortLevel)"' "$HOME/.claude/settings.json" 2>/de
   いずれもここで変わるのはオーケストレータ本体だけである
 - `advisorModel` が未設定でも run は動作する。設定は推奨であって前提条件ではない
 
+### 応答言語の解決
+
+人間向け出力の言語を、Epic 全体を通して使う1つの値として**起動時に1回だけ**解決する
+（経路B。正本は `core/instructions.md`「応答言語」節）。**タスクごと・レーンごとに
+呼び直さない。** 解決した値は `RESOLVED_LANG` として保持し、以降の全ステップ（Step 3 の
+レーン起動、R1・確度判定・delta-review・wave-review の evaluator 起動、run 自身の進捗表示・
+PR 本文・Epic issue へのコメント）で参照する（`EPIC_NUM` 等と同じ扱いの変数）。
+
+```bash
+LANG_OUT="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-lang.sh")"
+RESOLVED_LANG="$(printf '%s\n' "$LANG_OUT" | sed -n 's/^lang=//p')"
+LANG_SOURCE="$(printf '%s\n' "$LANG_OUT" | sed -n 's/^source=//p')"
+LANG_NOTE="$(printf '%s\n' "$LANG_OUT" | sed -n 's/^note=//p')"
+# 読み取れなくても run は止めない（記録して進む）
+[ -n "$RESOLVED_LANG" ] || RESOLVED_LANG=ja
+echo "応答言語: ${RESOLVED_LANG}（source=${LANG_SOURCE}）"
+```
+
+- `LANG_SOURCE=fallback`（不正値・未サポート値・空文字だった）場合は、`$LANG_NOTE` の内容を
+  Epic issue にコメントで記録してから、**そのまま進む**（共通ルールの「停止させるものと、
+  記録して進めるもの」の「記録して進む」に分類する。**停止しない**）:
+  ```bash
+  [ "$LANG_SOURCE" = "fallback" ] && gh issue comment "$ARGUMENTS" \
+    --body "NOTE: 応答言語の解決で不正値を検知しました。${LANG_NOTE}（ja にフォールバックして続行します）"
+  ```
+- セッションをまたいで再開した場合は再解決すればよい（`resolve-lang.sh` に副作用は無い）
+- **run 自身の人間向け出力（進捗表示・PR 本文・Epic issue へのコメント・スキップ一覧）も
+  `RESOLVED_LANG` に従う。** ただし機械可読な要素（JSON のキー・enum 値、`skips=` のような
+  key=value、ラベル名、ブランチ名、`## 対象ファイル` 等の節見出し）は対象外であり、
+  `RESOLVED_LANG` に関わらず英語規約のまま変えない（対象・対象外の表は
+  `core/instructions.md`「応答言語」節を参照）
+
 ### Epicブランチ + 作業 worktree の準備
 
 Epic issue本文の「ブランチ」セクションからブランチ名を取得し、**Epic 専用の作業 worktree を
@@ -469,6 +501,9 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/watchdog.sh" --wave --epic "$EPIC_NUM" \
   #[番号A1] → #[番号A2] → …
 - Epicブランチ: [epic/epicXX/機能名]
 - WAVE_BASE: [WAVE_BASEのコミットハッシュ]（ブランチ名ではなくこのハッシュそのものに対して検証すること）
+- 応答言語: [RESOLVED_LANG]（人間向け出力（報告・issue コメント・コミットメッセージの本文）は
+  この言語で書くこと。コミット種別（feat/fix/...）・JSON のキーと enum 値・`## 対象ファイル`
+  等の機械可読な要素は英語規約のまま変えないこと）
 - **あなたの isolation worktree の分岐元は WAVE_BASE とは限らない**（worktree を作るのは
   ハーネスであり、分岐元はハーネスが決める）。**レーンの先頭で1回だけ**、次をこの順に実行して
   HEAD を WAVE_BASE に合わせること。**2件目以降のタスクでは再実行しないこと**
@@ -626,7 +661,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/watchdog.sh" --wave --epic "$EPIC_NUM" \
 
 @generator
 レーン B を担当してください。割り当てられたタスクは #[番号B1] → #[番号B2] → … です。
-（内容はレーンAと同様。WAVE_BASE は同じハッシュを渡す）
+（内容はレーンAと同様。WAVE_BASE と応答言語は同じ値を渡す）
 ```
 
 Claude Code のサブエージェントは**バッチ全員が終わるまで結果が返らない**ため、動的なレーン
@@ -670,6 +705,9 @@ Epic #$ARGUMENTS のウェーブ差分を先行レビューしてください。
 - モード: wave-review
 - 差分範囲: [REVIEWED_COMMIT]..[WAVE_BASE]
 - 作業ディレクトリ: .claude/worktrees/[epicN]
+- 応答言語: [RESOLVED_LANG]（`findings[].title` / `detail` / `fix` など issue 本文になる
+  人間向けテキストはこの言語で書くこと。`verdict` / `severity` / `focus` / `lang` の値は
+  英語 enum のまま返すこと）
 - 指摘はその場で直させない。high/mediumはissue化のためJSONで返すだけでよい
 - 最後に必ずJSONブロック（verdict / reviewed_commit / findings）を出力すること
 ```
@@ -853,8 +891,10 @@ DONE_TASK_COUNT=$((DONE_TASK_COUNT + N))   # N = 直前の「取り込めたレ�
    high/mediumの指摘を `review` issue化する（`- Epic: #$ARGUMENTS` と `- 前提: なし` を必ず書く。
    書式は [references/review.md](references/review.md) の R2 と同じ）。evaluator の起動自体が
    失敗した／JSON が読み取れなかった場合は `REVIEWED_COMMIT` を進めない（次の wave-review、
-   最終的には Epic 末レビューが拾う）。詳細は
-   [references/wave-review.md](references/wave-review.md) を参照する。
+   最終的には Epic 末レビューが拾う）。**応答言語の空振り検知（返却JSONの `lang` と
+   `RESOLVED_LANG` の照合）もここで行う**（R1と同じ「記録して進む」扱い。詳細・コメント
+   書式は [references/wave-review.md](references/wave-review.md)「応答言語の照合」を参照）。
+   詳細は [references/wave-review.md](references/wave-review.md) を参照する。
    その後 `PREV_WAVE_INCORPORATED=true` にする（次ウェーブの Step 3 で wave-review を起動する条件）。
 5. → Step 1 に戻る（次のウェーブへ）
 
@@ -1089,8 +1129,8 @@ BODY
 
 **`@evaluator` を同一メッセージで4本（correctness / readability / over-engineering / security）
 起動する。** 同一メッセージでなければ並行にならない（Claudeのサブエージェントはバッチ完了まで
-結果が返らない）。4本には同じ差分範囲・同じ `既レビュー済み地点` を渡し、それぞれに
-`- 観点: [focus]` を1行加える。
+結果が返らない）。4本には同じ差分範囲・同じ `既レビュー済み地点`・同じ `応答言語` を渡し、
+それぞれに `- 観点: [focus]` を1行加える。
 
 ```
 @evaluator
@@ -1100,6 +1140,9 @@ Epic #$ARGUMENTS の全変更をレビューしてください。
 - 差分範囲: main...[epic/epicXX/機能名]
 - 既レビュー済み地点: [REVIEWED_COMMIT]（ここまではwave-reviewが指摘済み。既にissue化された指摘を再提出しないこと。この範囲では全ウェーブ横断の整合〈仕様との照合・実装漏れ・重複実装・命名の食い違い〉だけを見ること）
 - 作業ディレクトリ: .claude/worktrees/[epicN]
+- 応答言語: [RESOLVED_LANG]（`findings[].title` / `detail` / `fix` など issue 本文になる
+  人間向けテキストはこの言語で書くこと。`verdict` / `severity` / `focus` / `lang` の値は
+  英語 enum のまま返すこと）
 - 親Epic issueの仕様書と照合し、実装漏れも指摘すること
 - Epic統合ゲート（フルスイート）は直前に実行済みで結果は「[EPIC_GATE_RESULT（例: passed, skips=0）]」である。再実行せず差分の内容の妥当性に集中すること。この観点に限り、再検証が必要と判断した場合だけテストを再実行してよい
 - 最後に必ずJSONブロック（verdict / reviewed_commit / focus / findings）を出力すること
@@ -1121,6 +1164,43 @@ Epic #$ARGUMENTS の全変更をレビューしてください。
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
   --epic "$EPIC_NUM" --role evaluator --mode epic-review --note "focus=[観点]" --tokens [読み取ったトークン数]
 ```
+
+#### 応答言語の照合（空振り検知。Epic #246 D1 / #255）
+
+トークン消費の記録と同じ位置づけの後処理として、4本それぞれが返した判定JSONの
+**トップレベル `lang`** を読み、`RESOLVED_LANG` と照合する。ADR-0006で確認されたとおり、
+プロンプト本文に書いた指示は空振りしても気付けないことがあるため、この照合が唯一の
+検知手段である。**食い違った観点・`lang` が欠落していた観点があれば、1件のコメントとして
+Epic issue に記録し、そのまま先へ進む。**（「記録して進む」に分類する。停止しない。`verdict`
+の扱い・issue化・PR作成の判断は一切変えない）。4本すべてが `RESOLVED_LANG` と一致していれば
+このコメントは出さない。
+
+値の妥当性判定（`ja`/`en` 以外が返ってきた場合）は条件分岐を自前で書かず、
+`bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-lang.sh" --lang "[返ってきた値]"` の出力
+（`source=arg` なら妥当な値、`source=fallback` なら不正値）で判定する（許容リストの
+二重管理を避ける）。
+
+食い違い・欠落が1件でもあった場合のみ、4本まとめて1回だけコメントする（観点ごとに
+4件投げない）:
+
+```bash
+gh issue comment "$ARGUMENTS" --body "$(cat <<'BODY'
+## 応答言語の空振り検知（R1）
+
+- run の解決値: [RESOLVED_LANG]（source=[LANG_SOURCE]）
+- correctness: [返ってきたlang。欠落はunknown]
+- readability: [同上]
+- over-engineering: [同上]
+- security: [同上]
+
+応答言語の指示が一部の観点で空振りした可能性がある。人間向け出力の言語が意図と異なる
+だけで、判定・指摘の内容には影響しない。
+BODY
+)"
+```
+
+`lang` フィールドを返さない evaluator（本Epic以前の定義・他ベンダー実装のJSON）が相手でも
+**run は止まらない。** 欠落は不一致と区別して `unknown` と記録する（後方互換。仕様書第10節）。
 
 4本の結果のマージ・重複排除（同一 `location` の統合・severity 採用・verdict 合成・
 `reviewed_commit` 食い違い時の扱い・1本失敗時の扱い）は

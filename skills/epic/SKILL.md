@@ -18,6 +18,13 @@ epic/epic[issue番号]/[機能名]
 
 例: Epic issue #42 で機能名が `notifications` の場合 → `epic/epic42/notifications`
 
+## 言語
+
+Epic / Task issue の**タイトル・本文**は応答言語の規約に従う（正本: `core/instructions.md`
+の「応答言語」節）。機械可読な節見出し・行頭キー・ラベル名・ブランチ命名規則は対象外である
+（正本の「言語設定の対象外」表を参照。字面を変えると `scripts/plan-waves.sh` や run が
+文字列一致で読む仕組みが壊れる）。
+
 ## 手順
 
 ### 1. 仕様書・計画書の確認

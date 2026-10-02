@@ -55,6 +55,9 @@ wave-review の起動メッセージには次を渡す。
 - モード: wave-review
 - 差分範囲: [REVIEWED_COMMIT]..[WAVE_BASE]（＝直前に取り込まれたウェーブまでの未レビュー分）
 - 作業ディレクトリ: .claude/worktrees/[epicN]
+- 応答言語: [RESOLVED_LANG]（`findings[].title` / `detail` / `fix` など issue 本文になる
+  人間向けテキストはこの言語で書くこと。`verdict` / `severity` / `focus` / `lang` の値は
+  英語 enum のまま返すこと）
 ```
 
 `WAVE_BASE` は Step 2 で記録した「今回のウェーブが分岐する Epic tip」であり、直前のウェーブが
@@ -76,6 +79,24 @@ Step 7 で取り込まれた直後の値と一致する。したがって `REVIE
 
 low の指摘は issue 化せず、PR 本文の「レビューで挙がった軽微な指摘」に合流させる（Epic 末レビュー
 の指摘と同じ扱い）。
+
+## 応答言語の照合（空振り検知。Epic #246 D1 / #255）
+
+wave-review の evaluator が返した判定JSONのトップレベル `lang` を、Step 3 で渡した
+`RESOLVED_LANG` と照合する。R1と同じ「記録して進む」扱いであり、**食い違い・欠落が
+あっても run は止めない。** `lang` を返さない evaluator（本Epic以前の定義）が相手でも
+後方互換のまま進む（欠落は `unknown` と記録する）。
+
+値の妥当性判定（`ja`/`en` 以外が返ってきた場合）は条件分岐を自前で書かず、
+`bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-lang.sh" --lang "[返ってきた値]"` の出力で
+判定する（R1と同じ。許容リストの二重管理を避ける）。
+
+食い違い・欠落があった場合のみ、**このウェーブぶんで1件**コメントする（ウェーブごとに
+蓄積して複数件投げない）:
+
+```bash
+gh issue comment "$ARGUMENTS" --body "応答言語の空振り検知（wave-review、ウェーブ$WAVE_NO）: 返ってきたlang=[値。欠落はunknown]が解決値${RESOLVED_LANG}と食い違っています"
+```
 
 ## 最終ウェーブとEpic全体整合はEpic末レビューが見る
 

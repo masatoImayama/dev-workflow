@@ -36,6 +36,38 @@ ls .codex/agents/   # generator.toml / evaluator.toml / planner.toml がある�
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-repo-hygiene.sh" --run || exit 1
 ```
 
+### 応答言語の解決（経路B。正本: `core/instructions.md` の「応答言語」節）
+
+人間向け出力の言語を解決し、以降のサブエージェント起動プロンプトへ埋め込む（経路B）。
+解決ロジックはこの SKILL.md にインラインで再実装せず、`scripts/resolve-lang.sh` を
+**1回だけ**呼ぶ。
+
+```bash
+RESOLVE_LANG_OUT="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-lang.sh")"
+RESOLVED_LANG="$(printf '%s\n' "$RESOLVE_LANG_OUT" | sed -n 's/^lang=//p')"
+LANG_SOURCE="$(printf '%s\n' "$RESOLVE_LANG_OUT" | sed -n 's/^source=//p')"
+LANG_NOTE="$(printf '%s\n' "$RESOLVE_LANG_OUT" | sed -n 's/^note=//p')"
+RESOLVED_LANG="${RESOLVED_LANG:-ja}"   # 読み取れなくても ja に倒して止めない
+echo "応答言語: lang=${RESOLVED_LANG} source=${LANG_SOURCE} note=${LANG_NOTE}"
+```
+
+`source=fallback`（不正値・未サポート値・空文字だった）の場合は、その事実を Epic issue に
+コメントし、**そのまま進む**（停止しない。本文書「停止させるものと、記録して進めるもの」の
+「記録して進む」に分類する）:
+
+```bash
+if [ "$LANG_SOURCE" = "fallback" ]; then
+  gh issue comment <epic番号> --body "応答言語の解決: ${LANG_NOTE}"
+fi
+```
+
+以降、Step 3 の generator プロンプトと R1（および R3）の evaluator プロンプトへ
+`- 応答言語: ${RESOLVED_LANG}` の1行を埋め込む。**run 自身の人間向け出力（進捗表示・
+PR 本文・Epic issue へのコメント・issue 化する指摘の本文）も `$RESOLVED_LANG` に従う。**
+ただし R2 で作る review issue テンプレートの `## 指摘（重要度: <severity>）` のような
+節見出しと `<severity>` の値（`high`/`medium`/`low`）・`## 該当箇所` / `## 修正方針` /
+`## 対応時の指示` / `## 由来` の見出しは既存の字面のまま変えない（R2 節に明記する）。
+
 ## Epic ブランチと作業 worktree の準備
 
 Epic issue 本文の「ブランチ」セクションからブランチ名を取得する。
@@ -298,6 +330,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/watchdog.sh" --wave --epic "$EPIC_NUM" \
 
 ```
 Task #<番号> を実装してください。
+- 応答言語: [RESOLVED_LANG]（人間向け出力はこの言語で書くこと。コミット種別・JSON のキーと enum 値・`## 対象ファイル` 等の機械可読な要素は英語規約のまま変えないこと）
 - WAVE_BASE: <WAVE_BASEのコミットハッシュ>（ブランチ名ではなくこのハッシュそのものに対して検証すること）
 - あなたの作業ブランチ（<LANE_BRANCH>）は Step 2 で `git checkout -B` によって WAVE_BASE から
   作成済みであり、既に WAVE_BASE の子孫のはずである。**Claude 版の generator と同じ保証を
@@ -666,20 +699,52 @@ Epic統合ゲートを通過した時点で、ここで初めて evaluator を�
 ```
 Epic #<epic番号> の全変更をレビューしてください。
 - モード: epic-review
+- 応答言語: [RESOLVED_LANG]（人間向け出力はこの言語で書くこと。コミット種別・JSON のキーと enum 値・`## 対象ファイル` 等の機械可読な要素は英語規約のまま変えないこと）
 - 差分範囲: main...<EPIC_BRANCH>
 - 作業ディレクトリ: <EPIC_WT>
 - 親Epic issueの仕様書と照合し、実装漏れも指摘すること
 - テスト実行結果: <Step 3 で generator が報告した結果>
-- 最後に必ずJSON（verdict / reviewed_commit / findings）を出力すること
+- 最後に必ずJSON（verdict / reviewed_commit / findings / lang）を出力すること
 ```
 
-ヘッドレスで起動する場合は判定JSONをスキーマで強制できる。
+ヘッドレスで起動する場合は判定JSONをスキーマで強制できる。`adapters/codex/schemas/
+evaluator-verdict.json` はトップレベルの `required` に `lang` を含むため、応答言語を
+渡さないと必須フィールドを満たせず失敗しうる。1行の起動プロンプトにも応答言語を含める:
 
 ```bash
 codex exec --output-schema "${CLAUDE_PLUGIN_ROOT}/adapters/codex/schemas/evaluator-verdict.json" \
   -o /tmp/verdict.json -C "$EPIC_WT" \
-  "evaluator として Epic #<epic番号> の main...<EPIC_BRANCH> をレビューせよ"
+  "evaluator として Epic #<epic番号> の main...<EPIC_BRANCH> をレビューせよ（応答言語: ${RESOLVED_LANG}。人間向け出力はこの言語で書くこと）"
 ```
+
+#### 応答言語の照合（空振り検知。Epic #246 D1）
+
+evaluator が返した判定JSONの `lang` を `$RESOLVED_LANG` と照合する。食い違う・欠落して
+いる場合は、その事実を Epic issue にコメントし、**そのまま進む**（停止しない。「記録して
+進む」に分類する）。**Codex版は R1内の evaluator が1本なので、R1の照合もこの1回だけ**で
+済む（Claude版の観点別4本のような複数本の照合は不要）。**delta-review が実行された場合は
+そこでも同じ照合を行う**（「R3: 指摘対応」節「応答言語の照合」参照。#259）。
+
+```bash
+RETURNED_LANG="$(jq -r '.lang // empty' /tmp/verdict.json 2>/dev/null)"
+LANG_CHECK_OUT="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-lang.sh" --lang "${RETURNED_LANG:-}")"
+LANG_CHECK_SOURCE="$(printf '%s\n' "$LANG_CHECK_OUT" | sed -n 's/^source=//p')"
+if [ -z "$RETURNED_LANG" ]; then
+  gh issue comment <epic番号> --body "応答言語の空振り検知: evaluatorの判定JSONにlangフィールドが欠落していました（期待値: ${RESOLVED_LANG}）"
+elif [ "$LANG_CHECK_SOURCE" != "arg" ] || [ "$RETURNED_LANG" != "$RESOLVED_LANG" ]; then
+  gh issue comment <epic番号> --body "応答言語の空振り検知: evaluatorが返したlang=${RETURNED_LANG}が解決値${RESOLVED_LANG}と食い違っています"
+fi
+```
+
+`adapters/codex/schemas/evaluator-verdict.json` の `required` に `lang` があるため、
+ヘッドレス起動（`--output-schema`）での欠落は原則起きない。それでも検知したら記録する
+（空振り検知の目的は「気付けること」である）。サブエージェント起動（ヘッドレスでない場合）で
+判定JSONをファイルに保存していない場合は、応答から読み取った `lang` の値を同じ条件で照合する。
+
+値の妥当性判定（`ja`/`en` 以外が返ってきた場合）は自前で `ja|en` を判定するコードを書かず、
+`scripts/resolve-lang.sh --lang` に委譲する（`source=arg` なら妥当な値、`source=fallback`
+なら不正値。許容リストの二重管理を避ける）。delta-review（後述「R3: 指摘対応」節）も
+同じ照合を行う。
 
 トークン数が取得できた場合のみ記録する（取得できない場合はその事実を明記し、記録をスキップする。
 Task #76・自律ループは止めない）:
@@ -692,6 +757,10 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
 ### R2: 指摘をissue化
 
 `high` と `medium` の指摘だけを issue にする。`low` は PR本文に記録するだけ。
+issue本文の `<title>` / `<detail>` / `<fix>`（evaluatorが返したJSONの`findings[]`の値）は
+`$RESOLVED_LANG` に従う（応答言語規約の対象）。一方、`## 指摘（重要度: <severity>）` /
+`## 該当箇所` / `## 修正方針` / `## 対応時の指示` / `## 由来` の**節見出し**と `<severity>`
+の値（`high`/`medium`/`low`）は、言語設定に関わらず既存の字面のまま変えない。
 
 ```bash
 gh label create review --color B60205 --description "一括レビューの指摘" --force
@@ -737,10 +806,40 @@ evaluator側の対応する確認観点は `core/references/review-checklist-cor
 ```
 Epic #<epic番号> の指摘対応を確認してください。
 - モード: delta-review
+- 応答言語: [RESOLVED_LANG]（人間向け出力はこの言語で書くこと。コミット種別・JSON のキーと enum 値・`## 対象ファイル` 等の機械可読な要素は英語規約のまま変えないこと）
 - 差分範囲: <R1のreviewed_commit>..<EPIC_BRANCH>
 - 指定範囲外の蒸し返しはしないこと
-- 最後に必ずJSONを出力すること
+- 最後に必ずJSON（lang を含む）を出力すること
 ```
+
+delta-review も `evaluator-verdict.json` の `required` に `lang` を含むため、R1と同じ理由で
+応答言語を渡す。
+
+#### 応答言語の照合（空振り検知。Epic #246 D1 / #259）
+
+**R1と同じ照合を delta-review の判定JSONにも行う。** R1直後の1回だけに限定すると、
+R1通過後の指摘対応（review issue対応）で言語指示が再度空振りしても気付けない
+（確定事項D1は「検知手段なしに実装してはならない」としている。evaluator呼び出しが
+複数回ある構成で一部だけ検知対象外にすると取りこぼしになる）。
+
+```bash
+RETURNED_LANG="$(jq -r '.lang // empty' /tmp/verdict-delta.json 2>/dev/null)"
+LANG_CHECK_OUT="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-lang.sh" --lang "${RETURNED_LANG:-}")"
+LANG_CHECK_SOURCE="$(printf '%s\n' "$LANG_CHECK_OUT" | sed -n 's/^source=//p')"
+if [ -z "$RETURNED_LANG" ]; then
+  gh issue comment <epic番号> --body "応答言語の空振り検知（delta-review）: evaluatorの判定JSONにlangフィールドが欠落していました（期待値: ${RESOLVED_LANG}）"
+elif [ "$LANG_CHECK_SOURCE" != "arg" ] || [ "$RETURNED_LANG" != "$RESOLVED_LANG" ]; then
+  gh issue comment <epic番号> --body "応答言語の空振り検知（delta-review）: evaluatorが返したlang=${RETURNED_LANG}が解決値${RESOLVED_LANG}と食い違っています"
+fi
+```
+
+値の妥当性判定（`ja`/`en` 以外が返ってきた場合）は自前で `ja|en` を判定するコードを書かず、
+`scripts/resolve-lang.sh --lang` に委譲する（`source=arg` なら妥当な値、`source=fallback`
+なら不正値。許容リストの二重管理を避ける）。`lang` を返さない evaluator（本Epic以前の定義・
+旧形式の判定JSON）が相手でも**run は止まらない**。欠落（`lang` フィールド自体が無い）と
+食い違い（値はあるが解決値と異なる）は別のメッセージで区別して記録する（後方互換。
+仕様書第10節）。サブエージェント起動（ヘッドレスでない場合）で判定JSONをファイルに
+保存していない場合は、応答から読み取った `lang` の値を同じ条件で照合する。
 
 R1と同じ作法でこのdelta-review呼び出しのトークン消費も記録する（取得できた場合のみ。
 取得できなければスキップし、自律ループは止めない）:
@@ -799,6 +898,7 @@ blast radius を使う場合の指示例（R1 の基本形に1行加えるだけ
 ```
 Epic #<epic番号> の全変更をレビューしてください。
 - モード: epic-review
+- 応答言語: [RESOLVED_LANG]（人間向け出力はこの言語で書くこと。コミット種別・JSON のキーと enum 値・`## 対象ファイル` 等の機械可読な要素は英語規約のまま変えないこと）
 - 差分範囲: main...<EPIC_BRANCH>
 - 変更ファイル数が50超のため、code-review-graph の blast radius の算出を使って読む優先順位を付けてよい
 - 最後に必ずJSON（verdict / reviewed_commit / findings）を出力すること
@@ -808,6 +908,7 @@ code-review-graph が未導入の場合（従来どおり Phase 単位に分割�
 
 ```
 Epic #<epic番号> のうち Phase 1 の変更をレビューしてください。
+- 応答言語: [RESOLVED_LANG]（人間向け出力はこの言語で書くこと。コミット種別・JSON のキーと enum 値・`## 対象ファイル` 等の機械可読な要素は英語規約のまま変えないこと）
 - 差分範囲: main...<EPIC_BRANCH> のうち <Phase1で変更されたファイル群>
 ```
 
