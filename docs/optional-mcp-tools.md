@@ -632,6 +632,9 @@ bash scripts/jev-shadow-eval.sh report --case 1  # 再集計のみ
 測定結果の詳細・教師データ側の限界・読み方の注意は
 `docs/adr/0012-jev-system-one-decision-points.md`「測定結果」に記録した。
 
+**① の統合漏れ（偽陰性）は測定時点では測れなかったが、#263 でマージ前 findings が
+Epic issue に残るようになったため、次に測るときは両方向を測れる。**
+
 ### 外す判断基準
 
 上記「外す判断基準」と同じ枠で判断する。Jev 固有の追加条件は次の2つ。
