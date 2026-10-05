@@ -101,6 +101,18 @@ Grep で当たりを付けてから、該当箇所の前後だけを読むこと
 - `severity`: `high`（自律動作が止まる・誤った成果物が出る） / `medium`（手戻りが発生する） / `low`（軽微）
 - `summary`: 1行。**この時点でプロジェクト固有の固有名詞を含めない**（還流時にそのまま使う）
 
+**Jev（任意依存）が使える場合**は、`scope` / `category` / `severity` の3問を1リクエストで
+判定させてよい（`core/references/jev-assist.md`「② feedback 台帳の分類」が正本）。
+`key` と `summary` は文字列生成なので Jev では作れない。**従来どおりあなたが付ける。**
+
+**`scope` は `choice` をそのまま採る。confidence で `project` へ倒してはならない**
+——`references/scope.md`「判断できない → `project` に倒す」は**人間の判断に対する規則**で
+あって、Jev の confidence に結線すると正解だけを潰す（実測で一致率が 78.6% → 57.1% に
+下がった。理由は `core/references/jev-assist.md`「計測で分かったこと」）。
+`category` と `severity` は低 confidence のとき `other` / `low` へ倒す。
+
+**未導入・呼び出し失敗なら3つとも従来どおりあなたが分類する。**ここで止まらない。
+
 ## Phase 3: 台帳に記録する
 
 分類した観測をすべて記録する。**この段階では何も修正しない。**
@@ -111,6 +123,15 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/feedback-ledger.sh" record \
   --severity <high|medium|low> --epic <N> \
   --summary "<1行要約>" --evidence "<根拠のファイル:行 や 数値>"
 ```
+
+**Jev に分類を委ねた観測は、`--evidence` の末尾に生の値を必ず追記する**（台帳は TSV のため
+列は増やさない。`core/references/jev-assist.md`「② …／記録」）:
+
+```
+--evidence "watchdog.log:stall x3 | jev scope=harness/0.74 category=telemetry/0.81 severity=1.4/0.61"
+```
+
+分類が Jev 由来か人間由来か判別できないと、後から分類のゆらぎを検証できなくなる。
 
 記録が終わったら、今回の観測を一覧で報告する（scope / key / severity / summary）。
 
@@ -186,4 +207,5 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/feedback-ledger.sh" ready --scope harness
 | ファイル | 読むタイミング |
 |---|---|
 | `references/scope.md` | 観測を project / harness に分類するとき、どこまで直してよいか迷ったとき |
+| `core/references/jev-assist.md` | Jev（任意依存）に分類を委ねるとき。リクエスト形・低 confidence 時の倒し方・記録の作法 |
 | `references/upstream.md` | Phase 5 で実際に issue を作るとき |

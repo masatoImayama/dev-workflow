@@ -18998,6 +18998,351 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# #244: Jev（System One Model）を任意依存として結線する
+#
+# ネットワークと課金が発生するため、**Jev を実際に呼ぶテストは1つも書かない。**
+# 検証するのは「鍵が無いときに従来経路へ倒れること」「鍵ファイルをシェルとして
+# 評価しないこと」「応答のパースが入れ子で壊れないこと」「結線した3か所と除外した
+# 判断点が文書どおりであること」。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== #244: Jev の任意依存としての結線 =="
+
+JEV_ASK_SH="${REPO_ROOT}/scripts/jev-ask.sh"
+JEV_EVAL_SH="${REPO_ROOT}/scripts/jev-shadow-eval.sh"
+JEV_ASSIST_MD="${REPO_ROOT}/core/references/jev-assist.md"
+JEV_ASSIST_BODY="$(cat "$JEV_ASSIST_MD")"
+
+JEV_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-jev.XXXXXX")"
+
+# --- 鍵が無ければ available は 1 を返す（異常ではない＝従来経路へ倒す合図） ---
+JEV_NOKEY_OUT="$(JEV_API_KEY='' DEV_WORKFLOW_JEV_ENV_FILE="${JEV_TMP_DIR}/absent.env" \
+  bash "$JEV_ASK_SH" available 2>&1)"
+JEV_NOKEY_EXIT=$?
+assert_exit_code "jev-ask.sh: 鍵が無いとき available は 1（未導入は異常ではない）" 1 "$JEV_NOKEY_EXIT"
+case "$JEV_NOKEY_OUT" in
+  *'従来どおり'*)
+    pass "jev-ask.sh: 未導入の説明に「従来どおり動作する」旨が入っている" ;;
+  *)
+    fail "jev-ask.sh: 未導入の説明に「従来どおり動作する」旨が入っている" "$JEV_NOKEY_OUT" ;;
+esac
+
+# --- 鍵が無いまま ask を呼んだら 3（API失敗＝フォールバック）で、0 にはならない ---
+printf '{}' > "${JEV_TMP_DIR}/req.json"
+JEV_API_KEY='' DEV_WORKFLOW_JEV_ENV_FILE="${JEV_TMP_DIR}/absent.env" \
+  bash "$JEV_ASK_SH" ask --request-file "${JEV_TMP_DIR}/req.json" > /dev/null 2>&1
+assert_exit_code "jev-ask.sh: 鍵が無いとき ask は 3（呼び出し側はフォールバックする）" 3 "$?"
+
+# --- 鍵ファイルから読める。環境変数が鍵ファイルより優先される ---
+printf 'JEV_API_KEY=from-file\n' > "${JEV_TMP_DIR}/jev.env"
+DEV_WORKFLOW_JEV_ENV_FILE="${JEV_TMP_DIR}/jev.env" bash "$JEV_ASK_SH" available > /dev/null 2>&1
+assert_exit_code "jev-ask.sh: 鍵ファイルから鍵を読める" 0 "$?"
+
+# --- DEV_WORKFLOW_JEV_DISABLE=1 は鍵があっても無効化できる（切り戻し） ---
+DEV_WORKFLOW_JEV_ENV_FILE="${JEV_TMP_DIR}/jev.env" DEV_WORKFLOW_JEV_DISABLE=1 \
+  bash "$JEV_ASK_SH" available > /dev/null 2>&1
+assert_exit_code "jev-ask.sh: DEV_WORKFLOW_JEV_DISABLE=1 で鍵があっても無効化できる" 1 "$?"
+
+# --- 鍵ファイルを source しない（任意のシェルコードを実行させない） ---
+JEV_PWNED_MARKER="${JEV_TMP_DIR}/pwned"
+{
+  printf 'JEV_API_KEY=safe\n'
+  printf 'touch %s\n' "$JEV_PWNED_MARKER"
+  printf 'JEV_API_KEY=$(touch %s)\n' "${JEV_PWNED_MARKER}.subst"
+} > "${JEV_TMP_DIR}/evil.env"
+DEV_WORKFLOW_JEV_ENV_FILE="${JEV_TMP_DIR}/evil.env" bash "$JEV_ASK_SH" available > /dev/null 2>&1
+if [ ! -e "$JEV_PWNED_MARKER" ] && [ ! -e "${JEV_PWNED_MARKER}.subst" ]; then
+  pass "jev-ask.sh: 鍵ファイルを source せず、中のコマンドもコマンド置換も実行しない"
+else
+  fail "jev-ask.sh: 鍵ファイルを source せず、中のコマンドもコマンド置換も実行しない" \
+    "マーカーが作られた（鍵ファイルがシェルとして評価されている）"
+fi
+
+# --- 既定エンドポイントは公式ドメインだけ（鍵を非公式ドメインへ送らない） ---
+#
+# 実装中に、検索上位に出た非公式サイト `jevmodel.org`（自ら「not affiliated with TypeSafe AI」と
+# 明記しているが、自ドメインで鍵を検証する API を運用している）を公式と誤認し、実鍵を送信する
+# 事故を起こした。既定値が公式以外を指していないことを静的に固定する。
+JEV_DEFAULT_URL="$(sed -n "s/^JEV_API_URL_DEFAULT='\(.*\)'$/\1/p" "$JEV_ASK_SH")"
+assert_eq "jev-ask.sh: 既定エンドポイントは公式 api.typesafe.ai（#244）" \
+  "https://api.typesafe.ai/v1/systemone" "$JEV_DEFAULT_URL"
+
+# 非公式ドメインがスクリプト・正本ドキュメントの「送信先」として残っていないこと。
+# （docs 側は「送るな」という注意書きで言及するため、スクリプトだけを対象にする）
+JEV_UNOFFICIAL="$(grep -n "jevmodel\.org" "$JEV_ASK_SH" "$JEV_EVAL_SH" || true)"
+if [ -z "$JEV_UNOFFICIAL" ]; then
+  pass "jev: スクリプトに非公式ドメイン（jevmodel.org）への参照が無い（#244）"
+else
+  fail "jev: スクリプトに非公式ドメイン（jevmodel.org）への参照が無い（#244）" "$JEV_UNOFFICIAL"
+fi
+
+# --- noul 型に confidence が無いことを前提にしている（必須条件にすると永久に発火しない） ---
+# 公式 docs.typesafe.ai/api の応答例では noul は `noul` のみを返す。confidence を
+# 必須条件に書くと ①③ の判定が一度も成立せず、結線したつもりで空振りする。
+cat > "${JEV_TMP_DIR}/noul-only.json" <<'JEVNOUL'
+{"model":"jev-1.13.0","answers":{"same_finding":{"type":"noul","noul":0.91}},
+ "usage":{"input_tokens":360,"output_tokens":23}}
+JEVNOUL
+assert_eq "jev-ask.sh: confidence を返さない noul 応答から noul を取り出せる（#244）" \
+  "0.91" "$(bash "$JEV_ASK_SH" answer --response-file "${JEV_TMP_DIR}/noul-only.json" --question same_finding)"
+
+# --- score 応答の legend（入れ子）を越えて confidence を取り出せる ---
+# legend を取り除かないと、その後ろにある confidence がスライスの外に出て読めなくなる。
+cat > "${JEV_TMP_DIR}/score-legend.json" <<'JEVSCORE'
+{"model":"jev-1.13.0","answers":{"severity":{"type":"score","score":1.05,
+ "legend":{"0":"Calm","1":"Frustrated","2":"Very angry"},
+ "probabilities":{"0":0.0,"1":0.95,"2":0.05},"confidence":0.92}},
+ "usage":{"input_tokens":304,"output_tokens":18}}
+JEVSCORE
+assert_eq "jev-ask.sh: score 応答の legend を越えて confidence を取り出せる（#244）" \
+  "0.92" "$(bash "$JEV_ASK_SH" answer --response-file "${JEV_TMP_DIR}/score-legend.json" --question severity --field confidence)"
+assert_eq "jev-ask.sh: score 応答から score を取り出せる（#244）" \
+  "1.05" "$(bash "$JEV_ASK_SH" answer --response-file "${JEV_TMP_DIR}/score-legend.json" --question severity)"
+
+# --- ② の scope に confidence フォールバックを掛けていない（実測で精度が下がった） ---
+#
+# 「撤回した文言が出現しないこと」では検査できない。正本は撤回の理由を説明するために
+# その文言を引用しているため、出現回数は 0 にならない。**採用した規則が書かれていること**
+# （倒し方の表の scope 行）を検査する。
+case "$JEV_ASSIST_BODY" in
+  *'| `scope` | **confidence では倒さない'*)
+    pass "jev-assist.md: scope の倒し方が「confidence では倒さない」になっている（#244 実測で撤回）" ;;
+  *)
+    fail "jev-assist.md: scope の倒し方が「confidence では倒さない」になっている（#244 実測で撤回）" \
+      "撤回した規則（confidence < 0.6 なら project）が書き戻されている可能性がある。一致率が 78.6%→57.1% に下がる" ;;
+esac
+
+# --- 撤回の根拠（実測値）が正本に残っている ---
+case "$JEV_ASSIST_BODY" in
+  *'78.6%'*'57.1%'*)
+    pass "jev-assist.md: scope フォールバックを撤回した実測の根拠が残っている（#244）" ;;
+  *)
+    fail "jev-assist.md: scope フォールバックを撤回した実測の根拠が残っている（#244）" \
+      "数値の根拠が消えると、同じ規則が善意で書き戻される" ;;
+esac
+
+# --- json-escape: JSON を壊す文字だけ逃がし、日本語はそのまま通す ---
+JEV_ESCAPED="$(printf 'a"b\\c\td\ne日本語' | bash "$JEV_ASK_SH" json-escape)"
+assert_eq "jev-ask.sh: json-escape が引用符・バックスラッシュ・タブ・改行を逃がし日本語を保つ" \
+  'a\"b\\c\td\ne日本語' "$JEV_ESCAPED"
+
+# --- answer: probabilities の入れ子があっても choice / noul / score を取り出せる ---
+cat > "${JEV_TMP_DIR}/res.json" <<'JEVRES'
+{
+  "model": "jev-latest",
+  "answers": {
+    "same_finding": {"type": "noul", "noul": 0.12, "confidence": 0.88},
+    "scope": {"type": "choice", "choice": "harness",
+              "probabilities": {"harness": 0.74, "project": 0.26}, "confidence": 0.74},
+    "severity": {"type": "score", "score": 1.4, "confidence": 0.61}
+  },
+  "usage": {"input_tokens": 136, "output_tokens": 18}
+}
+JEVRES
+assert_eq "jev-ask.sh: answer が noul を取り出せる" \
+  "0.12" "$(bash "$JEV_ASK_SH" answer --response-file "${JEV_TMP_DIR}/res.json" --question same_finding)"
+assert_eq "jev-ask.sh: answer が probabilities の入れ子を越えて choice を取り出せる" \
+  "harness" "$(bash "$JEV_ASK_SH" answer --response-file "${JEV_TMP_DIR}/res.json" --question scope)"
+assert_eq "jev-ask.sh: answer が score を取り出せる" \
+  "1.4" "$(bash "$JEV_ASK_SH" answer --response-file "${JEV_TMP_DIR}/res.json" --question severity)"
+assert_eq "jev-ask.sh: answer が confidence を取り出せる" \
+  "0.74" "$(bash "$JEV_ASK_SH" answer --response-file "${JEV_TMP_DIR}/res.json" --question scope --field confidence)"
+
+# --- answer: 無い question は 4、正規表現メタ文字を含む question 名は 2 で弾く ---
+bash "$JEV_ASK_SH" answer --response-file "${JEV_TMP_DIR}/res.json" --question absent > /dev/null 2>&1
+assert_exit_code "jev-ask.sh: answer は応答に無い question を 4 で返す" 4 "$?"
+bash "$JEV_ASK_SH" answer --response-file "${JEV_TMP_DIR}/res.json" --question '.*' > /dev/null 2>&1
+assert_exit_code "jev-ask.sh: answer は正規表現メタ文字を含む question 名を 2 で弾く" 2 "$?"
+
+# --- しきい値が jev-assist.md（正本）と jev-shadow-eval.sh で一致している ---
+# 片方だけ動かすと、shadow で測った数値と実際の挙動が食い違う。
+for _pair in "MERGE_THRESHOLD_PCT=85:0.85" "TRIAGE_THRESHOLD_PCT=95:0.95" "CLASSIFY_MIN_CONFIDENCE_PCT=60:0.6"; do
+  _var="${_pair%%:*}"
+  _doc="${_pair##*:}"
+  if grep -Fq "$_var" "$JEV_EVAL_SH" && printf '%s' "$JEV_ASSIST_BODY" | grep -Fq "$_doc"; then
+    pass "jev: しきい値 ${_var} が jev-assist.md の ${_doc} と揃っている"
+  else
+    fail "jev: しきい値 ${_var} が jev-assist.md の ${_doc} と揃っている" \
+      "どちらか一方だけが変更されている"
+  fi
+done
+unset _pair _var _doc
+
+# --- ① が review.md の R1 マージ step 2 に結線され、フォールバックが明記されている ---
+JEV_REVIEW_MD="$(cat "${REPO_ROOT}/skills/run/references/review.md")"
+case "$JEV_REVIEW_MD" in
+  *'jev-assist.md'*)
+    pass "review.md: ① が core/references/jev-assist.md を正本として参照している（#244）" ;;
+  *)
+    fail "review.md: ① が core/references/jev-assist.md を正本として参照している（#244）" \
+      "参照が無い" ;;
+esac
+case "$JEV_REVIEW_MD" in
+  *'迷ったら統合しない'*)
+    pass "review.md: 重複排除の安全側（迷ったら統合しない）が明記されている（#244）" ;;
+  *)
+    fail "review.md: 重複排除の安全側（迷ったら統合しない）が明記されている（#244）" \
+      "記述が無い" ;;
+esac
+
+# --- ③ は結線しない（計測で削減効果 0%。ADR-0012 決定C） ---
+#
+# 確度判定を機械的に省略する経路を、善意で復活させないための歯止め。
+#
+# **フラグ名の出現ではなく「変数として参照している箇所」を探す。** 正本は「このフラグごと
+# 削除した」と説明するためにフラグ名を散文で書いており、名前の出現は 0 にならない。
+# 分岐が復活すれば必ず `${DEV_WORKFLOW_JEV_TRIAGE` か `$DEV_WORKFLOW_JEV_TRIAGE` の形で現れる。
+JEV_TRIAGE_REFS="$(grep -rln '\${DEV_WORKFLOW_JEV_TRIAGE\|\$DEV_WORKFLOW_JEV_TRIAGE' \
+  "${REPO_ROOT}/skills" "${REPO_ROOT}/skills-codex" "${REPO_ROOT}/core" \
+  "${REPO_ROOT}/agents" "${REPO_ROOT}/codex-agents" "${REPO_ROOT}/hooks" \
+  "${REPO_ROOT}/scripts" 2>/dev/null || true)"
+if [ -z "$JEV_TRIAGE_REFS" ]; then
+  pass "③ 確度判定のトリアージは結線されていない（フラグを変数参照している箇所が無い。#244）"
+else
+  fail "③ 確度判定のトリアージは結線されていない（フラグを変数参照している箇所が無い。#244）" \
+    "$JEV_TRIAGE_REFS"
+fi
+
+# --- review.md から ③ の結線記述が消えている（確度判定を省略する手順が無い） ---
+case "$JEV_REVIEW_MD" in
+  *'このステップを機械的に省略する経路は無い'*)
+    pass "review.md: 確度判定を機械的に省略する経路が無いと明記されている（#244 決定C）" ;;
+  *)
+    fail "review.md: 確度判定を機械的に省略する経路が無いと明記されている（#244 決定C）" \
+      "③ の結線記述が復活しているか、明記が消えている" ;;
+esac
+
+# --- 外した理由（実測値）が正本に残っている。消えると同じ案が再提案される ---
+case "$JEV_ASSIST_BODY" in
+  *'削減効果は 0%'*|*'削減効果が 0%'*|*'削減効果は 0% だった'*)
+    pass "jev-assist.md: ③ を外した実測の根拠（削減効果 0%）が残っている（#244）" ;;
+  *)
+    fail "jev-assist.md: ③ を外した実測の根拠（削減効果 0%）が残っている（#244）" \
+      "根拠が消えると、効果が否定された案が再提案される" ;;
+esac
+
+# --- 復活させる場合の制約（向きは素通し側だけ）が正本に残っている ---
+case "$JEV_ASSIST_BODY" in
+  *'素通しさせる側だけ'*)
+    pass "jev-assist.md: ③ を復活させる場合の制約（向きは素通し側だけ）が残っている（#244）" ;;
+  *)
+    fail "jev-assist.md: ③ を復活させる場合の制約（向きは素通し側だけ）が残っている（#244）" \
+      "制約が消えると、逆向き（低確率で指摘を破棄）に復活しうる" ;;
+esac
+
+# --- 再測定の経路（評価用スクリプトの --case 3）は残してある ---
+if grep -Fq "build_case3" "$JEV_EVAL_SH" && grep -Fq "run_case3" "$JEV_EVAL_SH"; then
+  pass "jev-shadow-eval.sh: ③ の再測定経路（--case 3）は結線を外しても残してある（#244）"
+else
+  fail "jev-shadow-eval.sh: ③ の再測定経路（--case 3）は結線を外しても残してある（#244）" \
+    "再測定できなくなると、判断を見直す手段が失われる"
+fi
+
+# --- 「確度判定を経ずに黙って捨てる経路は無い」という既存の規定を壊していない ---
+case "$JEV_REVIEW_MD" in
+  *'確度判定を'*'経ずに黙って捨てる経路は無い'*)
+    pass "review.md: ③ の追加後も「確度判定を経ずに黙って捨てる経路は無い」が残っている（#244）" ;;
+  *)
+    fail "review.md: ③ の追加後も「確度判定を経ずに黙って捨てる経路は無い」が残っている（#244）" \
+      "既存の規定が消えている" ;;
+esac
+
+# --- ② が feedback SKILL の Phase 2 に結線され、key/summary は人間が付けると明記されている ---
+JEV_FEEDBACK_SKILL="$(cat "${REPO_ROOT}/skills/feedback/SKILL.md")"
+case "$JEV_FEEDBACK_SKILL" in
+  *'jev-assist.md'*)
+    pass "feedback/SKILL.md: ② が jev-assist.md を正本として参照している（#244）" ;;
+  *)
+    fail "feedback/SKILL.md: ② が jev-assist.md を正本として参照している（#244）" "参照が無い" ;;
+esac
+case "$JEV_FEEDBACK_SKILL" in
+  *'key'*'summary'*'Jev では作れない'*)
+    pass "feedback/SKILL.md: key / summary は Jev で作れない旨が明記されている（#244）" ;;
+  *)
+    fail "feedback/SKILL.md: key / summary は Jev で作れない旨が明記されている（#244）" \
+      "記述が無い（文字列生成を Jev に期待する経路が残る）" ;;
+esac
+
+# --- 除外した判断点のスクリプトが Jev を呼んでいない（#244 で意識的に除外した場所） ---
+# 決定的アルゴリズム・閾値比較・正規表現・可読性ガードの緩和に確率的判定器を混ぜない。
+for _excluded in plan-waves.sh watchdog.sh count-skips.sh check-readability.sh merge-lane.sh; do
+  if grep -Fq "jev" "${REPO_ROOT}/scripts/${_excluded}" 2>/dev/null; then
+    fail "scripts/${_excluded}: Jev を参照していない（#244 で意識的に除外した判断点）" \
+      "jev への参照が入り込んでいる"
+  else
+    pass "scripts/${_excluded}: Jev を参照していない（#244 で意識的に除外した判断点）"
+  fi
+done
+unset _excluded
+
+# --- shadow 評価スクリプトは自律ループから呼ばれない（課金・ネットワークを run に入れない） ---
+JEV_EVAL_CALLERS="$(grep -rl "jev-shadow-eval" \
+  "${REPO_ROOT}/skills" "${REPO_ROOT}/skills-codex" "${REPO_ROOT}/core" \
+  "${REPO_ROOT}/agents" "${REPO_ROOT}/codex-agents" "${REPO_ROOT}/hooks" 2>/dev/null || true)"
+if [ -z "$JEV_EVAL_CALLERS" ]; then
+  pass "jev-shadow-eval.sh: スキル・役割定義・フックから呼ばれていない（課金経路を自律ループに入れない）"
+else
+  fail "jev-shadow-eval.sh: スキル・役割定義・フックから呼ばれていない（課金経路を自律ループに入れない）" \
+    "$JEV_EVAL_CALLERS"
+fi
+
+# --- データセットに空フィールドを書かない（列ずれの不変条件） ---
+#
+# `IFS=$'\t' read` はタブが IFS 空白文字であるため連続タブを1つの区切りに畳む。
+# 空フィールドを素のまま書くと読み出し側で列が手前に寄り、判定対象の本文に別の列の値が
+# 入る（しかもエラーにならず、一致率だけが静かに狂う）。空は `-` で埋める規約
+# （scripts/feedback-ledger.sh と同じ）が守られていることを、個別ケースではなく
+# **書き出し箇所の全走査**で検査する。
+JEV_EMPTY_WRITES="$(awk '
+  # awk の print 文で空文字列リテラルを列として出している箇所を探す
+  /print .*, ""/            { print FILENAME ":" FNR ": " $0 }
+  # printf の書式に連続タブ（空フィールド）が入っている箇所を探す
+  /printf .*\\t\\t/         { print FILENAME ":" FNR ": " $0 }
+' "$JEV_EVAL_SH" || true)"
+if [ -z "$JEV_EMPTY_WRITES" ]; then
+  pass "jev-shadow-eval.sh: データセットに空フィールドを書き出す箇所が無い（列ずれの不変条件）"
+else
+  fail "jev-shadow-eval.sh: データセットに空フィールドを書き出す箇所が無い（列ずれの不変条件）" \
+    "$JEV_EMPTY_WRITES"
+fi
+
+# --- 読み出し側は `-` を空へ戻す（書き出し規約と対になっていること） ---
+if grep -Fq "_undash" "$JEV_EVAL_SH"; then
+  # -F で固定文字列として数える。`$` を正規表現に渡すと行末アンカーとして解釈され、
+  # 「`"` で行が終わる行」を探すことになって必ず0件になる。
+  JEV_UNDASH_LOOPS="$(grep -cF '_undash "$' "$JEV_EVAL_SH")"
+  if [ "$JEV_UNDASH_LOOPS" -ge 3 ]; then
+    pass "jev-shadow-eval.sh: ①②③ の読み出しループすべてが _undash で \`-\` を戻している"
+  else
+    fail "jev-shadow-eval.sh: ①②③ の読み出しループすべてが _undash で \`-\` を戻している" \
+      "_undash の呼び出しが ${JEV_UNDASH_LOOPS} 箇所しかない（3ケース分に足りない）"
+  fi
+else
+  fail "jev-shadow-eval.sh: ①②③ の読み出しループすべてが _undash で \`-\` を戻している" \
+    "_undash が存在しない"
+fi
+
+# --- build は鍵が無くても動く（課金なしで教師データだけ作れる）---
+JEV_EVAL_DRY_OUT="$(JEV_API_KEY='' DEV_WORKFLOW_JEV_ENV_FILE="${JEV_TMP_DIR}/absent.env" \
+  DEV_WORKFLOW_JEV_EVAL_DIR="${JEV_TMP_DIR}/eval" \
+  bash "$JEV_EVAL_SH" run --case 1 --dry-run 2>&1 < /dev/null)"
+JEV_EVAL_DRY_EXIT=$?
+case "${JEV_EVAL_DRY_EXIT}:${JEV_EVAL_DRY_OUT}" in
+  0:*|1:*)
+    pass "jev-shadow-eval.sh: --dry-run は鍵が無くても鍵エラーで落ちない（組み立てだけ確認できる）" ;;
+  *)
+    fail "jev-shadow-eval.sh: --dry-run は鍵が無くても鍵エラーで落ちない（組み立てだけ確認できる）" \
+      "exit=${JEV_EVAL_DRY_EXIT} out=${JEV_EVAL_DRY_OUT}" ;;
+esac
+case "$JEV_EVAL_DRY_OUT" in
+  *'JEV_API_KEY を設定してください'*)
+    fail "jev-shadow-eval.sh: --dry-run が鍵を要求していない" "鍵エラーが出ている" ;;
+  *)
+    pass "jev-shadow-eval.sh: --dry-run が鍵を要求していない" ;;
+esac
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 

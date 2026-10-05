@@ -2,6 +2,11 @@
 
 `skills/feedback/SKILL.md` から参照される。分類に迷ったときはここを読む。
 
+この章の「2. project か harness か」「3. category の使い分け」「4. severity の基準」は、
+Jev（任意依存）の `criteria` としてそのまま写してある（`core/references/jev-assist.md`
+「② feedback 台帳の分類」）。**この3節の判定基準を変えたら、あちらの `criteria` も直すこと。**
+片方だけ変えると、Jev を使ったときと使わないときで分類が食い違う。
+
 ## 1. 触ってよい場所・いけない場所
 
 | 対象 | 可否 | 理由 |

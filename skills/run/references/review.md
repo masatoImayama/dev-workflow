@@ -14,7 +14,13 @@ R1 は `correctness` / `readability` / `over-engineering` / `security` の4観�
 1. **findings の連結**: 4本の `findings[]` をそのまま連結する
 2. **重複排除**: 同一 `location`（ファイル:行）かつ同一趣旨の指摘は1件に統合する。
    統合時は**最も高い severity** を採用し、由来した観点名（`findings[].focus`）を
-   `detail` または備考に併記する（例:「correctness / security の両観点から指摘」）
+   `detail` または備考に併記する（例:「correctness / security の両観点から指摘」）。
+   **迷ったら統合しない。** 統合漏れは二重 issue が立つだけだが、誤統合は severity の低い側の
+   指摘を本文ごと失う。
+   - **Jev（任意依存）が使える場合**は、`location` でグループ化したあと、同一グループ内の
+     ペアだけを `Noul`「この2件は同じ指摘か」に投げて判定を委ねてよい（しきい値・記録の
+     作法は `core/references/jev-assist.md`「① 指摘の重複排除」が正本）。
+     **未導入・呼び出し失敗なら従来どおりあなたが判断する。**ここで止まらない
 3. **verdict の合成**: 4本のうち1本でも `REQUEST_CHANGES` なら全体を `REQUEST_CHANGES`
    とする。4本すべてが `APPROVE` の場合のみ全体を `APPROVE` とする
 4. **`reviewed_commit` の食い違い**: 4本とも同じ値になるはずだが、食い違った場合は
@@ -37,6 +43,12 @@ R1（発見役・sonnet・観点別4本並列）はスピード優先のため�
 対象は「R1の結果マージ」後の `findings[]` のうち **high / medium のみ**（low はもともと
 issue化しないため確度判定は不要。共通ルールの「レビュー基準」の3段階は変更しない）。
 high/medium が1件も無ければこのステップ自体を省略し、そのままR2（0件のissue化）へ進む。
+
+**このステップを機械的に省略する経路は無い。** Jev（任意依存）による前段トリアージ
+（「明白に成立する指摘だけ opus を省いて素通しさせる」）を検討したが、**shadow 計測で
+削減効果が 0% だったため結線しなかった**（158件中、素通ししきい値に達した指摘が0件。
+Jev はコードを読めないため「確実に成立する」と断言できず、高い確率を返さない）。
+経緯は `docs/adr/0012-jev-system-one-decision-points.md`「決定C」を参照。
 
 **この呼び出しは、プロンプト本文の指示ではなく Task/Agent ツールの起動時パラメータで
 モデルを上書きして起動する。** ADR-0006 が確認したとおり、Claude Code の Task/Agent 起動には
