@@ -517,3 +517,131 @@ Epic完了時にはPR本文の「トークン消費」節に集計結果を載�
 `adapters/*/overlays/*`の`tools:`または`mcp_servers`宣言、`core/roles/*.md`の使いどころの記述）を
 まとめて削除し、任意依存の仕組み自体（`check-prerequisites.sh`の非ブロッキング検出等）は
 他のツールのために残す。
+
+## Jev（System One Model）— 判断点の任意依存（#244）
+
+context7 / code-review-graph / LSP と**同格の任意依存**として扱う。未導入（`JEV_API_KEY` 未設定）
+でもハーネスは従来どおり動作し、フォールバックは「従来の LLM 判断」である。
+
+**MCP サーバーではない。** HTTP API を `scripts/jev-ask.sh`（curl + 素の bash。jq 不要）から
+直接叩く。そのため `.claude-plugin/plugin.json` の `mcpServers` には現れず、
+`optional_tools_notice` の検出も `command -v` ではなく鍵の有無で行う。
+
+### 性質（上流で確認した値。2026-10 時点）
+
+| 項目 | 値 |
+|---|---|
+| 返るもの | `Choice`（選択肢1つ + 各選択肢の確率 + confidence） / `Score`（順序付き段階上の位置 + confidence） / `Noul`（Yes になる確率） |
+| できないこと | **文章生成・計算・日付比較** |
+| 上限 | 1リクエスト 64k トークン / うち `state` + 最長の question で 32k トークン |
+| レイテンシ | 70〜500ms |
+| 価格 | 入力 $0.042/Mtok・**出力無料** |
+| 提供形態 | hosted early-access のみ。**weights 非公開・self-host 経路なし** |
+| 既知の弱点 | **日本語は英語より精度が落ちる**（confidence を要確認） |
+
+**公式エンドポイント: `POST https://api.typesafe.ai/v1/systemone`** /
+`Authorization: Bearer ${JEV_API_KEY}`。鍵の発行は `console.typesafe.ai/keys`、
+仕様は `docs.typesafe.ai`。モデル ID は `jev-latest`（実測時の実体は `jev-1.13.0`）。
+
+> **注意: `jevmodel.org` は公式ではない。** 自サイトで「independent and is not affiliated
+> with, endorsed by, or operated by TypeSafe AI」と明記している非公式の解説サイトでありながら、
+> `/v1/systemone` で鍵を検証する API と自前の `dashboard/` を自ドメインで運用している。
+> **鍵をこのドメインへ送らないこと。** `JEV_API_URL` の既定値は公式のみとする。
+
+### 導入
+
+APIキーは**コードに書かない**（README「安全ルール」）。次のいずれか。
+
+```bash
+# 方法1: 環境変数（CI ではこちら。上流公式の名前 TYPESAFE_API_KEY も読む）
+export JEV_API_KEY='...'
+
+# 方法2: 鍵ファイル（ハーネス非注入原則の置き場所。駆動先リポジトリには置かない）
+mkdir -p "${HOME}/.claude/dev-workflow"
+printf 'JEV_API_KEY=%s\n' '...' > "${HOME}/.claude/dev-workflow/jev.env"
+chmod 600 "${HOME}/.claude/dev-workflow/jev.env"
+```
+
+環境変数が鍵ファイルより優先される。`scripts/jev-ask.sh available` で導入状況を確認できる。
+
+### 結線した判断点
+
+issue #244 の棚卸しのうち、**適合条件3つ（局所的な文脈で閉じる / 選択肢が有限 /
+間違えても成果物が壊れない）をすべて満たす**ものだけを結線した。
+呼び出し形・しきい値・倒し方・記録の作法は `core/references/jev-assist.md` が正本。
+
+| # | 判断点 | 型 | 既定 |
+|---|---|---|---|
+| ① | 指摘の重複排除（`skills/run/references/review.md` R1マージ step 2） | `Noul` | 鍵があれば有効 |
+| ② | feedback 台帳の分類（`skills/feedback/SKILL.md` Phase 2） | `Choice`×2 + `Score` | 鍵があれば有効 |
+| ③ | 確度判定のトリアージ | `Noul` | **結線しない**（shadow 計測で削減効果 0%。ADR-0012 決定C） |
+
+**結線しなかった判断点**（意識的に除外した。理由は `core/references/jev-assist.md` 末尾）:
+ウェーブ分解・依存グラフ / watchdog 停滞判定 / SKIP 形式判定 / ゲート合否・merge-base 検証 /
+可読性ガードの緩和 / 三分類（停止・差し戻し・記録して進む） / ヒアリング打ち切り判定。
+
+### 任意依存であることの保証
+
+- `JEV_API_KEY` 未設定時は `jev-ask.sh available` が終了コード 1 を返す。**異常ではない**ため
+  警告も出さず、呼び出し側は従来経路へ倒す
+- API 呼び出しが失敗したとき（終了コード 3）もリトライは1回まで。それでも駄目なら従来経路。
+  **Jev の不調でハーネスが止まる経路は作らない**
+- `DEV_WORKFLOW_JEV_DISABLE=1` で即座に切り戻せる（鍵を消す必要がない）
+- ハーネス本体は `jev-ask.sh` 以外から Jev を呼ばない。切り離すときはこの1ファイルと
+  3か所の参照を消せばよい
+
+### hosted only を許容する理由
+
+weights 非公開・self-host 経路なしだが、**任意依存の枠に収まる限り許容する**（#244 の決定）。
+上流が停止・値上げ・仕様変更した場合も、フォールバックが「従来の LLM 判断」＝導入前の挙動
+そのものであり、ハーネスの機能が失われない。これは context7（ホスト型サーバー経路）と
+同じ受け入れ方である。
+
+### 再現性の担保
+
+ハーネスの中核は「状態は GitHub issue と git に置く。だから別セッション・別 CLI から
+再開できる」。確率的な判断を挟むため、**`choice` / `noul` / `score` / `confidence` の生の値を
+そのまま Epic issue・PR 本文・台帳の `evidence` に残す**ことを ①②③ すべてで必須にしている
+（#244「構造的な懸念1」）。丸めた結論だけを残す経路は無い。
+
+### 効果測定（shadow mode）
+
+`scripts/jev-shadow-eval.sh` が、**ハーネスを1度も動かさずに**過去の実績から精度を測る。
+`build` は GitHub（`gh`）・feedback 台帳・`scope.md` から教師データを組み、`run` が Jev に
+投げて一致率を集計する。**このスクリプトはハーネスから呼ばれない**（課金とネットワークが
+発生するため、自律ループの経路には入れない）。
+
+```bash
+bash scripts/jev-shadow-eval.sh build --case 1   # 鍵不要・課金なし
+bash scripts/jev-shadow-eval.sh run   --case 1   # 要 JEV_API_KEY
+bash scripts/jev-shadow-eval.sh report --case 1  # 再集計のみ
+```
+
+**受入基準（#244「決めたいこと」の回答）**: ① の **誤統合率（偽陽性）が 5% 以下**。
+失敗コストが非対称であるため、全体一致率ではなく危険な向きだけを基準にする
+（統合漏れは二重 issue が立つだけだが、誤統合は severity の低い側の指摘を本文ごと失う）。
+
+**実測（2026-10-05）の要約:**
+
+| # | 結果 |
+|---|---|
+| ① | 誤統合率 **0.0%**（25ペア / `noul` 最大 0.50 対しきい値 0.85）→ **合格** |
+| ② | `scope` 一致率 **78.6%**（14件）。誤り3件はすべて安全側の向き。**当初の confidence フォールバックは精度を下げたため撤回** |
+| ③ | 素通し **0件 / 158件**（削減効果 0%）→ **効果を否定。結線を外す候補** |
+
+測定結果の詳細・教師データ側の限界・読み方の注意は
+`docs/adr/0012-jev-system-one-decision-points.md`「測定結果」に記録した。
+
+**① の統合漏れ（偽陰性）は測定時点では測れなかったが、#263 でマージ前 findings が
+Epic issue に残るようになったため、次に測るときは両方向を測れる。**
+
+### 外す判断基準
+
+上記「外す判断基準」と同じ枠で判断する。Jev 固有の追加条件は次の2つ。
+
+1. **誤統合率が 5% を超えた**場合、① の結線を外す（しきい値を上げてごまかさない。
+   0.85 は既に「迷ったら統合しない」側に振り切った値である）
+2. **③ はこの基準で既に外した。** shadow 計測で素通しが 0件/158件（削減効果 0%）だったため、
+   結線とフラグを削除した（ADR-0012 決定C）。再測定は `jev-shadow-eval.sh run --case 3` で
+   結線なしに行える。復活させるのは、削減効果が観測でき、かつ素通し集合に
+   `low-confidence` 判定の指摘が1件も混じらないことを確認できたときだけとする

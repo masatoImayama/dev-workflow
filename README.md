@@ -70,7 +70,7 @@ claude --plugin-dir /path/to/dev-workflow
 
 ## 任意依存の外部ツール
 
-dev-workflow は複数の外部ツール（context7 / code-review-graph / LSP）を**任意依存**として利用します。
+dev-workflow は複数の外部ツール（context7 / code-review-graph / LSP / Jev）を**任意依存**として利用します。
 **必須依存ではありません。入れなくても dev-workflow は従来どおり動作します。**
 
 | ツール | 結線先 | 未導入時の挙動 |
@@ -78,6 +78,7 @@ dev-workflow は複数の外部ツール（context7 / code-review-graph / LSP）
 | [context7](https://github.com/upstash/context7)（MIT） | generator のみ | generator はライブラリ API を context7 で確認しません。推測に頼らず、既存利用箇所・公式ドキュメントで確認する従来どおりの手順になります |
 | [code-review-graph](https://github.com/tirth8205/code-review-graph)（MIT） | evaluator のみ（大規模差分のみ） | evaluator は blast radius（影響範囲）を使った優先順位付けをしません。従来どおり Phase 単位に分割してレビューする手順になります |
 | LSP（typescript-lsp / lua-lsp / gopls-lsp / rust-analyzer-lsp 等） | generator のみ（Claude Code のみ。下記参照） | generator は定義・参照の追跡を `Grep` の総当たり＋`Read` で行います（従来どおり） |
+| [Jev](https://docs.typesafe.ai/)（TypeSafe AI の System One Model。hosted・有料） | run の指摘の重複排除 / feedback 台帳の分類 | 指摘の重複排除・台帳の分類を実行者自身が判断します（従来どおり）。MCP サーバーではなく HTTP API なので、鍵（`JEV_API_KEY`）が無ければ未導入扱いです |
 
 **いずれもワークフローを止めません。** テスト・レビューはツールの有無に関わらず従来どおり完走します。
 

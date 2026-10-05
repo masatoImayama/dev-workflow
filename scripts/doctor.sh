@@ -110,6 +110,22 @@ else
   echo "  詳細: docs/optional-mcp-tools.md"
 fi
 
+# Jev は MCP サーバーではなく HTTP API なので command -v では判定できない。
+# 鍵の有無で判定する（scripts/jev-ask.sh available）。
+# **毎 run の非ブロッキング通知（check-prerequisites.sh）には出さない。** 課金のある
+# hosted API であり、使う予定の無い利用者に毎回通知するのは雑音になるため、
+# 利用者が意図して叩く doctor にだけ出す。
+if bash "${SCRIPT_DIR}/jev-ask.sh" available 2>/dev/null; then
+  echo "[OK] Jev (System One Model): 鍵あり（指摘の重複排除・feedback 分類で使われます）"
+  echo "  確度判定のトリアージは結線していません（計測で削減効果 0%。ADR-0012 決定C）"
+else
+  echo "[任意・未導入] Jev (System One Model)"
+  echo "  未導入でも run / feedback は従来どおり動作します（指摘の重複排除・台帳の分類は"
+  echo "  実行者自身が判断します）。"
+  echo "  導入する場合: JEV_API_KEY を環境変数か \${HOME}/.claude/dev-workflow/jev.env に置く"
+  echo "  詳細: docs/optional-mcp-tools.md「Jev（System One Model）」"
+fi
+
 echo
 echo "=== 応答言語（scripts/resolve-lang.sh） ==="
 # 解決ロジックは resolve-lang.sh の単一の正本を呼ぶだけで、ここでは二重実装しない
