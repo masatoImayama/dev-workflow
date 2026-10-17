@@ -16,17 +16,36 @@
 #   bash scripts/merge-lane.sh \
 #     --wave-branch wave/<epicN>/<n> --expected-base <WAVE_BASE> \
 #     --lane-branch <レーンのブランチ> [--task <番号>] [--create]
+#   bash scripts/merge-lane.sh \
+#     --wave-branch <epicブランチ> --expected-base <WAVE_BASE> \
+#     --lane-branch <レーンのブランチ> [--task <番号>] --single-branch
 #
-# --wave-branch: 統合先のブランチ名（例: wave/epic14/1）。
+# --wave-branch: 統合先のブランチ名（例: wave/epic14/1）。--single-branch 指定時は
+#                epic ブランチそのものを渡す（単一ブランチ運用。Task #278）。
 # --expected-base: そのウェーブの唯一の正しい分岐元（epic ブランチ tip のコミット）。
 #                   ブランチ名・タグ・コミットハッシュのいずれでもよい（内部で正規化して比較する）。
+#                   「merge-base(統合先, laneB) は laneA を取り込んだ後でも WAVE_BASE のまま」
+#                   という下記の証明は統合先が wave ブランチか epic ブランチかに関わらず成立する
+#                   （wave の祖先集合に WAVE_BASE が含まれ、laneB の祖先集合が WAVE_BASE 以下で
+#                   あることだけに依存するため）。そのため --single-branch でも検証ロジックは
+#                   一切変えず、宛先の名前解決だけが変わる。
 # --lane-branch: 取り込むレーンのブランチ名。
 # --task: ログ表示用（省略可）。呼び出し側の issue 番号をメッセージに出すだけで、動作は変えない。
 # --create: wave ブランチが存在しなければ --expected-base から作成する。
 #           既に存在する場合、その tip が --expected-base と一致すれば冪等に続行し、
 #           一致しなければ前回の残骸とみなして exit 1 で拒否する（Task #54）。
+#           **--single-branch と同時に指定すると exit 2。** 単一ブランチ運用モードの宛先は
+#           常に既存の epic ブランチであり、新規作成する対象ではないため。
+# --single-branch: クラウド等、セッションに許可された1本のブランチ（epic ブランチとして
+#           扱う）以外へ push できない環境向けのモード（Epic #267 D6・Task #278）。
+#           wave ブランチを新規作成せず、レーンを**直接 epic ブランチへ**マージする。
+#           - 宛先（--wave-branch の値）は常に**既存のブランチでなければならない**
+#             （無ければ exit 1。新規作成はしない）
+#           - `--create` との併用は禁止（exit 2）
+#           - メッセージ中の呼び方が「対象ブランチ」になる点以外、検証・マージの手順は
+#             既定モードと完全に同一（ローカル・既定の挙動は1ビットも変わらない）
 #
-# 実行前提: 呼び出し側の cwd は epic worktree を想定する（実行中に wave ブランチを checkout する）。
+# 実行前提: 呼び出し側の cwd は epic worktree を想定する（実行中に統合先ブランチを checkout する）。
 #
 # 終了コード:
 #   0  取り込み成功
@@ -52,6 +71,7 @@ EXPECTED_BASE=""
 LANE_BRANCH=""
 TASK_NUM=""
 CREATE_MODE=0
+SINGLE_BRANCH_MODE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -80,6 +100,7 @@ while [ $# -gt 0 ]; do
       fi
       TASK_NUM="$2"; shift 2 ;;
     --create) CREATE_MODE=1; shift ;;
+    --single-branch) SINGLE_BRANCH_MODE=1; shift ;;
     -*) echo "ERROR: 未知のオプション: $1" >&2; exit 2 ;;
     *)  echo "ERROR: 未知の引数: $1" >&2; exit 2 ;;
   esac
@@ -97,9 +118,18 @@ if [ -z "$LANE_BRANCH" ]; then
   echo "ERROR: --lane-branch は必須です" >&2
   exit 2
 fi
+if [ "$SINGLE_BRANCH_MODE" -eq 1 ] && [ "$CREATE_MODE" -eq 1 ]; then
+  echo "ERROR: --single-branch と --create は同時に指定できません（単一ブランチ運用モードの宛先は常に既存のepicブランチです）" >&2
+  exit 2
+fi
 
 TASK_LABEL=""
 [ -n "$TASK_NUM" ] && TASK_LABEL=" (#${TASK_NUM})"
+
+# --single-branch のときはメッセージ上の呼び方を「対象ブランチ」に変える（検証・マージの
+# 手順そのものは一切変えない。既定モードの出力文言は1文字も変わらない）
+BRANCH_LABEL="wave ブランチ"
+[ "$SINGLE_BRANCH_MODE" -eq 1 ] && BRANCH_LABEL="対象ブランチ"
 
 # ---------------------------------------------------------------------------
 # 前提の検証（gitリポジトリであること・各種参照の解決）
@@ -122,18 +152,23 @@ if ! git rev-parse --verify -q "refs/heads/${LANE_BRANCH}" >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# wave ブランチの用意（--create なら無ければ作成）と checkout
+# 統合先ブランチの用意（--create なら無ければ作成。--single-branch は既存前提）と checkout
 # ---------------------------------------------------------------------------
 
 if ! git rev-parse --verify -q "refs/heads/${WAVE_BRANCH}" >/dev/null 2>&1; then
-  if [ "$CREATE_MODE" -eq 1 ]; then
+  if [ "$SINGLE_BRANCH_MODE" -eq 1 ]; then
+    # 単一ブランチ運用モードでは宛先（epicブランチ）は常に既存のはず。無ければ呼び出し側の
+    # 想定が崩れているため、新規作成せずここで停止する（--createとの併用は冒頭で禁止済み）。
+    echo "ERROR: ${BRANCH_LABEL}が見つかりません: ${WAVE_BRANCH}（--single-branch では既存のepicブランチである必要があります）" >&2
+    exit 1
+  elif [ "$CREATE_MODE" -eq 1 ]; then
     if ! git branch "$WAVE_BRANCH" "$EXPECTED_BASE_SHA" >/dev/null 2>&1; then
-      echo "ERROR: wave ブランチの作成に失敗しました: ${WAVE_BRANCH}" >&2
+      echo "ERROR: ${BRANCH_LABEL}の作成に失敗しました: ${WAVE_BRANCH}" >&2
       exit 1
     fi
-    echo "wave ブランチを作成しました: ${WAVE_BRANCH} (${EXPECTED_BASE_SHA})"
+    echo "${BRANCH_LABEL}を作成しました: ${WAVE_BRANCH} (${EXPECTED_BASE_SHA})"
   else
-    echo "ERROR: wave ブランチが見つかりません: ${WAVE_BRANCH}（--create で作成できます）" >&2
+    echo "ERROR: ${BRANCH_LABEL}が見つかりません: ${WAVE_BRANCH}（--create で作成できます）" >&2
     exit 1
   fi
 elif [ "$CREATE_MODE" -eq 1 ]; then
@@ -141,7 +176,8 @@ elif [ "$CREATE_MODE" -eq 1 ]; then
   # 採番し直されず、前回の残骸 wave ブランチを掴んでしまう事故を防ぐ（Task #54）。
   # tip が --expected-base と一致するなら「これから取り込む前の正しい状態」なので
   # 冪等に続行する。一致しなければ前回の残骸として拒否し、epic/wave どちらのブランチも
-  # 変更せずに終了する。
+  # 変更せずに終了する。（--single-branchとの併用は冒頭で禁止済みのため、このブロックに
+  # 来るのは常にCREATE_MODE=1かつSINGLE_BRANCH_MODE=0。BRANCH_LABELは常に「waveブランチ」）
   WAVE_BRANCH_TIP_SHA="$(git rev-parse --verify -q "refs/heads/${WAVE_BRANCH}")"
   if [ "$WAVE_BRANCH_TIP_SHA" != "$EXPECTED_BASE_SHA" ]; then
     echo "ERROR: wave ブランチが前回の残骸として残っています（--create）: ${WAVE_BRANCH}" >&2
@@ -155,7 +191,7 @@ elif [ "$CREATE_MODE" -eq 1 ]; then
 fi
 
 if ! git checkout -q "$WAVE_BRANCH" 2>&1; then
-  echo "ERROR: wave ブランチの checkout に失敗しました: ${WAVE_BRANCH}" >&2
+  echo "ERROR: ${BRANCH_LABEL}の checkout に失敗しました: ${WAVE_BRANCH}" >&2
   exit 1
 fi
 

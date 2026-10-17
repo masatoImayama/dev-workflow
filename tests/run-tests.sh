@@ -4718,6 +4718,93 @@ case "$ML17_OUT" in
 esac
 
 # ---------------------------------------------------------------------------
+# merge-lane.sh --single-branch（単一ブランチ運用モード、Task #278）
+#
+# クラウド等、セッションに許可された1本のブランチ以外へpushできない環境向けに、
+# wave ブランチを新規作成せず、レーンを直接 epic ブランチへマージするモード。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== merge-lane.sh --single-branch（単一ブランチ運用モード、#278） =="
+
+# --- ケース18: --single-branch と --create の同時指定は exit 2 ---
+ML_REPO18="$(make_temp_repo)"
+ML18_BASE="$(ml_head_of "$ML_REPO18" HEAD)"
+ml_branch_from "$ML_REPO18" "lane-sb1" "$ML18_BASE"
+ml_commit_file "$ML_REPO18" "sb1.txt" "lane sb1\n" "lane sb1 change"
+
+run_merge_lane "$ML_REPO18" --wave-branch "$ML18_BASE" --expected-base "$ML18_BASE" --lane-branch lane-sb1 --single-branch --create >/dev/null 2>&1
+assert_exit_code "ケース18: --single-branch と --create の同時指定は exit 2" 2 "$?"
+
+# --- ケース19: --single-branch で宛先ブランチが存在しない場合は exit 1（新規作成しない） ---
+ML_REPO19="$(make_temp_repo)"
+ML19_BASE="$(ml_head_of "$ML_REPO19" HEAD)"
+ml_branch_from "$ML_REPO19" "lane-sb2" "$ML19_BASE"
+ml_commit_file "$ML_REPO19" "sb2.txt" "lane sb2\n" "lane sb2 change"
+
+run_merge_lane "$ML_REPO19" --wave-branch "no-such-epic-branch" --expected-base "$ML19_BASE" --lane-branch lane-sb2 --single-branch >/dev/null 2>&1
+assert_exit_code "ケース19: --single-branchで宛先ブランチが存在しなければexit 1" 1 "$?"
+
+if git -C "$ML_REPO19" rev-parse --verify -q refs/heads/no-such-epic-branch >/dev/null 2>&1; then
+  fail "ケース19: --single-branchは宛先ブランチを新規作成しない"
+else
+  pass "ケース19: --single-branchは宛先ブランチを新規作成しない"
+fi
+
+# --- ケース20: --single-branch で epic ブランチへ2レーンを直接・順に取り込める
+#     （wave ブランチを一切作らず、epicブランチ自身が宛先になる。ケース8の単一ブランチ版） ---
+ML_REPO20="$(make_temp_repo)"
+ML20_DEFAULT_BRANCH="$(cd "$ML_REPO20" && git rev-parse --abbrev-ref HEAD)"
+ml_commit_file "$ML_REPO20" "base.txt" "epic base\n" "epic base commit"
+ML20_BASE="$(ml_head_of "$ML_REPO20" HEAD)"
+ml_branch_from "$ML_REPO20" "lane-sb-a" "$ML20_BASE"
+ml_commit_file "$ML_REPO20" "sba.txt" "lane sb-a\n" "lane sb-a change"
+ml_branch_from "$ML_REPO20" "lane-sb-b" "$ML20_BASE"
+ml_commit_file "$ML_REPO20" "sbb.txt" "lane sb-b\n" "lane sb-b change"
+
+ML20_OUT1="$(run_merge_lane "$ML_REPO20" --wave-branch "$ML20_DEFAULT_BRANCH" --expected-base "$ML20_BASE" --lane-branch lane-sb-a --task 278 --single-branch)"
+ML20_EXIT1=$?
+assert_exit_code "ケース20: --single-branchで1本目（lane-sb-a）の取り込みはexit 0" 0 "$ML20_EXIT1"
+
+ML20_ACTUAL_BASE_2ND="$(cd "$ML_REPO20" && git merge-base "$ML20_DEFAULT_BRANCH" lane-sb-b)"
+assert_eq "ケース20: --single-branchでも2本目のmerge-base（実行前）はEXPECTED_BASEのまま" \
+  "$ML20_BASE" "$ML20_ACTUAL_BASE_2ND"
+
+ML20_OUT2="$(run_merge_lane "$ML_REPO20" --wave-branch "$ML20_DEFAULT_BRANCH" --expected-base "$ML20_BASE" --lane-branch lane-sb-b --task 278 --single-branch)"
+ML20_EXIT2=$?
+assert_exit_code "ケース20: --single-branchで2本目（lane-sb-b）の取り込みはexit 0（--createなし）" 0 "$ML20_EXIT2"
+
+ML20_EPIC_HEAD="$(ml_head_of "$ML_REPO20" "$ML20_DEFAULT_BRANCH")"
+if [ "$ML20_EPIC_HEAD" != "$ML20_BASE" ]; then
+  pass "ケース20: epicブランチ自身が両レーンの成果を含む（wave ブランチを経由していない）"
+else
+  fail "ケース20: epicブランチ自身が両レーンの成果を含む（wave ブランチを経由していない）" "epic HEAD が BASE から動いていません"
+fi
+
+# wave ブランチが一切作られていないことを確認する（単一ブランチ運用の本質）
+ML20_WAVE_BRANCH_COUNT="$(cd "$ML_REPO20" && git for-each-ref --format='%(refname)' 'refs/heads/wave/*' | wc -l | tr -d ' ')"
+assert_eq "ケース20: --single-branchではwaveブランチが1本も作られない" "0" "$ML20_WAVE_BRANCH_COUNT"
+
+# --- ケース21: --single-branchでも別ベースから分岐したレーンはexit 10で拒否される
+#     （検証ロジックはモードに関わらず同一であることの確認） ---
+ML_REPO21="$(make_temp_repo)"
+ML21_DEFAULT_BRANCH="$(cd "$ML_REPO21" && git rev-parse --abbrev-ref HEAD)"
+ML21_OLD_BASE="$(ml_head_of "$ML_REPO21" HEAD)"
+ml_commit_file "$ML_REPO21" "base.txt" "epic base\n" "epic base commit"
+ML21_EXPECTED_BASE="$(ml_head_of "$ML_REPO21" HEAD)"
+
+ml_branch_from "$ML_REPO21" "lane-sb-wrong" "$ML21_OLD_BASE"
+ml_commit_file "$ML_REPO21" "wrong.txt" "lane sb wrong\n" "lane sb wrong change"
+(cd "$ML_REPO21" && git checkout -q "$ML21_DEFAULT_BRANCH") >/dev/null 2>&1
+
+ML21_OUT="$(run_merge_lane "$ML_REPO21" --wave-branch "$ML21_DEFAULT_BRANCH" --expected-base "$ML21_EXPECTED_BASE" --lane-branch lane-sb-wrong --single-branch)"
+assert_exit_code "ケース21: --single-branchでも別ベース分岐のレーンはexit 10" 10 "$?"
+
+unset ML_REPO18 ML18_BASE ML_REPO19 ML19_BASE ML_REPO20 ML20_DEFAULT_BRANCH ML20_BASE \
+  ML20_OUT1 ML20_EXIT1 ML20_ACTUAL_BASE_2ND ML20_OUT2 ML20_EXIT2 ML20_EPIC_HEAD \
+  ML20_WAVE_BRANCH_COUNT ML_REPO21 ML21_DEFAULT_BRANCH ML21_OLD_BASE ML21_EXPECTED_BASE ML21_OUT
+
+# ---------------------------------------------------------------------------
 # adapters/codex/run-loop.sh: 統合ゲートが全テストを実行すること（回帰防止 #37）
 #
 # Review #37: mechanical_gate() が check-readability.sh --git だけを実行しており、
@@ -21040,6 +21127,113 @@ case "$NS277_RUN_SKILL_BODY" in
 esac
 
 unset NS277_RUN_SKILL_BODY NS277_PLAN_WAVES_BODY
+
+# ---------------------------------------------------------------------------
+# クラウドでの単一ブランチ運用への縮退（Task #278）
+#
+# merge-lane.sh --single-branch 自体の動作は上記「merge-lane.sh --single-branch」節で
+# 実地検証済み。ここでは skills/run/SKILL.md・README.md がブランチ運用モードの切り替え・
+# 単一ブランチ運用時の挙動（wave ブランチ未作成・push対象の検証・PR作成のMCPフォールバック）を
+# 明記していることを静的に検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== クラウドでの単一ブランチ運用への縮退（#278） =="
+
+NS278_RUN_SKILL_BODY="$(cat "${REPO_ROOT}/skills/run/SKILL.md")"
+NS278_README_BODY="$(cat "${REPO_ROOT}/README.md")"
+
+# --- skills/run/SKILL.md: dev_workflow_is_remoteに基づきSINGLE_BRANCH_MODEを決定する ---
+case "$NS278_RUN_SKILL_BODY" in
+  *'dev_workflow_is_remote'*'SINGLE_BRANCH_MODE=1'*)
+    pass "skills/run/SKILL.md: dev_workflow_is_remoteに基づきSINGLE_BRANCH_MODEを決定する（#278）" ;;
+  *)
+    fail "skills/run/SKILL.md: dev_workflow_is_remoteに基づきSINGLE_BRANCH_MODEを決定する（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: DEV_WORKFLOW_SINGLE_BRANCHによる明示上書きがある ---
+case "$NS278_RUN_SKILL_BODY" in
+  *'DEV_WORKFLOW_SINGLE_BRANCH'*)
+    pass "skills/run/SKILL.md: DEV_WORKFLOW_SINGLE_BRANCHによる明示上書きが用意されている（#278）" ;;
+  *)
+    fail "skills/run/SKILL.md: DEV_WORKFLOW_SINGLE_BRANCHによる明示上書きが用意されている（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: 単一ブランチ運用ではセッションのチェックアウト済みブランチを
+#     epicブランチとして扱う（新規worktreeを作らずEPIC_WT="."にする） ---
+case "$NS278_RUN_SKILL_BODY" in
+  *'EPIC_BRANCH="$SESSION_BRANCH"'*'EPIC_WT="."'*)
+    pass "skills/run/SKILL.md: 単一ブランチ運用でセッション指定ブランチをepicブランチとして扱う（#278）" ;;
+  *)
+    fail "skills/run/SKILL.md: 単一ブランチ運用でセッション指定ブランチをepicブランチとして扱う（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: Step5でmerge-lane.shに--single-branchを渡し、--createを使わない ---
+case "$NS278_RUN_SKILL_BODY" in
+  *'--single-branch'*)
+    pass "skills/run/SKILL.md: レーン取り込みで--single-branchを使う分岐がある（#278）" ;;
+  *)
+    fail "skills/run/SKILL.md: レーン取り込みで--single-branchを使う分岐がある（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: push対象がセッション指定ブランチと異なる場合は理由を明示して停止する ---
+case "$NS278_RUN_SKILL_BODY" in
+  *'push対象'*'SESSION_BRANCH'*'停止'*)
+    pass "skills/run/SKILL.md: push対象がセッション指定ブランチと異なる場合は停止する旨が明記されている（#278）" ;;
+  *)
+    fail "skills/run/SKILL.md: push対象がセッション指定ブランチと異なる場合は停止する旨が明記されている（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: PR作成がMCPでも失敗した場合、コミット・push済み・PR未作成を
+#     Epic issueに残して停止する旨が明記されている ---
+case "$NS278_RUN_SKILL_BODY" in
+  *'MCPでも作成できない'*'PR未作成であること'*'停止する'*)
+    pass "skills/run/SKILL.md: PR作成がMCPでも失敗した場合は状態を記録して停止する旨が明記されている（#278）" ;;
+  *)
+    fail "skills/run/SKILL.md: PR作成がMCPでも失敗した場合は状態を記録して停止する旨が明記されている（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- README.md: 「ブランチ戦略」節が単一ブランチ運用に言及している ---
+case "$NS278_README_BODY" in
+  *'## ブランチ戦略'*'単一ブランチ運用'*)
+    pass "README.md: 「ブランチ戦略」節が単一ブランチ運用に言及している（#278）" ;;
+  *)
+    fail "README.md: 「ブランチ戦略」節が単一ブランチ運用に言及している（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- README.md: 「ウェーブと wave ブランチ」節の直後に単一ブランチ運用の専用節がある ---
+case "$NS278_README_BODY" in
+  *'### ウェーブと wave ブランチ'*'### 単一ブランチ運用（クラウド等。Task #278）'*)
+    pass "README.md: 「ウェーブと wave ブランチ」節のあとに単一ブランチ運用の専用節がある（#278）" ;;
+  *)
+    fail "README.md: 「ウェーブと wave ブランチ」節のあとに単一ブランチ運用の専用節がある（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- README.md: 単一ブランチ運用節がdev_workflow_is_remote・DEV_WORKFLOW_SINGLE_BRANCHに言及している ---
+case "$NS278_README_BODY" in
+  *'dev_workflow_is_remote'*'DEV_WORKFLOW_SINGLE_BRANCH'*)
+    pass "README.md: 単一ブランチ運用の切り替え条件（dev_workflow_is_remote・明示上書き）が明記されている（#278）" ;;
+  *)
+    fail "README.md: 単一ブランチ運用の切り替え条件（dev_workflow_is_remote・明示上書き）が明記されている（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- scripts/merge-lane.sh: --single-branchフラグが実装されている（静的検査） ---
+if grep -qF -- '--single-branch' "${REPO_ROOT}/scripts/merge-lane.sh"; then
+  pass "scripts/merge-lane.sh: --single-branchフラグが実装されている（#278）"
+else
+  fail "scripts/merge-lane.sh: --single-branchフラグが実装されている（#278）"
+fi
+
+unset NS278_RUN_SKILL_BODY NS278_README_BODY
 
 # ---------------------------------------------------------------------------
 # 結果集計

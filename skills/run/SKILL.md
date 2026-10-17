@@ -118,10 +118,42 @@ echo "応答言語: ${RESOLVED_LANG}（source=${LANG_SOURCE}）"
   `RESOLVED_LANG` に関わらず英語規約のまま変えない（対象・対象外の表は
   `core/instructions.md`「応答言語」節を参照）
 
+### ブランチ運用モード（ローカル / 単一ブランチ運用）
+
+クラウドセッションでは**指定されたブランチ以外への push が想定されていない**ため、Epic
+ブランチと wave ブランチの2段構成（下記「ブランチ戦略」参照）が成立しない（Epic #267 D6・
+Task #278）。この場合は wave ブランチを作らず、**セッションに与えられた1本のブランチを
+epic ブランチとして扱う**単一ブランチ運用モードに切り替える。
+
+切り替え条件は `dev_workflow_is_remote`（#268）。明示上書きも用意する:
+
+```bash
+# shellcheck disable=SC1091
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/detect-env.sh"
+SESSION_BRANCH="$(git rev-parse --abbrev-ref HEAD)"   # run開始時点でセッションが既にチェックアウトしているブランチ
+
+if [ -n "${DEV_WORKFLOW_SINGLE_BRANCH:-}" ]; then
+  case "$DEV_WORKFLOW_SINGLE_BRANCH" in
+    0|false) SINGLE_BRANCH_MODE=0 ;;
+    *)       SINGLE_BRANCH_MODE=1 ;;
+  esac
+elif dev_workflow_is_remote; then
+  SINGLE_BRANCH_MODE=1
+else
+  SINGLE_BRANCH_MODE=0
+fi
+```
+
+- **ローカル（`SINGLE_BRANCH_MODE=0`、既定）**: 以降は従来どおり（この節の残りの変更は無い）
+- **単一ブランチ運用（`SINGLE_BRANCH_MODE=1`）**: 次項「Epicブランチ + 作業worktreeの準備」の
+  手順が変わる。`--lanes` の並列度自体は維持する（ブランチが1本でも worktree は複数持てる。
+  generator の isolation worktree は従来どおりレーンごとに作られる）
+
 ### Epicブランチ + 作業 worktree の準備
 
 Epic issue本文の「ブランチ」セクションからブランチ名を取得し、**Epic 専用の作業 worktree を
 `.claude/worktrees/<epicN>` に作成**する（`../<repo>-epicN` のような**兄弟ディレクトリは作らない**）。
+**これはローカル（`SINGLE_BRANCH_MODE=0`）のときの手順である。**
 
 なぜ `.claude/worktrees/` 配下か:
 - **並行 epic 実行**が可能（各 epic が独立した worktree を持つ）。
@@ -132,35 +164,49 @@ Epic issue本文の「ブランチ」セクションからブランチ名を取�
 - メインリポのチェックアウトを切り替えないので、他の作業を壊さない。
 
 ```bash
-# Epic issueからブランチ名を取得 (形式: epic/epicXX/[機能名])
-EPIC_BRANCH=$(gh issue view $ARGUMENTS --json body -q '.body' | grep -oP '`epic/epic\d+/[^`]+`' | tr -d '`' | head -1)
-EPIC_NUM=$(printf '%s' "$EPIC_BRANCH" | grep -oP 'epic\d+' | head -1)   # 例: epic259（sandbox-exec.sh の --epic 用の識別子）
-EPIC_ISSUE_NUM="${EPIC_NUM#epic}"   # 例: 259（plan-waves.sh の --epic 用。数値のEpic issue番号。ブランチ名の命名規則epic/epicXX上、epicXXの数値部分=Epic issue番号）
-
-# ブランチの存在確認
-git fetch origin
-git rev-parse --verify "origin/${EPIC_BRANCH}" >/dev/null 2>&1 || { echo "ERROR: ブランチ ${EPIC_BRANCH} が見つかりません"; exit 1; }
-
-# ローカル追跡ブランチを用意（無ければ origin から作成）
-git show-ref --verify --quiet "refs/heads/${EPIC_BRANCH}" || git branch "${EPIC_BRANCH}" "origin/${EPIC_BRANCH}"
-
-# Epic 専用 worktree を .claude/worktrees/<epicN> に作成（既存なら再利用）
-EPIC_WT=".claude/worktrees/${EPIC_NUM}"
-if [ -d "$EPIC_WT" ]; then
-  git -C "$EPIC_WT" checkout "${EPIC_BRANCH}" 2>/dev/null || true
+if [ "$SINGLE_BRANCH_MODE" -eq 1 ]; then
+  # 単一ブランチ運用: セッションが既にチェックアウトしているブランチ（$SESSION_BRANCH）を
+  # epic ブランチとして扱う。origin からの fetch・新規ブランチ作成・別worktreeの作成は
+  # 一切行わない（指定ブランチ以外への操作を避けるため）。EPIC_WT="." として、以降の
+  # 全ステップの `git -C "$EPIC_WT"` / `cd "$EPIC_WT"` をそのままセッションの作業ディレクトリに
+  # 向ける（この1変数だけで以降のステップは無変更で単一ブランチ運用に対応する）
+  EPIC_BRANCH="$SESSION_BRANCH"
+  EPIC_NUM=$(printf '%s' "$EPIC_BRANCH" | grep -oP 'epic\d+' | head -1)
+  EPIC_ISSUE_NUM="${EPIC_NUM#epic}"
+  EPIC_WT="."
 else
-  git worktree add "$EPIC_WT" "${EPIC_BRANCH}"
+  # Epic issueからブランチ名を取得 (形式: epic/epicXX/[機能名])
+  EPIC_BRANCH=$(gh issue view $ARGUMENTS --json body -q '.body' | grep -oP '`epic/epic\d+/[^`]+`' | tr -d '`' | head -1)
+  EPIC_NUM=$(printf '%s' "$EPIC_BRANCH" | grep -oP 'epic\d+' | head -1)   # 例: epic259（sandbox-exec.sh の --epic 用の識別子）
+  EPIC_ISSUE_NUM="${EPIC_NUM#epic}"   # 例: 259（plan-waves.sh の --epic 用。数値のEpic issue番号。ブランチ名の命名規則epic/epicXX上、epicXXの数値部分=Epic issue番号）
+
+  # ブランチの存在確認
+  git fetch origin
+  git rev-parse --verify "origin/${EPIC_BRANCH}" >/dev/null 2>&1 || { echo "ERROR: ブランチ ${EPIC_BRANCH} が見つかりません"; exit 1; }
+
+  # ローカル追跡ブランチを用意（無ければ origin から作成）
+  git show-ref --verify --quiet "refs/heads/${EPIC_BRANCH}" || git branch "${EPIC_BRANCH}" "origin/${EPIC_BRANCH}"
+
+  # Epic 専用 worktree を .claude/worktrees/<epicN> に作成（既存なら再利用）
+  EPIC_WT=".claude/worktrees/${EPIC_NUM}"
+  if [ -d "$EPIC_WT" ]; then
+    git -C "$EPIC_WT" checkout "${EPIC_BRANCH}" 2>/dev/null || true
+  else
+    git worktree add "$EPIC_WT" "${EPIC_BRANCH}"
+  fi
 fi
 ```
 
 **重要**: 以降の**すべてのステップ**（Docker 準備・タスクループ・generator/evaluator 起動・
-commit/push・PR 作成・クリーンアップ）は、この `$EPIC_WT`（= `.claude/worktrees/<epicN>`）を
-**作業ディレクトリ**として実行すること。**git コマンドは `cd "$EPIC_WT"` してから叩かず、
-必ず `git -C "$EPIC_WT" ...` で対象を明示する**（`cd` 直後の git 実行は「未信頼な hooks が
-走りうる」として承認プロンプトを誘発するため。issue #140）。`sandbox-exec.sh` /
-`check-readability.sh` のように呼び出し元 cwd に依存するコマンドを叩く場合に限り
-`cd "$EPIC_WT"` を使い、その直後に git を続けない。
-**メインリポのチェックアウトを epic ブランチに切り替えてはならない**（兄弟 worktree も作らない）。
+commit/push・PR 作成・クリーンアップ）は、この `$EPIC_WT`（ローカルは
+`.claude/worktrees/<epicN>`、単一ブランチ運用は `.`）を**作業ディレクトリ**として実行すること。
+**git コマンドは `cd "$EPIC_WT"` してから叩かず、必ず `git -C "$EPIC_WT" ...` で対象を明示する**
+（`cd` 直後の git 実行は「未信頼な hooks が走りうる」として承認プロンプトを誘発するため。
+issue #140）。`sandbox-exec.sh` / `check-readability.sh` のように呼び出し元 cwd に依存する
+コマンドを叩く場合に限り `cd "$EPIC_WT"` を使い、その直後に git を続けない。
+**メインリポのチェックアウトを epic ブランチに切り替えてはならない**（兄弟 worktree も作らない。
+単一ブランチ運用では `$EPIC_WT="."` 自体がセッションのメインの作業ディレクトリであり、
+この制約は該当しない）。
 
 ### 自律実行の開始を記録
 
@@ -892,34 +938,52 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
 **読み取れない場合はそのレーンの記録をスキップしてよい。記録の成否で自律ループを止めない。**
 連続処理により1レコードが複数タスク分になるため、Epic #42 のベースライン（81k〜150k/タスク）と
 比較するときは `--note` のタスク件数で割って読むこと。
-### Step 5: wave ブランチへレーンを取り込む
+### Step 5: レーンを取り込む（wave ブランチ運用 / 単一ブランチ運用）
 
-全レーン完了後、Epic worktreeでwaveブランチを作成し、（1件以上のタスクを取り込めた）レーンを
-レーン記号順に取り込む。**1レーンは複数タスク分のコミットを持つ**ため、`--task` にはそのレーンで
-成功したタスク番号をカンマ区切りで渡す。**`--create` は「1本目のレーン」ではなく、最初に実際に取り込むレーンに
-付ける。** 取り込み対象はレーン内ゲートに通ったレーンに限られるため、issue番号順で先頭の
-レーン（例: レーンA）がレーン内ゲートに失敗していれば、`--create` はレーンBなど次に取り込む
-レーンに付く。
+全レーン完了後、（1件以上のタスクを取り込めた）レーンをレーン記号順に取り込む。**1レーンは
+複数タスク分のコミットを持つ**ため、`--task` にはそのレーンで成功したタスク番号をカンマ区切りで
+渡す。取り込み先は `$SINGLE_BRANCH_MODE`（「ブランチ運用モード」節）で分岐する。
+
+- **ローカル（既定）**: Epic worktreeでwaveブランチを作成し、そこへ取り込む。`--create` は
+  「1本目のレーン」ではなく、**最初に実際に取り込むレーン**に付ける。取り込み対象はレーン内
+  ゲートに通ったレーンに限られるため、issue番号順で先頭のレーン（例: レーンA）がレーン内ゲートに
+  失敗していれば、`--create` はレーンBなど次に取り込むレーンに付く
+- **単一ブランチ運用（クラウド等）**: wave ブランチを**作らず**、レーンを直接 `$EPIC_BRANCH`
+  （= このモードでは `$EPIC_WT` でチェックアウト済みのブランチそのもの）へ取り込む。
+  `--single-branch` を渡し、**`--create` は常に付けない**（宛先は常に既存の epic ブランチ
+  であり新規作成しないため。`scripts/merge-lane.sh` 側も `--create` との併用を exit 2 で拒否する）
 
 ```bash
 cd "$EPIC_WT"
 MERGE_START_SEC=$(date +%s)   # 「統合」フェーズ（merge-lane.sh群）の計測開始
 
-# 最初に実際に取り込むレーン（レーンAとは限らない）: --create でwaveブランチをWAVE_BASEから作成する
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/merge-lane.sh" \
-  --wave-branch "wave/${EPIC_NUM}/${WAVE_NO}" --expected-base "$WAVE_BASE" \
-  --lane-branch "[レーンAの作業ブランチ]" --task "<レーンAで成功したタスク番号のカンマ区切り>" --create
+MERGE_ARGS=(--expected-base "$WAVE_BASE")
+if [ "$SINGLE_BRANCH_MODE" -eq 1 ]; then
+  MERGE_TARGET="$EPIC_BRANCH"
+  MERGE_ARGS+=(--single-branch)   # 宛先は既存のepicブランチなので--createは常に付けない
+else
+  MERGE_TARGET="wave/${EPIC_NUM}/${WAVE_NO}"
+fi
 
-# 2本目以降: waveブランチは既に存在するので --create は不要
+# 最初に実際に取り込むレーン（レーンAとは限らない）。ローカルのみ --create でwaveブランチを
+# WAVE_BASEから作成する
+FIRST_MERGE_ARGS=("${MERGE_ARGS[@]}")
+[ "$SINGLE_BRANCH_MODE" -eq 0 ] && FIRST_MERGE_ARGS+=(--create)
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/merge-lane.sh" \
-  --wave-branch "wave/${EPIC_NUM}/${WAVE_NO}" --expected-base "$WAVE_BASE" \
+  --wave-branch "$MERGE_TARGET" "${FIRST_MERGE_ARGS[@]}" \
+  --lane-branch "[レーンAの作業ブランチ]" --task "<レーンAで成功したタスク番号のカンマ区切り>"
+
+# 2本目以降: ローカルはwaveブランチが既に存在するので--create不要。単一ブランチ運用も同様に
+# --createを付けない（宛先が最初から存在するepicブランチのため、1本目と扱いは変わらない）
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/merge-lane.sh" \
+  --wave-branch "$MERGE_TARGET" "${MERGE_ARGS[@]}" \
   --lane-branch "[レーンBの作業ブランチ]" --task "<レーンBで成功したタスク番号のカンマ区切り>"
 
 MERGE_END_SEC=$(date +%s)
 MERGE_SEC=$((MERGE_END_SEC - MERGE_START_SEC))
 ```
 
-終了コードで扱いを分岐する:
+終了コードで扱いを分岐する（モードに関わらず共通。検証ロジックはモードで変わらない）:
 
 | 終了コード | 意味 | 扱い |
 |---|---|---|
@@ -929,35 +993,45 @@ MERGE_SEC=$((MERGE_END_SEC - MERGE_START_SEC))
 | 2 | 引数エラー | runの呼び出しミス。停止して報告する |
 | 1 | その他の失敗 | 停止して報告する |
 
-取り込めなかったレーンはこの時点でwaveに含まれない。**先に取り込めたレーンの成果は活かし、
-ウェーブ全体は捨てない。**
+取り込めなかったレーンはこの時点で `$MERGE_TARGET` に含まれない。**先に取り込めたレーンの成果は
+活かし、ウェーブ全体は捨てない。**
 
 **取り込めたレーンが0本の場合**（全レーンがレーン内ゲートに失敗した、またはレーン内ゲートに
-通った全レーンが `merge-lane.sh` から exit 10/11 で拒否された）、`merge-lane.sh --create` が
-一度も成功しておらず `wave/${EPIC_NUM}/${WAVE_NO}` は存在しない。この場合は **Step 6・Step 7 を
-実行せず**、このウェーブの各タスクの試行回数を加算したうえで Step 1 に戻る（次ウェーブへ）。
+通った全レーンが `merge-lane.sh` から exit 10/11 で拒否された）:
+- **ローカル**: `merge-lane.sh --create` が一度も成功しておらず `wave/${EPIC_NUM}/${WAVE_NO}` は
+  存在しない
+- **単一ブランチ運用**: `$EPIC_BRANCH` 自体が一切動いていない
 
-### Step 6: wave ブランチの取り込み検証（可読性ガード）
+いずれの場合も **Step 6・Step 7 を実行せず**、このウェーブの各タスクの試行回数を加算したうえで
+Step 1 に戻る（次ウェーブへ）。
 
-全レーンの取り込み（成功分のみ）が終わったら、waveブランチ上で**可読性ガードだけ**を実行する。
-merge-base 完全一致検証は Step 5 の `merge-lane.sh` が既に行っている。**プロジェクトの全テストは
-ここでは走らせない**（Epic につき1回、全ウェーブ完了後の「Epic 統合ゲート」節に集約する。
-「機械的ゲートの三段構成」参照）。
+### Step 6: 取り込み検証（可読性ガード）
+
+全レーンの取り込み（成功分のみ）が終わったら、取り込み先ブランチ上で**可読性ガードだけ**を
+実行する。merge-base 完全一致検証は Step 5 の `merge-lane.sh` が既に行っている。**プロジェクトの
+全テストはここでは走らせない**（Epic につき1回、全ウェーブ完了後の「Epic 統合ゲート」節に集約
+する。「機械的ゲートの三段構成」参照）。
 **このStepはStep 5で取り込めたレーンが1本以上ある場合のみ実行する**（0本の場合はStep 5末尾の
-分岐を参照）。念のため冒頭で wave ブランチの存在を確認してから進む:
+分岐を参照）。
+
+- **ローカル**: 念のため冒頭で wave ブランチの存在を確認してから checkout する
+- **単一ブランチ運用**: `merge-lane.sh` が既に `$EPIC_BRANCH` を checkout 済みなので、
+  追加の checkout は不要（存在確認も不要。宛先は Step 5 開始前から常に存在する）
 
 ```bash
 # git は git -C で対象 worktree を明示する（cd 直後の git 実行を避ける。issue #140）
-git -C "$EPIC_WT" rev-parse --verify -q "refs/heads/wave/${EPIC_NUM}/${WAVE_NO}" >/dev/null || {
-  echo "ERROR: wave/${EPIC_NUM}/${WAVE_NO} が存在しません（取り込めたレーンが0本）。Step 7を実行せずStep 1へ戻ってください"
-  exit 1
-}
-git -C "$EPIC_WT" checkout "wave/${EPIC_NUM}/${WAVE_NO}"
+if [ "$SINGLE_BRANCH_MODE" -eq 0 ]; then
+  git -C "$EPIC_WT" rev-parse --verify -q "refs/heads/wave/${EPIC_NUM}/${WAVE_NO}" >/dev/null || {
+    echo "ERROR: wave/${EPIC_NUM}/${WAVE_NO} が存在しません（取り込めたレーンが0本）。Step 7を実行せずStep 1へ戻ってください"
+    exit 1
+  }
+  git -C "$EPIC_WT" checkout "wave/${EPIC_NUM}/${WAVE_NO}"
+fi
 
 # check-readability.sh は内部で bare git（cwd依存）を使うため、ここでは cd が必要
 # （git の実行そのものは上で完了しており、この cd の後に git は続かない）
 cd "$EPIC_WT"
-# 可読性ガード — waveブランチの差分に対して実行（PostToolUseフックと同じ判定）
+# 可読性ガード — 取り込み先ブランチの差分に対して実行（PostToolUseフックと同じ判定）
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-readability.sh" --git
 
 MERGE_END_SEC=$(date +%s)   # 「統合」フェーズ（merge-lane.sh群＋可読性ガード）の計測終了
@@ -982,14 +1056,30 @@ MERGE_SEC=$((MERGE_END_SEC - MERGE_START_SEC))
 
 epicへの取り込みは、waveがWAVE_BASEの子孫であるため取り込み検証通過後は必ずfast-forwardになる。
 
+- **ローカル**: wave ブランチを epic ブランチへ `--ff-only` で進める
+- **単一ブランチ運用**: Step 5 で既にレーンを `$EPIC_BRANCH` へ直接取り込んでいるため、
+  この `--ff-only` マージ自体は不要（取り込み先が最初から epic ブランチなので進める先が無い）。
+  **push だけは両モード共通で必要**
+
 ```bash
 # git は git -C で対象 worktree を明示する（cd 直後の git 実行を避ける。issue #140）
 git -C "$EPIC_WT" checkout "${EPIC_BRANCH}"
-git -C "$EPIC_WT" merge --ff-only "wave/${EPIC_NUM}/${WAVE_NO}"
+if [ "$SINGLE_BRANCH_MODE" -eq 0 ]; then
+  git -C "$EPIC_WT" merge --ff-only "wave/${EPIC_NUM}/${WAVE_NO}"
+fi
+
+# push対象が指定ブランチと異なる場合は理由を明示して停止する（Task #278。クラウドでは
+# 指定されたブランチ以外へのpushが想定されていない。SESSION_BRANCHは「ブランチ運用モード」
+# 節で記録済み）
+if [ "$SINGLE_BRANCH_MODE" -eq 1 ] && [ "$EPIC_BRANCH" != "$SESSION_BRANCH" ]; then
+  echo "ERROR: push対象（${EPIC_BRANCH}）がセッション指定ブランチ（${SESSION_BRANCH}）と異なります。停止します。" >&2
+  exit 1
+fi
 git -C "$EPIC_WT" push origin "${EPIC_BRANCH}"
 ```
 
-**Epicへのforce pushは行わない。waveブランチはoriginへpushしない**（ローカルの一時ブランチ）。
+**Epicへのforce pushは行わない。waveブランチはoriginへpushしない**（ローカルの一時ブランチ。
+単一ブランチ運用ではwaveブランチ自体を作らないため、そもそも該当しない）。
 
 1. 取り込めたレーンに対応するTask issueをクローズする: `gh issue close [番号]`
 2. Epic issueの進捗を更新する
@@ -1357,6 +1447,15 @@ BODY
 
 一括レビューまで終えたら、**必ずPRを作成する。** これがrunコマンドの最終出力であり、PRのURLを表示して完了とする。
 PRを作成せずにrunを終了してはならない。
+
+下記の `git push` / `gh pr create` は**ghバックエンドでの実行例**である（`core/references/github-access.md`
+参照）。`gh` が使えない場合は該当する `mcp__github__*` のPR作成ツールを使う。**MCPでも作成できない
+場合**（ツールが無い・呼び出しが失敗する等）は、コードを失わないことを優先する: **push はこの時点で
+既に完了している前提**（`git push` 自体は MCP 不要の git 操作であり、常に実行できる）なので、
+「コミット・push済みであること」と「PR未作成であること」を Epic issue にコメントで残し、**そこで
+停止する**（Task #278。黙って完了通知を出さない。達成条件5「main向けPRが作成されている」を
+満たせないまま終える旨も明記する）。単一ブランチ運用（`SINGLE_BRANCH_MODE=1`）かどうかに関わらず
+同じ扱いである（PR作成の経路自体はブランチ運用モードに依存しない）。
 
 **Epic 統合ゲートが2回再試行後も不合格のまま終わった場合、下記PR本文の `## Summary` の直前に
 「⚠️ Epic 統合ゲート不合格: [失敗したテスト名の要約]」の1行を必ず追加すること。** 通過している
