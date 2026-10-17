@@ -19426,6 +19426,210 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# ケース: dev_workflow_is_remote / dev_workflow_docker_available /
+#         dev_workflow_gh_available（クラウド・Docker・gh 判定の一元化、Task #268）
+#
+# 実際の docker / gh の有無に依存せずテストが通るよう、上書き環境変数と偽コマンド
+# （PATH 先頭に置く docker/gh スクリプト）の両方で擬似再現する。
+# キャッシュ（プロセス内グローバル変数）は複数の検証で跨いで使われるため、
+# 「実際の判定」を検証する直前では内部変数を明示的に空へ戻し、キャッシュ無しの
+# 状態から検証する（このファイル全体で1プロセスの中でまとめてテストするため）。
+# ---------------------------------------------------------------------------
+
+echo "== dev_workflow_is_remote / dev_workflow_docker_available / dev_workflow_gh_available（クラウド・Docker・gh 判定の一元化、Task #268） =="
+
+DETECT_ENV_LIB="${REPO_ROOT}/scripts/lib/detect-env.sh"
+
+# shellcheck source=../scripts/lib/detect-env.sh
+. "$DETECT_ENV_LIB"
+
+# --- dev_workflow_is_remote ---
+
+unset CLAUDE_CODE_REMOTE DEV_WORKFLOW_FORCE_REMOTE CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE \
+  DEV_WORKFLOW_DOCKER_UNAVAILABLE DEV_WORKFLOW_GH_UNAVAILABLE
+
+dev_workflow_is_remote
+DE_IS_REMOTE_UNSET=$?
+assert_exit_code "dev_workflow_is_remote: CLAUDE_CODE_REMOTE 未設定では偽" 1 "$DE_IS_REMOTE_UNSET"
+
+CLAUDE_CODE_REMOTE=true dev_workflow_is_remote
+DE_IS_REMOTE_TRUE=$?
+assert_exit_code "dev_workflow_is_remote: CLAUDE_CODE_REMOTE=true なら真" 0 "$DE_IS_REMOTE_TRUE"
+
+CLAUDE_CODE_REMOTE=false dev_workflow_is_remote
+DE_IS_REMOTE_FALSE=$?
+assert_exit_code "dev_workflow_is_remote: CLAUDE_CODE_REMOTE=false（trueでない値）では偽" 1 "$DE_IS_REMOTE_FALSE"
+
+DEV_WORKFLOW_FORCE_REMOTE=true dev_workflow_is_remote
+DE_IS_REMOTE_FORCE_TRUE=$?
+assert_exit_code "dev_workflow_is_remote: DEV_WORKFLOW_FORCE_REMOTE=true は CLAUDE_CODE_REMOTE 未設定でも真を強制する" \
+  0 "$DE_IS_REMOTE_FORCE_TRUE"
+
+DEV_WORKFLOW_FORCE_REMOTE=1 dev_workflow_is_remote
+DE_IS_REMOTE_FORCE_1=$?
+assert_exit_code "dev_workflow_is_remote: DEV_WORKFLOW_FORCE_REMOTE=1 も真として扱う" 0 "$DE_IS_REMOTE_FORCE_1"
+
+CLAUDE_CODE_REMOTE=true DEV_WORKFLOW_FORCE_REMOTE=false dev_workflow_is_remote
+DE_IS_REMOTE_FORCE_FALSE=$?
+assert_exit_code "dev_workflow_is_remote: DEV_WORKFLOW_FORCE_REMOTE=false は CLAUDE_CODE_REMOTE=true でも偽を強制する" \
+  1 "$DE_IS_REMOTE_FORCE_FALSE"
+
+# --- dev_workflow_remote_environment_type（判定には使わない。診断表示専用） ---
+
+unset CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE
+assert_eq "dev_workflow_remote_environment_type: 未設定では空文字を返す" \
+  "" "$(dev_workflow_remote_environment_type)"
+
+CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE=cloud_default
+assert_eq "dev_workflow_remote_environment_type: 設定値をそのまま返す（実測値 cloud_default）" \
+  "cloud_default" "$(dev_workflow_remote_environment_type)"
+unset CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE
+
+# --- dev_workflow_docker_available ---
+
+# 上書き DEV_WORKFLOW_DOCKER_UNAVAILABLE はキャッシュより先に判定するため、
+# キャッシュの状態に関わらず常に偽を強制する。
+_DEV_WORKFLOW_DOCKER_AVAILABLE_CACHE=""
+DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 dev_workflow_docker_available
+DE_DOCKER_FORCE_UNAVAILABLE=$?
+assert_exit_code "dev_workflow_docker_available: DEV_WORKFLOW_DOCKER_UNAVAILABLE を設定すると実際の docker を見ずに偽を強制する" \
+  1 "$DE_DOCKER_FORCE_UNAVAILABLE"
+unset DEV_WORKFLOW_DOCKER_UNAVAILABLE
+
+# docker コマンド自体が見つからない場合は偽（command -v docker が失敗する分岐）。
+DE_EMPTY_BIN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-detect-env-emptybin.XXXXXX")"
+_DEV_WORKFLOW_DOCKER_AVAILABLE_CACHE=""
+PATH="$DE_EMPTY_BIN_DIR" dev_workflow_docker_available
+DE_DOCKER_NOT_FOUND=$?
+assert_exit_code "dev_workflow_docker_available: docker コマンドが見つからなければ偽" 1 "$DE_DOCKER_NOT_FOUND"
+
+# docker はあるが `docker info` が失敗する（デーモン未起動を模す）場合は偽。
+DE_FAKE_BIN_DOWN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-detect-env-docker-down.XXXXXX")"
+cat > "${DE_FAKE_BIN_DOWN}/docker" <<'FAKE_DOCKER_DOWN'
+#!/bin/bash
+exit 1
+FAKE_DOCKER_DOWN
+chmod +x "${DE_FAKE_BIN_DOWN}/docker"
+
+_DEV_WORKFLOW_DOCKER_AVAILABLE_CACHE=""
+PATH="${DE_FAKE_BIN_DOWN}:${PATH}" dev_workflow_docker_available
+DE_DOCKER_INFO_FAIL=$?
+assert_exit_code "dev_workflow_docker_available: docker info が失敗すれば偽（デーモン未起動）" 1 "$DE_DOCKER_INFO_FAIL"
+
+# docker があり `docker info` も成功すれば真。かつ2回目以降は docker info を
+# 再実行しない（プロセス内キャッシュ、呼ぶたびにデーモンへ出ない）ことを検証する。
+DE_FAKE_BIN_UP="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-detect-env-docker-up.XXXXXX")"
+DE_DOCKER_INFO_CALLS="${DE_FAKE_BIN_UP}/docker-info-calls"
+export DE_DOCKER_INFO_CALLS
+cat > "${DE_FAKE_BIN_UP}/docker" <<'FAKE_DOCKER_UP'
+#!/bin/bash
+if [ "$1" = "info" ]; then
+  echo x >> "$DE_DOCKER_INFO_CALLS"
+  exit 0
+fi
+exit 1
+FAKE_DOCKER_UP
+chmod +x "${DE_FAKE_BIN_UP}/docker"
+
+_DEV_WORKFLOW_DOCKER_AVAILABLE_CACHE=""
+PATH="${DE_FAKE_BIN_UP}:${PATH}" dev_workflow_docker_available
+DE_DOCKER_OK_1=$?
+assert_exit_code "dev_workflow_docker_available: command -v docker かつ docker info 成功なら真" 0 "$DE_DOCKER_OK_1"
+
+PATH="${DE_FAKE_BIN_UP}:${PATH}" dev_workflow_docker_available
+DE_DOCKER_OK_2=$?
+assert_exit_code "dev_workflow_docker_available: 2回目もキャッシュから真を返す" 0 "$DE_DOCKER_OK_2"
+
+if [ -f "$DE_DOCKER_INFO_CALLS" ]; then
+  DE_DOCKER_INFO_CALL_COUNT="$(wc -l < "$DE_DOCKER_INFO_CALLS" | tr -d '[:space:]')"
+else
+  DE_DOCKER_INFO_CALL_COUNT=0
+fi
+assert_eq "dev_workflow_docker_available: 2回呼んでも docker info はプロセス内キャッシュにより1回しか呼ばれない" \
+  "1" "$DE_DOCKER_INFO_CALL_COUNT"
+unset DE_DOCKER_INFO_CALLS
+
+# --- dev_workflow_gh_available ---
+
+_DEV_WORKFLOW_GH_AVAILABLE_CACHE=""
+DEV_WORKFLOW_GH_UNAVAILABLE=1 dev_workflow_gh_available
+DE_GH_FORCE_UNAVAILABLE=$?
+assert_exit_code "dev_workflow_gh_available: DEV_WORKFLOW_GH_UNAVAILABLE を設定すると実際の gh を見ずに偽を強制する" \
+  1 "$DE_GH_FORCE_UNAVAILABLE"
+unset DEV_WORKFLOW_GH_UNAVAILABLE
+
+# gh コマンド自体が見つからない場合は偽（gh auth status が command not found で失敗する）。
+_DEV_WORKFLOW_GH_AVAILABLE_CACHE=""
+PATH="$DE_EMPTY_BIN_DIR" dev_workflow_gh_available
+DE_GH_NOT_FOUND=$?
+assert_exit_code "dev_workflow_gh_available: gh コマンドが見つからなければ偽" 1 "$DE_GH_NOT_FOUND"
+
+# gh はあるが未ログイン（gh auth status が失敗する）場合は偽。
+DE_FAKE_BIN_GH_UNAUTH="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-detect-env-gh-unauth.XXXXXX")"
+cat > "${DE_FAKE_BIN_GH_UNAUTH}/gh" <<'FAKE_GH_UNAUTH'
+#!/bin/bash
+exit 1
+FAKE_GH_UNAUTH
+chmod +x "${DE_FAKE_BIN_GH_UNAUTH}/gh"
+
+_DEV_WORKFLOW_GH_AVAILABLE_CACHE=""
+PATH="${DE_FAKE_BIN_GH_UNAUTH}:${PATH}" dev_workflow_gh_available
+DE_GH_UNAUTH=$?
+assert_exit_code "dev_workflow_gh_available: gh auth status が失敗すれば偽（未ログイン）" 1 "$DE_GH_UNAUTH"
+
+# gh auth status は成功するが API 疎通（gh api rate_limit）が失敗する場合も偽。
+DE_FAKE_BIN_GH_NOAPI="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-detect-env-gh-noapi.XXXXXX")"
+cat > "${DE_FAKE_BIN_GH_NOAPI}/gh" <<'FAKE_GH_NOAPI'
+#!/bin/bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  exit 0
+fi
+exit 1
+FAKE_GH_NOAPI
+chmod +x "${DE_FAKE_BIN_GH_NOAPI}/gh"
+
+_DEV_WORKFLOW_GH_AVAILABLE_CACHE=""
+PATH="${DE_FAKE_BIN_GH_NOAPI}:${PATH}" dev_workflow_gh_available
+DE_GH_NOAPI=$?
+assert_exit_code "dev_workflow_gh_available: gh auth status は成功するが API 疎通が失敗すれば偽" 1 "$DE_GH_NOAPI"
+
+# gh auth status も API 疎通も成功すれば真。かつ2回目以降は gh api rate_limit を
+# 再実行しない（プロセス内キャッシュ、呼ぶたびにネットワークへ出ない）ことを検証する。
+DE_FAKE_BIN_GH_OK="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-detect-env-gh-ok.XXXXXX")"
+DE_GH_API_CALLS="${DE_FAKE_BIN_GH_OK}/gh-api-calls"
+export DE_GH_API_CALLS
+cat > "${DE_FAKE_BIN_GH_OK}/gh" <<'FAKE_GH_OK'
+#!/bin/bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "rate_limit" ]; then
+  echo x >> "$DE_GH_API_CALLS"
+  exit 0
+fi
+exit 1
+FAKE_GH_OK
+chmod +x "${DE_FAKE_BIN_GH_OK}/gh"
+
+_DEV_WORKFLOW_GH_AVAILABLE_CACHE=""
+PATH="${DE_FAKE_BIN_GH_OK}:${PATH}" dev_workflow_gh_available
+DE_GH_OK_1=$?
+assert_exit_code "dev_workflow_gh_available: gh auth status と API 疎通が両方成功すれば真" 0 "$DE_GH_OK_1"
+
+PATH="${DE_FAKE_BIN_GH_OK}:${PATH}" dev_workflow_gh_available
+DE_GH_OK_2=$?
+assert_exit_code "dev_workflow_gh_available: 2回目もキャッシュから真を返す" 0 "$DE_GH_OK_2"
+
+if [ -f "$DE_GH_API_CALLS" ]; then
+  DE_GH_API_CALL_COUNT="$(wc -l < "$DE_GH_API_CALLS" | tr -d '[:space:]')"
+else
+  DE_GH_API_CALL_COUNT=0
+fi
+assert_eq "dev_workflow_gh_available: 2回呼んでも gh api rate_limit はプロセス内キャッシュにより1回しか呼ばれない" \
+  "1" "$DE_GH_API_CALL_COUNT"
+unset DE_GH_API_CALLS
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
