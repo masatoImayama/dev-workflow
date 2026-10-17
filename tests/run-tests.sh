@@ -21457,6 +21457,49 @@ esac
 unset NS279_README_BODY NS279_SETUP_BODY NS279_CLOUD_SECTION
 
 # ---------------------------------------------------------------------------
+# #272の3分岐契約（host警告継続 / dockerfile・compose停止 / none停止）の検証（#288）
+#
+# #272が追加したmode別の3分岐契約（mode=host→警告継続＋Epic issueコメント /
+# mode=dockerfile・compose→Docker不在・デーモン未起動なら停止 / mode=none→従来どおり停止）に
+# テストが一切無かった。#277/#278/#279と同じ作法（静的grepによるSKILL.md契約文言の確認）で、
+# 契約文言を削除すると当該テストが失敗する（＝検知力がある）形で検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== #272の3分岐契約（host警告継続 / dockerfile・compose停止 / none停止）の検証（#288） =="
+
+NS288_RUN_SKILL_BODY="$(cat "${REPO_ROOT}/skills/run/SKILL.md")"
+
+# --- skills/run/SKILL.md: mode=host で警告を出し継続し、Epic issueへコメントを残す ---
+case "$NS288_RUN_SKILL_BODY" in
+  *'mode=host'*'WARNING'*'gh issue comment "$ARGUMENTS"'*'host モード（Dockerコンテナ分離なし）で実行されました'*)
+    pass "skills/run/SKILL.md: mode=hostで警告を出して継続し、Epic issueへコメントを残す（#272, #288）" ;;
+  *)
+    fail "skills/run/SKILL.md: mode=hostで警告を出して継続し、Epic issueへコメントを残す（#272, #288）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: mode=dockerfile/compose でDocker不在・デーモン未起動なら停止する ---
+case "$NS288_RUN_SKILL_BODY" in
+  *'mode=(dockerfile|compose)'*'dev_workflow_docker_available'*'exit 1'*)
+    pass "skills/run/SKILL.md: mode=dockerfile/composeでDocker不在・デーモン未起動なら停止する（#272, #288）" ;;
+  *)
+    fail "skills/run/SKILL.md: mode=dockerfile/composeでDocker不在・デーモン未起動なら停止する（#272, #288）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: mode=none は従来どおりエラーで停止する ---
+case "$NS288_RUN_SKILL_BODY" in
+  *'mode=none'*'ERROR'*'サンドボックス定義が見つかりません'*'exit 1'*)
+    pass "skills/run/SKILL.md: mode=noneは従来どおりエラーで停止する（#272, #288）" ;;
+  *)
+    fail "skills/run/SKILL.md: mode=noneは従来どおりエラーで停止する（#272, #288）" \
+      "記述が見つからない" ;;
+esac
+
+unset NS288_RUN_SKILL_BODY
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
