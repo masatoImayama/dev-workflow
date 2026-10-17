@@ -2618,6 +2618,186 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# docker_warning_message / gh_warning_message
+# （Docker / gh の必須判定を非ブロッキング警告へ格下げ、Task #271）
+#
+# クラウドでは Docker に接続できず gh も認証できない可能性が高いため、Docker/gh 単体の
+# 不在・未認証でセッション全体を止めない。crlf_warning_message / optional_tools_notice と
+# 同じ作法（check-prerequisites.sh を source して純粋関数だけを直接呼び出す）で検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== docker_warning_message / gh_warning_message（非ブロッキング警告への格下げ。Task #271） =="
+
+docker_warning_message_with_path() {
+  # docker_warning_message_with_path <PATH>
+  # 指定した PATH だけを使って docker_warning_message を呼び出し、標準出力を返す（stderr は捨てる）。
+  local fake_path="$1"
+  (
+    # shellcheck source=../scripts/check-prerequisites.sh
+    source "$CHECK_PREREQS_SCRIPT"
+    PATH="$fake_path" docker_warning_message
+  ) 2>/dev/null
+}
+
+gh_warning_message_with_path() {
+  # gh_warning_message_with_path <PATH>
+  # 指定した PATH だけを使って gh_warning_message を呼び出し、標準出力を返す（stderr は捨てる）。
+  local fake_path="$1"
+  (
+    # shellcheck source=../scripts/check-prerequisites.sh
+    source "$CHECK_PREREQS_SCRIPT"
+    PATH="$fake_path" gh_warning_message
+  ) 2>/dev/null
+}
+
+strip_tools_from_path() {
+  # strip_tools_from_path <tool名...>
+  # 指定した実行ファイル名を含むPATHエントリだけを取り除いたPATHを返す
+  # （strip_optional_tools_from_pathと同じ作法。cat/grep/bash等、他に必要な外部コマンドは
+  # そのまま残すため、docker/ghが「無い」ことを再現しても docker_warning_message /
+  # gh_warning_message 自体が依存する外部コマンドの欠落で壊れない）。
+  local dir out="" tool skip
+  local IFS=':'
+  for dir in $PATH; do
+    skip=0
+    for tool in "$@"; do
+      [ -x "${dir}/${tool}" ] && skip=1 && break
+    done
+    [ "$skip" -eq 1 ] && continue
+    out="${out:+${out}:}${dir}"
+  done
+  printf '%s' "$out"
+}
+
+# --- docker が無ければ警告を返す（インストール手順とhostモードへの言及を含む） ---
+PREREQ271_NO_DOCKER_PATH="$(strip_tools_from_path docker)"
+PREREQ271_DOCKER_MISSING="$(docker_warning_message_with_path "$PREREQ271_NO_DOCKER_PATH")"
+case "$PREREQ271_DOCKER_MISSING" in
+  *"インストールされていません"*"DEV_WORKFLOW_SANDBOX_HOST=1"*)
+    pass "docker_warning_message: dockerが無いとインストール手順とhostモードを案内する（#271）" ;;
+  *)
+    fail "docker_warning_message: dockerが無いとインストール手順とhostモードを案内する（#271）" \
+      "message=[${PREREQ271_DOCKER_MISSING}]" ;;
+esac
+
+# --- docker はあるが info が失敗する（デーモン未起動）場合も警告を返す ---
+PREREQ271_DOCKER_DOWN_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-prereq271-dockerdown.XXXXXX")"
+cat > "${PREREQ271_DOCKER_DOWN_BIN}/docker" <<'FAKE_DOCKER_DOWN271'
+#!/bin/bash
+exit 1
+FAKE_DOCKER_DOWN271
+chmod +x "${PREREQ271_DOCKER_DOWN_BIN}/docker"
+PREREQ271_DOCKER_DOWN="$(docker_warning_message_with_path "${PREREQ271_DOCKER_DOWN_BIN}:${PATH}")"
+case "$PREREQ271_DOCKER_DOWN" in
+  *"デーモンが起動していません"*)
+    pass "docker_warning_message: デーモン未起動でも警告を返す（#271）" ;;
+  *)
+    fail "docker_warning_message: デーモン未起動でも警告を返す（#271）" \
+      "message=[${PREREQ271_DOCKER_DOWN}]" ;;
+esac
+
+# --- docker があり info も成功すれば何も出力しない ---
+PREREQ271_DOCKER_OK_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-prereq271-dockerok.XXXXXX")"
+cat > "${PREREQ271_DOCKER_OK_BIN}/docker" <<'FAKE_DOCKER_OK271'
+#!/bin/bash
+exit 0
+FAKE_DOCKER_OK271
+chmod +x "${PREREQ271_DOCKER_OK_BIN}/docker"
+PREREQ271_DOCKER_OK="$(docker_warning_message_with_path "${PREREQ271_DOCKER_OK_BIN}:${PATH}")"
+assert_eq "docker_warning_message: dockerがあってinfoも成功すれば何も出力しない（#271）" "" "$PREREQ271_DOCKER_OK"
+
+# --- gh が無ければ警告を返す（インストール手順とMCPバックエンドへの言及を含む） ---
+PREREQ271_NO_GH_PATH="$(strip_tools_from_path gh)"
+PREREQ271_GH_MISSING="$(gh_warning_message_with_path "$PREREQ271_NO_GH_PATH")"
+case "$PREREQ271_GH_MISSING" in
+  *"インストールされていません"*"MCP バックエンド"*)
+    pass "gh_warning_message: ghが無いとインストール手順とMCPバックエンドの代替を案内する（#271）" ;;
+  *)
+    fail "gh_warning_message: ghが無いとインストール手順とMCPバックエンドの代替を案内する（#271）" \
+      "message=[${PREREQ271_GH_MISSING}]" ;;
+esac
+
+# --- gh はあるが未認証の場合も警告を返す ---
+PREREQ271_GH_UNAUTH_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-prereq271-ghunauth.XXXXXX")"
+cat > "${PREREQ271_GH_UNAUTH_BIN}/gh" <<'FAKE_GH_UNAUTH271'
+#!/bin/bash
+exit 1
+FAKE_GH_UNAUTH271
+chmod +x "${PREREQ271_GH_UNAUTH_BIN}/gh"
+PREREQ271_GH_UNAUTH="$(gh_warning_message_with_path "${PREREQ271_GH_UNAUTH_BIN}:${PATH}")"
+case "$PREREQ271_GH_UNAUTH" in
+  *"未認証です"*)
+    pass "gh_warning_message: 未認証でも警告を返す（#271）" ;;
+  *)
+    fail "gh_warning_message: 未認証でも警告を返す（#271）" "message=[${PREREQ271_GH_UNAUTH}]" ;;
+esac
+
+# --- gh があり認証済みなら何も出力しない ---
+PREREQ271_GH_OK_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-prereq271-ghok.XXXXXX")"
+cat > "${PREREQ271_GH_OK_BIN}/gh" <<'FAKE_GH_OK271'
+#!/bin/bash
+exit 0
+FAKE_GH_OK271
+chmod +x "${PREREQ271_GH_OK_BIN}/gh"
+PREREQ271_GH_OK="$(gh_warning_message_with_path "${PREREQ271_GH_OK_BIN}:${PATH}")"
+assert_eq "gh_warning_message: ghがあり認証済みなら何も出力しない（#271）" "" "$PREREQ271_GH_OK"
+
+# --- docker/gh が両方無い環境でも check-prerequisites.sh 全体は exit 0（ブロックしない） ---
+PREREQ271_NODEPS_REPO="$(make_temp_repo)"
+PREREQ271_NODEPS_STDERR="$(mktemp "${TMPDIR:-/tmp}/dw-test-prereq271-nodeps-stderr.XXXXXX")"
+PREREQ271_NODEPS_PATH="$(strip_tools_from_path docker gh)"
+PREREQ271_NODEPS_EXIT=0
+(
+  cd "$PREREQ271_NODEPS_REPO" || exit 1
+  PATH="$PREREQ271_NODEPS_PATH" bash "$CHECK_PREREQS_SCRIPT" 1>/dev/null 2>"$PREREQ271_NODEPS_STDERR"
+) || PREREQ271_NODEPS_EXIT=$?
+
+assert_exit_code "docker/ghが両方無くてもexit 0（ブロックしない、#271）" 0 "$PREREQ271_NODEPS_EXIT"
+
+if grep -q "Docker がインストールされていません" "$PREREQ271_NODEPS_STDERR" && \
+   grep -q "gh (GitHub CLI) がインストールされていません" "$PREREQ271_NODEPS_STDERR"; then
+  pass "check-prerequisites.sh 本体からもdocker/ghの警告が両方stderrに出る（#271）"
+else
+  fail "check-prerequisites.sh 本体からもdocker/ghの警告が両方stderrに出る（#271）" \
+    "stderr=[$(cat "$PREREQ271_NODEPS_STDERR")]"
+fi
+
+# --- git リポジトリ外では従来どおり exit 2（代替が無く、どのスキルも成立しない） ---
+PREREQ271_NONGIT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-prereq271-nongit.XXXXXX")"
+PREREQ271_NONGIT_EXIT=0
+(
+  cd "$PREREQ271_NONGIT_DIR" || exit 1
+  PATH="${CRLF_FAKE_BIN_DIR}:${PATH}" bash "$CHECK_PREREQS_SCRIPT" 1>/dev/null 2>/dev/null
+) || PREREQ271_NONGIT_EXIT=$?
+
+assert_exit_code "gitリポジトリ外では従来どおりexit 2（#271）" 2 "$PREREQ271_NONGIT_EXIT"
+
+# --- errors 配列に docker/gh の不在・未認証の文言が追加されていないこと（静的検査） ---
+if grep -n "errors+=" "$CHECK_PREREQS_SCRIPT" | \
+   grep -qiE "Docker.*インストールされていません|Docker デーモンが起動していません|gh \(GitHub CLI\) がインストールされていません|gh が未認証です"; then
+  fail "errors 配列にdocker/ghの不在・未認証が追加されていない（#271）" \
+    "$(grep -n "errors+=" "$CHECK_PREREQS_SCRIPT" | \
+       grep -iE "Docker.*インストールされていません|Docker デーモンが起動していません|gh \(GitHub CLI\) がインストールされていません|gh が未認証です")"
+else
+  pass "errors 配列にdocker/ghの不在・未認証が追加されていない（#271）"
+fi
+
+# --- README.md「前提条件」節が新しい扱い（非ブロッキング警告）を反映している ---
+PREREQ271_README="${REPO_ROOT}/README.md"
+if grep -qF "DEV_WORKFLOW_SANDBOX_HOST=1" "$PREREQ271_README"; then
+  pass "README.md: 前提条件節にDEV_WORKFLOW_SANDBOX_HOST=1への言及がある（#271）"
+else
+  fail "README.md: 前提条件節にDEV_WORKFLOW_SANDBOX_HOST=1への言及がある（#271）"
+fi
+
+if grep -qF "ブロックはされません" "$PREREQ271_README"; then
+  pass "README.md: Docker/ghの不在・未認証がブロックされない旨の記載がある（#271）"
+else
+  fail "README.md: Docker/ghの不在・未認証がブロックされない旨の記載がある（#271）"
+fi
+
+# ---------------------------------------------------------------------------
 # 検出時の警告から dev-workflow:setup への導線（Task #222）
 # ---------------------------------------------------------------------------
 

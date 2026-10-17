@@ -48,25 +48,34 @@ claude --plugin-dir /path/to/dev-workflow
 
 ## 前提条件
 
-- [GitHub CLI (`gh`)](https://cli.github.com/) がインストール・認証済み
-- [Docker](https://docs.docker.com/get-docker/) がインストール・起動済み
-- Git リポジトリ内で実行
-- サンドボックス定義（`Dockerfile.dev` または `docker-compose.dev.yml`）を次の3択のいずれかで
-  供給する。**駆動先の業務リポジトリを汚さない選択肢を第一候補とする**（詳細は下記
-  「Docker sandbox のセットアップ」参照）
+- **Git リポジトリ内で実行（必須・ブロック）**。代替手段が無く、どのスキルも成立しないため、
+  セッション開始時にブロックされます
+- [GitHub CLI (`gh`)](https://cli.github.com/) のインストール・認証は**推奨であり必須ではありません**。
+  クラウド（Docker 無しで走る環境）では `gh auth status` が通らないことが多いため、Task #271
+  で非ブロッキング警告に格下げしました。GitHub 操作には MCP バックエンドという代替があります
+- [Docker](https://docs.docker.com/get-docker/) のインストール・起動も**推奨であり必須ではありません**。
+  `run` / `goal` でサンドボックス実行を使う場合にのみ必要です。クラウド等で Docker を使わない場合は
+  `DEV_WORKFLOW_SANDBOX_HOST=1` で host モードが使えます
+- 上記2つが満たされない場合は**セッション開始時に警告が出ますが、ブロックはされません**
+  （`run` / `goal` のように実際にサンドボックス実行・GitHub 操作が必要なスキルの冒頭で、
+  改めて必須判定を行う想定です）
+- サンドボックス実行（`run` / `goal` 等）を使う場合は、サンドボックス定義（`Dockerfile.dev`
+  または `docker-compose.dev.yml`）を次の3択のいずれかで供給する。**駆動先の業務リポジトリを
+  汚さない選択肢を第一候補とする**（詳細は下記「Docker sandbox のセットアップ」参照）
   1. 規約パスに置く（推奨）: `~/.claude/dev-workflow/sandbox/<リポジトリ名>/Dockerfile.dev`
      （または同ディレクトリの `docker-compose.dev.yml`）
   2. 環境変数で渡す: `DEV_WORKFLOW_DOCKERFILE` / `DEV_WORKFLOW_DOCKER_COMPOSE_FILE` /
      `DEV_WORKFLOW_DOCKER_IMAGE`
   3. リポジトリ直下に置いてコミットする（チームで run を共有する場合のみ）
-- 上記が満たされない場合、セッション開始時にブロックされます
 
 ### 自動設定（SessionStart時）
 
 プラグインのセッション開始フックが以下を自動的に行います:
 
-- **`gh auth setup-git`** — gitの認証をgh CLIに委任し、push/PR作成時のアカウント選択ポップアップを防止
-- **Docker起動チェック** — Docker デーモンが未起動の場合にブロック
+- **`gh auth setup-git`** — gh があって認証済みの場合のみ、gitの認証をgh CLIに委任し、
+  push/PR作成時のアカウント選択ポップアップを防止
+- **Docker / gh の状態通知** — Docker 不在・デーモン未起動、gh 不在・未認証は**警告として
+  通知されますが、セッションはブロックされません**（Task #271）
 
 ## 任意依存の外部ツール
 

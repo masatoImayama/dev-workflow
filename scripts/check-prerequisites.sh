@@ -30,6 +30,48 @@ lf に固定されていません。Windows で生成した .sh が CRLF のま�
 MSG
 }
 
+docker_warning_message() {
+  # docker_warning_message
+  # Docker 不在・デーモン停止を非ブロッキング警告として返す（#271）。
+  # クラウドでは Docker に接続できないことが多く、Docker を使わないスキル
+  # （grill-me / spec / plan 等）まで止めてしまうため errors 配列には積まない。
+  # run / goal のように実際にサンドボックス実行が必要なスキルの冒頭での
+  # 必須判定への移設は #272 で行う（ここでは「止まる場所を移すだけ」に留める）。
+  # optional_tools_notice と同じく echo で組み立てる（cat は外部コマンドのため、
+  # テストで PATH を絞った環境では解決できず、非ブロッキング通知自体の検証が壊れる）。
+  if ! command -v docker &> /dev/null; then
+    echo "[dev-workflow] 警告: Docker がインストールされていません。"
+    echo "  run / goal でサンドボックス実行を使う場合は必須です。"
+    echo "  https://docs.docker.com/get-docker/ からインストールしてください。"
+    echo "  クラウド等で Docker を使わない場合は DEV_WORKFLOW_SANDBOX_HOST=1 で host モードが使えます。"
+    return 0
+  fi
+
+  if ! docker info &> /dev/null; then
+    echo "[dev-workflow] 警告: Docker デーモンが起動していません。"
+    echo "  run / goal でサンドボックス実行を使う場合は必須です。Docker Desktop を起動してください。"
+    echo "  クラウド等で Docker を使わない場合は DEV_WORKFLOW_SANDBOX_HOST=1 で host モードが使えます。"
+  fi
+}
+
+gh_warning_message() {
+  # gh_warning_message
+  # gh 不在・未認証を非ブロッキング警告として返す（#271）。GitHub 操作には MCP バックエンドと
+  # いう代替があるため（Epic #267 §5）、gh 単体の不在・未認証はセッションを止める理由にならない。
+  # optional_tools_notice と同じく echo で組み立てる（理由は docker_warning_message 参照）。
+  if ! command -v gh &> /dev/null; then
+    echo "[dev-workflow] 警告: gh (GitHub CLI) がインストールされていません。"
+    echo "  https://cli.github.com/ からインストールしてください。"
+    echo "  GitHub 操作には MCP バックエンドという代替もあります。"
+    return 0
+  fi
+
+  if ! gh auth status &> /dev/null; then
+    echo "[dev-workflow] 警告: gh が未認証です。'gh auth login' を実行してください。"
+    echo "  GitHub 操作には MCP バックエンドという代替もあります。"
+  fi
+}
+
 optional_tools_notice() {
   # optional_tools_notice
   # 任意ツール（context7 / code-review-graph）の導入状況を非ブロッキングで通知する。
@@ -66,17 +108,14 @@ fi
 
 errors=()
 
-# GitHub CLI（必須：epic/task issue管理に必要）
-if ! command -v gh &> /dev/null; then
-  errors+=("gh (GitHub CLI) がインストールされていません。https://cli.github.com/ からインストールしてください。")
+# gh 不在・未認証（非ブロッキング警告。#271）。GitHub操作にはMCPバックエンドの代替があるため
+# errors 配列には積まない。crlf_warning_message / optional_tools_notice と同じ作法に揃える。
+gh_warning="$(gh_warning_message)"
+if [ -n "$gh_warning" ]; then
+  echo "$gh_warning" >&2
 fi
 
-# gh 認証チェック
-if command -v gh &> /dev/null && ! gh auth status &> /dev/null; then
-  errors+=("gh が未認証です。'gh auth login' を実行してください。")
-fi
-
-# gh auth setup-git: gitの認証をghに委任する
+# gh auth setup-git: gitの認証をghに委任する（既存挙動。gh があって認証済みのときのみ実行）
 # これがないとgit push時にWindows Credential Managerのアカウント選択ポップアップが出て自律動作が中断する
 if command -v gh &> /dev/null && gh auth status &> /dev/null; then
   # gh がgitのcredential helperとして設定されているか確認
@@ -90,17 +129,15 @@ if command -v gh &> /dev/null && gh auth status &> /dev/null; then
   fi
 fi
 
-# Docker（必須：sandbox実行に必要）
-if ! command -v docker &> /dev/null; then
-  errors+=("Docker がインストールされていません。https://docs.docker.com/get-docker/ からインストールしてください。")
+# Docker 不在・デーモン停止（非ブロッキング警告。#271）。クラウドでは接続できないことが多いため
+# errors 配列には積まない。
+docker_warning="$(docker_warning_message)"
+if [ -n "$docker_warning" ]; then
+  echo "$docker_warning" >&2
 fi
 
-# Docker 起動チェック
-if command -v docker &> /dev/null && ! docker info &> /dev/null; then
-  errors+=("Docker デーモンが起動していません。Docker Desktop を起動してください。")
-fi
-
-# git リポジトリチェック
+# git リポジトリチェック（従来どおりブロック。代替が無く、どのスキルも成立しないため #271 でも
+# 格下げしない）
 if ! git rev-parse --is-inside-work-tree &> /dev/null 2>&1; then
   errors+=("git リポジトリ内で実行してください。")
 fi
