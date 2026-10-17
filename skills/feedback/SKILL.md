@@ -26,6 +26,14 @@ argument-hint: "[--since 7 | --epic N | --upstream | --list]"
 `core/instructions.md` の「応答言語」節）。台帳のキー（`scope` / `category` / `key` /
 `severity` 等、`feedback-ledger.sh` が機械的に照合する値）は対象外である。
 
+## GitHub操作について
+
+Phase 5（還流）の `gh issue create` / `gh issue list --search`（`references/upstream.md`）は
+**ghバックエンドでの実行例**である。GitHub操作の選択規則・MCP（`mcp__github__*`）との対応表は
+`core/references/github-access.md` が正本であり、ここでは再掲しない。`gh` が使えるかどうかは
+`feedback-ledger.sh gh-available` で判定する（ad-hocに `gh auth status` を直接確認しない）。
+`gh` が使えない環境では同文書の対応表から該当する `mcp__github__*` ツールを選ぶ。
+
 ## 絶対に守る範囲（最初に読むこと）
 
 **レビューと修正の対象は、実行中のプロジェクト固有の範囲に限定する。**

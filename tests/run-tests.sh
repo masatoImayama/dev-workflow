@@ -20534,6 +20534,71 @@ assert_eq "dev_workflow_gh_available: 2回呼んでも gh api rate_limit はプ�
 unset DE_GH_API_CALLS
 
 # ---------------------------------------------------------------------------
+# スキル本文のGitHub操作がgithub-access.md経由であること（Task #276）
+#
+# 素の `gh issue` / `gh pr` / `gh api` 直書きが残っていても、ghバックエンド限定で
+# あることが明示されていれば許容する（完了条件の「または」側）。判定は
+# 「ファイルがgh issue/pr/apiを含むなら、同じファイル内にgithub-access.mdへの参照も
+# 含むこと」という最低条件にする（個々の呼び出し直前に毎回書く必要はない。
+# core/instructions.md「応答言語」節と同じ『正本を再掲しない』方針）。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== スキル本文のGitHub操作がgithub-access.md経由であること（#276） =="
+
+GHSKILL_BACKEND_MARKER='core/references/github-access.md'
+GHSKILL_CALL_PATTERN='gh (issue|pr|api)([[:space:]]|$)'
+
+for GHSKILL_FILE in \
+  skills/run/SKILL.md \
+  skills/run/references/review.md \
+  skills/run/references/wave-review.md \
+  skills/epic/SKILL.md \
+  skills/plan/SKILL.md \
+  skills/feedback/SKILL.md \
+  skills/feedback/references/upstream.md \
+  core/roles/planner.md \
+; do
+  GHSKILL_PATH="${REPO_ROOT}/${GHSKILL_FILE}"
+  if [ ! -f "$GHSKILL_PATH" ]; then
+    fail "#276: ${GHSKILL_FILE} が存在する" "ファイルが見つかりません"
+    continue
+  fi
+
+  GHSKILL_HAS_CALL=0
+  grep -E "$GHSKILL_CALL_PATTERN" "$GHSKILL_PATH" >/dev/null 2>&1 && GHSKILL_HAS_CALL=1
+
+  if [ "$GHSKILL_HAS_CALL" -eq 0 ]; then
+    pass "#276: ${GHSKILL_FILE} に素の gh issue/pr/api 呼び出しは無い"
+    continue
+  fi
+
+  if grep -qF "$GHSKILL_BACKEND_MARKER" "$GHSKILL_PATH"; then
+    pass "#276: ${GHSKILL_FILE}: gh呼び出しが残る場合はghバックエンド限定である旨が明示されている"
+  else
+    fail "#276: ${GHSKILL_FILE}: gh呼び出しが残る場合はghバックエンド限定である旨が明示されている" \
+      "gh issue/pr/apiを含むが ${GHSKILL_BACKEND_MARKER} への参照が見つからない"
+  fi
+done
+unset GHSKILL_FILE GHSKILL_PATH GHSKILL_HAS_CALL GHSKILL_BACKEND_MARKER GHSKILL_CALL_PATTERN
+
+# --- core/references/github-access.md 自身が存在し、選択規則を1つだけ定めている ---
+GHSKILL_DOC="${REPO_ROOT}/core/references/github-access.md"
+if [ -f "$GHSKILL_DOC" ]; then
+  pass "#276: core/references/github-access.md が存在する（正本）"
+else
+  fail "#276: core/references/github-access.md が存在する（正本）" "ファイルが見つかりません"
+fi
+
+case "$(cat "$GHSKILL_DOC" 2>/dev/null)" in
+  *'dev_workflow_gh_available'*)
+    pass "#276: github-access.md が dev_workflow_gh_available（#268）を選択規則として参照している" ;;
+  *)
+    fail "#276: github-access.md が dev_workflow_gh_available（#268）を選択規則として参照している" \
+      "参照が見つからない" ;;
+esac
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 

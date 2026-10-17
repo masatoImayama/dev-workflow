@@ -58,6 +58,9 @@ developer_instructions = '''
 
 ### Phase 3: GitHub issue作成・ブランチ作成
 
+GitHub操作（issue作成・コメント等）は `gh` が使えなければ MCP（`mcp__github__*`）を使う。
+選択規則・対応表は `core/references/github-access.md` が正本であり、ここでは再掲しない。
+
 共通ルールの「ラベル」「タスクの粒度」に従ってラベルを用意したうえで、以下の順に作成する。
 
 1. Epic issue を作成する（`epic` ラベル、仕様書・計画書を `<details>` タグで本文に埋め込む）

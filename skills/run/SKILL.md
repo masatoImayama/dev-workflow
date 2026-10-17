@@ -29,6 +29,20 @@ worktree もサブエージェントの isolation worktree も**追加設定な�
 generator の Read/Edit のたびに確認が入る（＝自律動作が止まる）。だから worktree は必ず
 `.claude/worktrees/` 配下に作る。
 
+## GitHub操作について
+
+このスキル本文の `gh issue` / `gh pr` のbash片は**ghバックエンドでの実行例**である。
+GitHub操作（issue参照・コメント・作成・PR作成等）の選択規則・`gh`とMCP（`mcp__github__*`）の
+対応表は `core/references/github-access.md` が正本であり、ここでは再掲しない。`gh` が
+使えない環境（クラウド等）では、同文書の対応表から該当する `mcp__github__*` ツールを選ぶ。
+
+下記「起動時の確認」の `!`gh issue view $ARGUMENTS ...`` / `!`gh issue list ...`` の2行は
+Claude Codeがプロンプト構築時に自動実行する bash 直書き（コンテキスト注入）であり、
+MCPツール呼び出しに置き換えられない（MCPはツール呼び出しであり bash から呼べないため）。
+**この2行はghバックエンド限定である。** `gh` が使えない環境ではこの自動注入が空になりうるため、
+以降のPhaseで必要な情報（Epic本文・Task一覧）が不足していると感じた場合は、
+`mcp__github__*` で明示的に取得し直すこと。
+
 ## 起動時の確認
 
 **リポジトリ衛生プリフライトを最初に実行する。** git追跡された `.claude/settings.local.json`
