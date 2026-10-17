@@ -21236,6 +21236,110 @@ fi
 unset NS278_RUN_SKILL_BODY NS278_README_BODY
 
 # ---------------------------------------------------------------------------
+# プラグイン供給手順とクラウド節をREADME/setupに追加する（Task #279）
+#
+# クラウドセッションはユーザーレベル設定を引き継がず、マーケットプレイスのsource.pathも
+# ローカル絶対パスのため解決できない。README「クラウドマシンから使う」節・
+# skills/setup/SKILL.mdのクラウド案内が、この背景・テンプレート・secret非コミット・
+# DEV_WORKFLOW_SANDBOX_HOST=1の2通りの渡し方を明記していることを静的に検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== プラグイン供給手順とクラウド節（#279） =="
+
+NS279_README_BODY="$(cat "${REPO_ROOT}/README.md")"
+NS279_SETUP_BODY="$(cat "${REPO_ROOT}/skills/setup/SKILL.md")"
+
+# --- README.md: 「クラウドマシンから使う」節が新設されている ---
+if grep -qF '## クラウドマシンから使う' "${REPO_ROOT}/README.md"; then
+  pass "README.md: 「クラウドマシンから使う」節が新設されている（#279）"
+else
+  fail "README.md: 「クラウドマシンから使う」節が新設されている（#279）"
+fi
+
+# --- README.md: extraKnownMarketplacesのテンプレートがあり、source.pathを含まない ---
+NS279_CLOUD_SECTION="$(awk '/^## クラウドマシンから使う$/{f=1; next} /^## /{f=0} f' "${REPO_ROOT}/README.md")"
+case "$NS279_CLOUD_SECTION" in
+  *'extraKnownMarketplaces'*)
+    pass "README.md: クラウド節にextraKnownMarketplacesのテンプレートがある（#279）" ;;
+  *)
+    fail "README.md: クラウド節にextraKnownMarketplacesのテンプレートがある（#279）" \
+      "記述が見つからない" ;;
+esac
+
+if printf '%s' "$NS279_CLOUD_SECTION" | grep -qF '"path"'; then
+  fail "README.md: クラウド節のテンプレートがローカル絶対パス（source.path）を含まない（#279）" \
+    "\"path\" キーが見つかった"
+else
+  pass "README.md: クラウド節のテンプレートがローカル絶対パス（source.path）を含まない（#279）"
+fi
+
+case "$NS279_CLOUD_SECTION" in
+  *'ローカル絶対パス'*'書いてはならない'*)
+    pass "README.md: extraKnownMarketplacesはgit URLのみでローカル絶対パスを書かない旨が明記されている（#279）" ;;
+  *)
+    fail "README.md: extraKnownMarketplacesはgit URLのみでローカル絶対パスを書かない旨が明記されている（#279）" \
+      "記述が見つからない" ;;
+esac
+
+# --- README.md: enabledPlugins / permissions.allow のテンプレートがある ---
+case "$NS279_CLOUD_SECTION" in
+  *'enabledPlugins'*'dev-workflow@dev-workflow-marketplace'*)
+    pass "README.md: クラウド節にenabledPluginsのテンプレートがある（#279）" ;;
+  *)
+    fail "README.md: クラウド節にenabledPluginsのテンプレートがある（#279）" \
+      "記述が見つからない" ;;
+esac
+
+case "$NS279_CLOUD_SECTION" in
+  *'permissions.allow'*'git'*'gh'*)
+    pass "README.md: クラウド節にpermissions.allow（git/gh/ビルド系最小セット）の案内がある（#279）" ;;
+  *)
+    fail "README.md: クラウド節にpermissions.allow（git/gh/ビルド系最小セット）の案内がある（#279）" \
+      "記述が見つからない" ;;
+esac
+
+# --- README.md: secretをコミットしてはならないことが明示されている ---
+case "$NS279_CLOUD_SECTION" in
+  *'secret は書かない'*'settings.local.json'*)
+    pass "README.md: secretをコミットせずsettings.local.jsonに残す旨が明示されている（#279）" ;;
+  *)
+    fail "README.md: secretをコミットせずsettings.local.jsonに残す旨が明示されている（#279）" \
+      "記述が見つからない" ;;
+esac
+
+# --- README.md: CLAUDE_CODE_SYNC_PLUGINSを当てにしない旨と実測根拠が書かれている ---
+case "$NS279_CLOUD_SECTION" in
+  *'CLAUDE_CODE_SYNC_PLUGINS'*'同期先のフォルダが空だった'*)
+    pass "README.md: CLAUDE_CODE_SYNC_PLUGINSを当てにしない旨と実測根拠が明記されている（#279）" ;;
+  *)
+    fail "README.md: CLAUDE_CODE_SYNC_PLUGINSを当てにしない旨と実測根拠が明記されている（#279）" \
+      "記述が見つからない" ;;
+esac
+
+# --- README.md: DEV_WORKFLOW_SANDBOX_HOST=1の渡し方が2通り併記され、副作用（ローカルにも
+#     影響する）が明記されている ---
+case "$NS279_CLOUD_SECTION" in
+  *'クラウドセッション側の環境変数として渡す'*'.claude/settings.json'*'env'*'ローカルでも host モードになる'*)
+    pass "README.md: DEV_WORKFLOW_SANDBOX_HOST=1の2通りの渡し方と副作用が明記されている（#279）" ;;
+  *)
+    fail "README.md: DEV_WORKFLOW_SANDBOX_HOST=1の2通りの渡し方と副作用が明記されている（#279）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/setup/SKILL.md: クラウド環境向けの案内があり、README「クラウドマシンから使う」
+#     節へ導線がある ---
+case "$NS279_SETUP_BODY" in
+  *'クラウド'*'クラウドマシンから使う'*)
+    pass "skills/setup/SKILL.md: クラウド環境向けにREADMEのクラウド節への導線がある（#279）" ;;
+  *)
+    fail "skills/setup/SKILL.md: クラウド環境向けにREADMEのクラウド節への導線がある（#279）" \
+      "記述が見つからない" ;;
+esac
+
+unset NS279_README_BODY NS279_SETUP_BODY NS279_CLOUD_SECTION
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 

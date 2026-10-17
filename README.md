@@ -46,6 +46,81 @@ claude
 claude --plugin-dir /path/to/dev-workflow
 ```
 
+## クラウドマシンから使う
+
+上記「インストール」はユーザーレベル設定（`~/.claude/settings.json`）にプラグインの有効化が
+閉じる方法である。**Claude Code のクラウドセッション（使い捨てコンテナ）はこのユーザー設定を
+引き継がない。** さらに `/plugin marketplace add` で追加したマーケットプレイスの
+`source.path` は、追加した**その場のマシンのローカル絶対パス**（例: `C:\Users\...`）を指す
+ため、別マシンであるクラウドコンテナには存在せず解決できない。この2つが重なり、
+**クラウドセッションでは `/dev-workflow:run` コマンド自体が存在しない**（Epic #267 背景）。
+
+`CLAUDE_CODE_SYNC_PLUGINS=1` を設定するとユーザー設定をクラウドへ同期する仕組みがあるが、
+**実測では同期先のフォルダが空だった。** そのため同期を当てにしない。
+
+代わりに、**駆動先リポジトリの `.claude/settings.json`（git 追跡＝コミット対象。チームで
+共有する設定）にプラグインの有効化設定を直接書く。** これはクラウドセッションにも常に
+含まれるため、ユーザー設定やローカル絶対パスに依存しない。
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "dev-workflow-marketplace": {
+      "source": {
+        "source": "git",
+        "repo": "https://github.com/masatoImayama/claude-dev-workflow-marketplace.git"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "dev-workflow@dev-workflow-marketplace": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Bash(gh *)",
+      "Bash(npm *)",
+      "Bash(make *)"
+    ]
+  }
+}
+```
+
+- **`extraKnownMarketplaces` は git URL のみを指定する。ローカル絶対パス（`source.path`）を
+  書いてはならない。** クラウドコンテナのファイルシステムにはそのパスが存在せず、解決に失敗する
+  （上記の背景そのもの）
+- `enabledPlugins` に `dev-workflow@dev-workflow-marketplace` を書き、プラグインを有効化する
+- `permissions.allow` には **`git` / `gh` / ビルド系コマンドの最小セット**を含める。
+  `skills/run/SKILL.md`「パーミッション確認」節（`:20`）が要求する自動承認であり、これが
+  無いと確認プロンプト（「Do you want to proceed?」）が自律ループを止める。上記の
+  `npm` / `make` はあくまで例であり、**プロジェクトの実際のビルド・テストコマンドに
+  合わせて追加・変更する**こと（広範な `Bash(*)` を置かない。git 追跡された設定に
+  広範な allow をコミットする危険性は上記「YOLOモード」節「パーミッション設定」参照）
+- **secret は書かない。** Slack webhook（`notify-slack.sh` が使う `.claude/slack-webhook`）・
+  APIキー（`JEV_API_KEY` 等）は `.claude/settings.local.json`（gitignore 対象。コミットされない）
+  に残す。`.claude/settings.json` は駆動先リポジトリに**コミットされ、clone した全員に見える**
+  ため、secret を置くと漏洩する
+
+### `DEV_WORKFLOW_SANDBOX_HOST=1` の渡し方（2通り。副作用が異なる）
+
+クラウドでは Docker sandbox が使えないことが多く、host モード（上記「前提条件」「Docker
+sandbox のセットアップ」参照）が必要になる。渡し方は2通りあり、**副作用が異なる**:
+
+1. **クラウドセッション側の環境変数として渡す（推奨）。** そのセッションにのみ効き、
+   ローカルには一切影響しない
+2. **`.claude/settings.json` の `env` に書く。** この設定ファイルはローカルでも読まれるため、
+   **同じ値がローカルのセッションにも効き、ローカルでも host モードになる**（Docker
+   コンテナ分離が効かなくなる）。この副作用を理解した上で、チーム全体を host モードに
+   揃えたい場合にのみ使うこと
+
+```json
+{
+  "env": {
+    "DEV_WORKFLOW_SANDBOX_HOST": "1"
+  }
+}
+```
+
 ## 前提条件
 
 - **Git リポジトリ内で実行（必須・ブロック）**。代替手段が無く、どのスキルも成立しないため、
