@@ -4161,17 +4161,34 @@ fi
 
 # --- ケース12b: gh不可時（DEV_WORKFLOW_GH_UNAVAILABLE=1）は --epic モードで
 #     理由を明示して停止する。黙って空のPLAN_LIST（1レーン相当）に落とさない（Task #275）。
-#     実際の403環境やネットワークは不要（#268 の dev_workflow_gh_available を直接上書きする）。 ---
+#     load_from_gh は実際に `gh issue list` を呼び、その終了コードで失敗を判定する実装
+#     であり、DEV_WORKFLOW_GH_UNAVAILABLE 自体は失敗後のメッセージ組み立てにしか使わない
+#     （呼び出し自体はゲートしない）。ケース12と同様にPATH経由で「issue listが非ゼロ終了
+#     する偽のgh」を置いて失敗を再現する（#284。gh導入済み環境で本物のghがこのリポジトリに
+#     対して成功し、検証したい分岐を通らなくなることの対策）。
+#     実際の403環境や実リポジトリへのネットワークアクセスは不要
+#     （#268 の dev_workflow_gh_available は DEV_WORKFLOW_GH_UNAVAILABLE=1 により実gh抜きで
+#     直接偽に上書きされる） ---
+PW_NOGH_FAKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-pw-noghfake.XXXXXX")"
+cat > "${PW_NOGH_FAKE_DIR}/gh" <<'FAKE_GH_FAIL'
+#!/bin/bash
+# tests/run-tests.sh 用の偽 gh。issue list 呼び出しを含め常に失敗させる（exit 1）。
+# 実ネットワークには一切触れない。
+exit 1
+FAKE_GH_FAIL
+chmod +x "${PW_NOGH_FAKE_DIR}/gh"
+
 PW_NOGH_STDERR="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw-nogh-stderr.XXXXXX")"
-DEV_WORKFLOW_GH_UNAVAILABLE=1 bash "$PLAN_WAVES_SCRIPT" --epic 14 >/dev/null 2>"$PW_NOGH_STDERR"
-assert_exit_code "gh不可時: --epic モードは exit 2 で停止する（#275）" 2 "$?"
+PATH="${PW_NOGH_FAKE_DIR}:${PATH}" DEV_WORKFLOW_GH_UNAVAILABLE=1 bash "$PLAN_WAVES_SCRIPT" --epic 14 >/dev/null 2>"$PW_NOGH_STDERR"
+assert_exit_code "gh不可時: --epic モードは exit 2 で停止する（#275, #284）" 2 "$?"
 case "$(cat "$PW_NOGH_STDERR")" in
-  *'gh'*'--from-file'*) pass "gh不可時: --from-file への切り替えを案内する（#275）" ;;
-  *) fail "gh不可時: --from-file への切り替えを案内する（#275）" "$(cat "$PW_NOGH_STDERR")" ;;
+  *'gh'*'--from-file'*) pass "gh不可時: --from-file への切り替えを案内する（#275, #284）" ;;
+  *) fail "gh不可時: --from-file への切り替えを案内する（#275, #284）" "$(cat "$PW_NOGH_STDERR")" ;;
 esac
 
-# gh不可でも --from-file モードは影響を受けない（ファイル入力経路はgh非依存であることの確認）
-DEV_WORKFLOW_GH_UNAVAILABLE=1 bash "$PLAN_WAVES_SCRIPT" --from-file "$PW_DEPSWARN_NONE_FIXTURE" >/dev/null 2>&1
+# gh不可でも --from-file モードは影響を受けない（ファイル入力経路はgh非依存であることの確認。
+# この経路はgh自体を呼ばないため偽ghは不要だが、念のため同じPATHを使い回す）
+PATH="${PW_NOGH_FAKE_DIR}:${PATH}" DEV_WORKFLOW_GH_UNAVAILABLE=1 bash "$PLAN_WAVES_SCRIPT" --from-file "$PW_DEPSWARN_NONE_FIXTURE" >/dev/null 2>&1
 assert_exit_code "gh不可でも --from-file モードは影響を受けない（#275）" 0 "$?"
 
 # 回帰: ghが使える環境（ケース12の偽gh。auth status/api rate_limitも暗黙に成功する）では
