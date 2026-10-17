@@ -142,7 +142,7 @@ Codex はプラグインフックの実行時に `PLUGIN_ROOT` / `PLUGIN_DATA` �
 | `effort: high` | `model_reasoning_effort` |
 | `tools:` / `disallowedTools:` | `sandbox_mode`（`read-only` / `workspace-write` / `danger-full-access`。**粒度は粗い**） |
 | `isolation: worktree` | **サブエージェント単位の相当物なし**（3.3.3参照） |
-| `maxTurns` | **相当物なし**（3.3.4参照） |
+| `maxTurns` | **相当物なし**（3.3.7参照） |
 | `color` | なし |
 
 **重要な非対称性: サブエージェント定義はプラグインで配布できない。**
@@ -214,6 +214,8 @@ Claude Code固有のMCPサーバー結線を前提にしており、Codex側に�
 「Codex版のdev-workflow-runはghに依存しており、mcp__github__へのフォールバックは未実装です」
 と明示してその場で停止する方針を採る。将来 Codex 側のMCP GitHub連携ツールが実測で確認できた
 時点で、Claude版と同じフォールバック経路を追加することを検討する。
+
+#### 3.3.7. ターン上限の相当物はない
 
 `maxTurns: 200` / `120` に相当する設定は Codex に存在しない。最も近いのは
 `features.rollout_budget`（`enabled` / `limit_tokens` / `prefill_token_weight` /
@@ -1119,7 +1121,7 @@ Task issue の `- 前提: #N` が作る依存グラフに基づくウェーブ�
 
 | 項目 | 結論 | 対応 |
 | --- | --- | --- |
-| `maxTurns` 相当の設定があるか | **無い。** 近いのは `features.rollout_budget` だが under development・既定オフ・トークン予算 | オーケストレーター側で反復回数を制御し、打ち切り条件はプロンプト規約で担保（3.3.4） |
+| `maxTurns` 相当の設定があるか | **無い。** 近いのは `features.rollout_budget` だが under development・既定オフ・トークン予算 | オーケストレーター側で反復回数を制御し、打ち切り条件はプロンプト規約で担保（3.3.7） |
 | サブエージェントを worktree に隔離できるか | **不可。** セッション単位の worktree は第一級機能だが、エージェント設定に作業ディレクトリのキーがない | generator の並行実行を諦め、Epicごと1 worktreeで逐次、またはシェルループが `codex exec -C` で割り当て（3.3.3） |
 | Codex marketplace の `source` に git 系があるか | **ある。** `git-subdir` / `url` / `npm` / `local`。`git-subdir` は現行の Claude Code 形式と同形 | 既存の marketplace リポジトリを両CLI共用にする（3.6） |
 
