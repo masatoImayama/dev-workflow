@@ -194,7 +194,22 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/watchdog.sh" --start --epic "$EPIC_NUM" --la
 
 **`docker build` / `docker compose up` を直接叩いてはならない。** イメージのビルド・
 コンテナの起動・compose サービスの起動はすべて `sandbox-exec.sh` に集約されている（後述）。
-スキル側がやることは、`--print-plan` で解決結果を確認し、`--warm` を1回流すことだけである。
+スキル側がやることは、`--print-plan` で解決結果（`mode=dockerfile` / `mode=compose` /
+`mode=host` / `mode=none`）を確認し、**mode ごとに次の3つへ分岐すること**である
+（#271 で SessionStart の Docker 必須判定は非ブロッキング警告へ格下げされたため、
+**実際に Docker が必要なタイミング＝ここ run/goal の冒頭**で止める責務を引き継ぐ）。
+
+- **`mode=dockerfile` / `mode=compose`**: Docker の有無とデーモン起動をここで確認し、
+  **不足していればここで停止する**
+- **`mode=host`**: Docker を使わずホスト上で直接実行する。**警告を出して継続**し、
+  **Epic issue に「host モードで実行した」事実をコメントで残す**（後からログを見た人が
+  「コンテナ分離無しで走った」と判別できるようにするため）。この場合、generator /
+  evaluator の分離は**コンテナ分離（epicごとのコンテナ）から worktree 分離に代わる**。
+  各レーンは既に isolation worktree を使っているため**追加実装は不要**であり、ここでの
+  変更は「隔離の説明が変わる」だけである
+- **`mode=none`**: サンドボックス定義が見つからない。**従来どおりエラーで停止する**
+  （供給経路の案内に「クラウドでは `DEV_WORKFLOW_SANDBOX_HOST=1` で host モードが
+  使える」旨も含める）
 
 ```bash
 cd "$EPIC_WT"   # 以降の作業ディレクトリを Epic 専用 worktree に固定
@@ -211,10 +226,38 @@ if printf '%s\n' "$PLAN" | grep -q '^mode=none$'; then
   echo "     雛形を自動生成する場合: bash ${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh --init"
   echo "  2. 環境変数で渡す: DEV_WORKFLOW_DOCKERFILE / DEV_WORKFLOW_DOCKER_COMPOSE_FILE / DEV_WORKFLOW_DOCKER_IMAGE"
   echo "  3. リポジトリ直下に置いてコミットする（チームで run を共有する場合のみ）"
+  echo "  クラウド等で Docker を使わない場合は DEV_WORKFLOW_SANDBOX_HOST=1 で host モードが使えます"
   exit 1
 fi
 
-# キャッシュを温める（イメージが無ければここで自動ビルドされる。最初のタスクにビルドコストを負担させない）
+# mode=host: サンドボックス定義未検出、または DEV_WORKFLOW_SANDBOX_HOST 明示指定により
+# Docker を使わずホスト上で直接実行する。隔離は generator/evaluator の isolation worktree
+# に委ねる（コンテナ分離 → worktree 分離。各レーンは既にworktree単位なので追加実装は不要）。
+# 警告を出して継続し、Epic issue に「host モードで実行した」事実をコメントで残す
+# （後からログを見た人がコンテナ分離無しで走ったと判別できるようにするため）
+if printf '%s\n' "$PLAN" | grep -q '^mode=host$'; then
+  echo "WARNING: サンドボックス定義が見つからないか DEV_WORKFLOW_SANDBOX_HOST が指定されたため、host モードで実行します。"
+  echo "WARNING: 実装・テスト・ビルドはDockerコンテナではなくホスト上で直接実行されます（隔離はworktree単位になります）。"
+  gh issue comment "$ARGUMENTS" \
+    --body "NOTE: このrunはサンドボックス定義未検出、または明示指定により host モード（Dockerコンテナ分離なし）で実行されました。generator/evaluatorの隔離はisolation worktreeに委ねられています。"
+fi
+
+# mode=dockerfile / mode=compose: 実際に Docker が必要になるのはここ。SessionStart
+# （check-prerequisites.sh）は非ブロッキング警告止まりなので（#271）、必須判定はここで
+# 行い、不足していれば停止する（従来 SessionStart が担っていたブロック責務の移設）
+if printf '%s\n' "$PLAN" | grep -qE '^mode=(dockerfile|compose)$'; then
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "ERROR: docker コマンドが見つかりません。https://docs.docker.com/get-docker/ からインストールしてください。"
+    exit 1
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    echo "ERROR: Docker デーモンが起動していません。Docker Desktop を起動してください。"
+    exit 1
+  fi
+fi
+
+# キャッシュを温める（イメージが無ければここで自動ビルドされる。最初のタスクにビルドコストを負担させない。
+# host モードでは --warm に渡したビルドコマンドがそのままホスト上で実行される）
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" --warm '[build-command]'
 ```
 
