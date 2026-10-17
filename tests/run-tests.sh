@@ -18152,7 +18152,7 @@ DOCTOR_MISSING_EXIT=0
     bash scripts/doctor.sh > "$DOCTOR_MISSING_OUT" 2>&1
 ) || DOCTOR_MISSING_EXIT=$?
 
-assert_exit_code "doctor.sh: gh/docker が両方無ければ exit 1（#218）" 1 "$DOCTOR_MISSING_EXIT"
+assert_exit_code "doctor.sh: gh/docker が両方無くても exit 0（警告のみ。#271/#273で変更）" 0 "$DOCTOR_MISSING_EXIT"
 
 for section in "必須依存" "任意依存" "サンドボックス" "リポジトリ衛生" "CRLF設定"; do
   if grep -qF "$section" "$DOCTOR_MISSING_OUT"; then
@@ -18183,7 +18183,7 @@ DOCTOR_UNAUTH_EXIT=0
     bash scripts/doctor.sh > "$DOCTOR_UNAUTH_OUT" 2>&1
 ) || DOCTOR_UNAUTH_EXIT=$?
 
-assert_exit_code "doctor.sh: gh未認証・docker未起動なら exit 1（#218）" 1 "$DOCTOR_UNAUTH_EXIT"
+assert_exit_code "doctor.sh: gh未認証・docker未起動でも exit 0（警告のみ。#271/#273で変更）" 0 "$DOCTOR_UNAUTH_EXIT"
 
 case "$(cat "$DOCTOR_UNAUTH_OUT")" in
   *"gh auth login"*) pass "doctor.sh: gh未認証時に 'gh auth login' の案内が出る（#218）" ;;
@@ -18350,6 +18350,202 @@ esac
 # ことを確認する（応答言語の不正値は REQUIRED_MISSING に影響させない契約。#254）。
 assert_exit_code "doctor.sh: DEV_WORKFLOW_LANG=fr（不正値）でも終了コードが変化しない（#254）" \
   0 "$DOCTOR_LANG_FR_EXIT"
+
+# ---------------------------------------------------------------------------
+# doctor.sh: クラウド診断・成立しない機能一覧（Task #273）
+# ---------------------------------------------------------------------------
+
+# --- ケース13: クラウド判定（上書き env で擬似再現）すると、クラウド向けの表示が出る ---
+DOCTOR_CLOUD_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  DEV_WORKFLOW_FORCE_REMOTE=true CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE=cloud_default \
+    HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_CLOUD_OUT" 2>&1
+)
+case "$(cat "$DOCTOR_CLOUD_OUT")" in
+  *"クラウド環境として判定されました"*) pass "doctor.sh: クラウド判定（擬似再現）でクラウド向けの表示が出る（#273）" ;;
+  *) fail "doctor.sh: クラウド判定（擬似再現）でクラウド向けの表示が出る（#273）" "$(cat "$DOCTOR_CLOUD_OUT")" ;;
+esac
+case "$(cat "$DOCTOR_CLOUD_OUT")" in
+  *"cloud_default"*) pass "doctor.sh: CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE の値が表示される（#273）" ;;
+  *) fail "doctor.sh: CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE の値が表示される（#273）" "$(cat "$DOCTOR_CLOUD_OUT")" ;;
+esac
+case "$(cat "$DOCTOR_CLOUD_OUT")" in
+  *"揮発します"*) pass "doctor.sh: クラウド判定時に \${HOME} 配下の永続物が毎セッション揮発する旨の注記が出る（#273）" ;;
+  *) fail "doctor.sh: クラウド判定時に \${HOME} 配下の永続物が毎セッション揮発する旨の注記が出る（#273）" "$(cat "$DOCTOR_CLOUD_OUT")" ;;
+esac
+
+# --- ケース14: ローカル判定時は揮発の注記が出ない（クラウド限定の注記であることの確認） ---
+case "$(cat "$DOCTOR_OK_OUT")" in
+  *"揮発します"*) fail "doctor.sh: ローカル判定時は揮発の注記が出ない（#273）" "$(cat "$DOCTOR_OK_OUT")" ;;
+  *) pass "doctor.sh: ローカル判定時は揮発の注記が出ない（#273）" ;;
+esac
+
+# --- ケース15: host になった理由（明示指定）が表示される ---
+DOCTOR_HOST_REASON_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_HOST_REASON_OUT" 2>&1
+)
+case "$(cat "$DOCTOR_HOST_REASON_OUT")" in
+  *"hostモード"*"明示指定"*) pass "doctor.sh: host になった理由（明示指定）が表示される（#273）" ;;
+  *) fail "doctor.sh: host になった理由（明示指定）が表示される（#273）" "$(cat "$DOCTOR_HOST_REASON_OUT")" ;;
+esac
+
+# --- ケース16: gh が認証済みだが api.github.com への疎通が失敗する場合、プロキシの可能性を明示する ---
+DOCTOR_PROXY_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-doctor-proxy-bin.XXXXXX")"
+cat > "${DOCTOR_PROXY_BIN}/gh" <<'SH'
+#!/bin/bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  exit 0
+fi
+if [ "$1" = "api" ]; then
+  exit 1
+fi
+exit 0
+SH
+chmod +x "${DOCTOR_PROXY_BIN}/gh"
+cat > "${DOCTOR_PROXY_BIN}/docker" <<'SH'
+#!/bin/bash
+exit 0
+SH
+chmod +x "${DOCTOR_PROXY_BIN}/docker"
+
+DOCTOR_PROXY_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+DOCTOR_PROXY_EXIT=0
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_PROXY_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_PROXY_OUT" 2>&1
+) || DOCTOR_PROXY_EXIT=$?
+
+assert_exit_code "doctor.sh: gh認証済みでもAPI疎通失敗なら警告のみでexit 0（#273）" 0 "$DOCTOR_PROXY_EXIT"
+
+case "$(cat "$DOCTOR_PROXY_OUT")" in
+  *"api.github.com"*"403"*) pass "doctor.sh: gh認証済み・API疎通失敗時にプロキシ(403)の可能性を明示する（#273）" ;;
+  *) fail "doctor.sh: gh認証済み・API疎通失敗時にプロキシ(403)の可能性を明示する（#273）" "$(cat "$DOCTOR_PROXY_OUT")" ;;
+esac
+
+case "$(cat "$DOCTOR_PROXY_OUT")" in
+  *"成立しない機能"*"ウェーブの自動計画"*"feedback 還流"*"jev shadow 検証"*) \
+    pass "doctor.sh: gh不可時に成立しない機能一覧（ウェーブ自動計画・feedback還流・jev shadow検証）が出る（#273）" ;;
+  *) fail "doctor.sh: gh不可時に成立しない機能一覧（ウェーブ自動計画・feedback還流・jev shadow検証）が出る（#273）" \
+    "$(cat "$DOCTOR_PROXY_OUT")" ;;
+esac
+
+case "$(cat "$DOCTOR_MISSING_OUT")" in
+  *"成立しない機能"*"ビルドキャッシュ"*"検証スタンプ"*"コンテナ隔離"*) \
+    pass "doctor.sh: docker不可時に成立しない機能一覧（ビルドキャッシュ・検証スタンプ・コンテナ隔離）が出る（#273）" ;;
+  *) fail "doctor.sh: docker不可時に成立しない機能一覧（ビルドキャッシュ・検証スタンプ・コンテナ隔離）が出る（#273）" \
+    "$(cat "$DOCTOR_MISSING_OUT")" ;;
+esac
+
+# --- ケース17: git リポジトリ外では exit 1 になる（唯一のブロック要因） ---
+DOCTOR_NONGIT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-doctor-nongit.XXXXXX")"
+mkdir -p "${DOCTOR_NONGIT_DIR}/scripts/lib"
+cp "${REPO_ROOT}/scripts/doctor.sh"              "${DOCTOR_NONGIT_DIR}/scripts/doctor.sh"
+cp "${REPO_ROOT}/scripts/check-prerequisites.sh" "${DOCTOR_NONGIT_DIR}/scripts/check-prerequisites.sh"
+cp "${REPO_ROOT}/scripts/check-repo-hygiene.sh"  "${DOCTOR_NONGIT_DIR}/scripts/check-repo-hygiene.sh"
+cp "${REPO_ROOT}/scripts/resolve-lang.sh"        "${DOCTOR_NONGIT_DIR}/scripts/resolve-lang.sh"
+cp "${REPO_ROOT}/scripts/sandbox-exec.sh"        "${DOCTOR_NONGIT_DIR}/scripts/sandbox-exec.sh"
+cp "${REPO_ROOT}/scripts/resolve-sandbox.sh"     "${DOCTOR_NONGIT_DIR}/scripts/resolve-sandbox.sh"
+cp "${REPO_ROOT}/scripts/jev-ask.sh"             "${DOCTOR_NONGIT_DIR}/scripts/jev-ask.sh"
+cp "${REPO_ROOT}/scripts/lib/mount-path.sh"           "${DOCTOR_NONGIT_DIR}/scripts/lib/mount-path.sh"
+cp "${REPO_ROOT}/scripts/lib/container-membership.sh" "${DOCTOR_NONGIT_DIR}/scripts/lib/container-membership.sh"
+cp "${REPO_ROOT}/scripts/lib/compose-conflicts.sh"    "${DOCTOR_NONGIT_DIR}/scripts/lib/compose-conflicts.sh"
+cp "${REPO_ROOT}/scripts/lib/detect-env.sh"           "${DOCTOR_NONGIT_DIR}/scripts/lib/detect-env.sh"
+
+DOCTOR_NONGIT_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+DOCTOR_NONGIT_EXIT=0
+(
+  cd "$DOCTOR_NONGIT_DIR" || exit 1
+  HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_NONGIT_OUT" 2>&1
+) || DOCTOR_NONGIT_EXIT=$?
+
+assert_exit_code "doctor.sh: git リポジトリ外では exit 1（唯一のブロック要因。#273）" 1 "$DOCTOR_NONGIT_EXIT"
+
+case "$(cat "$DOCTOR_NONGIT_OUT")" in
+  *"git リポジトリ外"*) pass "doctor.sh: git リポジトリ外である旨のメッセージが出る（#273）" ;;
+  *) fail "doctor.sh: git リポジトリ外である旨のメッセージが出る（#273）" "$(cat "$DOCTOR_NONGIT_OUT")" ;;
+esac
+
+# --- ケース18: mcpServers に Windows 絶対パスが含まれる .claude/settings.json を警告する（jq が利用可能な場合のみ） ---
+if command -v jq >/dev/null 2>&1; then
+  DOCTOR_WINPATH_REPO="$(make_temp_repo)"
+  copy_doctor_scripts "$DOCTOR_WINPATH_REPO"
+  mkdir -p "${DOCTOR_WINPATH_REPO}/.claude"
+  cat > "${DOCTOR_WINPATH_REPO}/.claude/settings.json" <<'JSON'
+{
+  "mcpServers": {
+    "example": {
+      "command": "C:\\Users\\example\\AppData\\Local\\node.exe",
+      "args": ["C:\\Users\\example\\server.js"]
+    }
+  }
+}
+JSON
+  (
+    cd "$DOCTOR_WINPATH_REPO" || exit 1
+    git add .claude/settings.json
+    git commit -q -m "add settings.json with windows path"
+  ) >/dev/null 2>&1
+
+  DOCTOR_WINPATH_OUT="$(
+    cd "$DOCTOR_WINPATH_REPO" || exit 1
+    HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" bash scripts/doctor.sh 2>&1
+  )"
+  case "$DOCTOR_WINPATH_OUT" in
+    *"settings.json"*"Windows 絶対パス"*) pass "doctor.sh: mcpServersのWindows絶対パスを警告する（#273）" ;;
+    *) fail "doctor.sh: mcpServersのWindows絶対パスを警告する（#273）" "$DOCTOR_WINPATH_OUT" ;;
+  esac
+
+  # --- ケース19: mcpServers に Windows 絶対パスが無ければ警告しない（誤検知しない） ---
+  DOCTOR_NOWINPATH_REPO="$(make_temp_repo)"
+  copy_doctor_scripts "$DOCTOR_NOWINPATH_REPO"
+  mkdir -p "${DOCTOR_NOWINPATH_REPO}/.claude"
+  cat > "${DOCTOR_NOWINPATH_REPO}/.claude/settings.json" <<'JSON'
+{
+  "mcpServers": {
+    "example": {
+      "command": "node",
+      "args": ["server.js"]
+    }
+  }
+}
+JSON
+  (
+    cd "$DOCTOR_NOWINPATH_REPO" || exit 1
+    git add .claude/settings.json
+    git commit -q -m "add settings.json without windows path"
+  ) >/dev/null 2>&1
+
+  DOCTOR_NOWINPATH_OUT="$(
+    cd "$DOCTOR_NOWINPATH_REPO" || exit 1
+    HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" bash scripts/doctor.sh 2>&1
+  )"
+  case "$DOCTOR_NOWINPATH_OUT" in
+    *"Windows 絶対パスは見つかりませんでした"*) pass "doctor.sh: mcpServersにWindows絶対パスが無ければ誤検知しない（#273）" ;;
+    *) fail "doctor.sh: mcpServersにWindows絶対パスが無ければ誤検知しない（#273）" "$DOCTOR_NOWINPATH_OUT" ;;
+  esac
+else
+  skip "doctor.sh: mcpServersのWindows絶対パス検出（#273）" "jq が見つからないためスキップ"
+fi
+
+# --- ケース20: 副作用が無い（何も作らない・インストールしない・書き換えない）ことを
+#     クラウド判定・host強制の各環境変数付きでも再確認する（完了条件の「副作用無し」を
+#     新規分岐（実行環境節・MCP設定節）にも適用する） ---
+DOCTOR_SIDEEFFECT2_STATUS_BEFORE="$(cd "$DOCTOR_SIDEEFFECT_REPO" && git status --porcelain --untracked-files=all)"
+(
+  cd "$DOCTOR_SIDEEFFECT_REPO" || exit 1
+  DEV_WORKFLOW_FORCE_REMOTE=true DEV_WORKFLOW_SANDBOX_HOST=1 \
+    HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" bash scripts/doctor.sh >/dev/null 2>&1
+)
+DOCTOR_SIDEEFFECT2_STATUS_AFTER="$(cd "$DOCTOR_SIDEEFFECT_REPO" && git status --porcelain --untracked-files=all)"
+assert_eq "doctor.sh: クラウド判定・host強制でも副作用が無い（#273）" \
+  "$DOCTOR_SIDEEFFECT2_STATUS_BEFORE" "$DOCTOR_SIDEEFFECT2_STATUS_AFTER"
 
 # ---------------------------------------------------------------------------
 # scripts/install-optional-mcp.sh（任意MCPの導入。既定 dry-run。Task #219）

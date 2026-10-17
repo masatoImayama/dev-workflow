@@ -61,6 +61,12 @@ claude --plugin-dir /path/to/dev-workflow
 - 上記2つが満たされない場合は**セッション開始時に警告が出ますが、ブロックはされません**
   （`run` / `goal` のように実際にサンドボックス実行・GitHub 操作が必要なスキルの冒頭で、
   改めて必須判定を行う想定です）
+- `bash scripts/doctor.sh`（環境診断コマンド）の終了コードも同じ方針です: **Docker 不足・
+  gh 不足（未認証を含む）はいずれも警告であり `exit 0`**。**唯一のブロック要因は git
+  リポジトリ外での実行（`exit 1`）**です。クラウド判定（`CLAUDE_CODE_REMOTE`）・解決された
+  サンドボックスモードと host になった理由・Docker/gh 不足で成立しない機能の一覧・駆動先の
+  `.claude/settings*.json` の `mcpServers` に Windows 絶対パスが含まれる場合の警告も表示します
+  （副作用は無く、何も作らない・インストールしない・書き換えません）
 - サンドボックス実行（`run` / `goal` 等）を使う場合は、サンドボックス定義（`Dockerfile.dev`
   または `docker-compose.dev.yml`）を次の3択のいずれかで供給する。**駆動先の業務リポジトリを
   汚さない選択肢を第一候補とする**（詳細は下記「Docker sandbox のセットアップ」参照）
