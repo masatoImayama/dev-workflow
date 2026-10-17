@@ -482,6 +482,180 @@ CASE1_CACHE="$(plan_value cache_volume "$CASE1_OUTPUT")"
 CASE3_CACHE="$(plan_value cache_volume "$CASE3_OUTPUT")"
 assert_eq "ケース6: cache_volume はリポジトリ単位（worktree から叩いても同じ）" "$CASE1_CACHE" "$CASE3_CACHE"
 
+# --- 回帰: host モード対応（#270）で dockerfile モードの container/image 出力が変わっていない ---
+if [ -n "$CASE1_CONTAINER" ]; then
+  pass "回帰(#270): dockerfile モードの --print-plan は container を空にしない"
+else
+  fail "回帰(#270): dockerfile モードの --print-plan は container を空にしない" "container が空でした"
+fi
+
+CASE1_IMAGE="$(plan_value image "$CASE1_OUTPUT")"
+# DEV_WORKFLOW_SANDBOX_IMAGE は resolve-sandbox.sh が Dockerfile.dev の hash から
+# 決めるため、具体的な値ではなく「空でないこと」だけを確認する（タグの値自体は
+# 他のテストが別途検証している）。
+if [ -n "$CASE1_IMAGE" ]; then
+  pass "回帰(#270): dockerfile モードの --print-plan は image を空にしない"
+else
+  fail "回帰(#270): dockerfile モードの --print-plan は image を空にしない" "image が空でした"
+fi
+
+# ---------------------------------------------------------------------------
+# ケース6b: host モード（Task #270。sandbox-exec.sh に host 実行分岐を追加する）
+#
+# DEV_WORKFLOW_SANDBOX_HOST=1 で明示的に host モードを強制する（resolve-sandbox.sh
+# 側の解決は #269 で実装済み）。Dockerfile.dev が存在する PRINT_PLAN_REPO でも
+# host モードが最優先されることを確認したうえで、--print-plan・実際の実行・
+# --detach/--wait・docker固有オプションの no-op 化を検証する。
+# ---------------------------------------------------------------------------
+
+echo "== host モード（#270） =="
+
+# sandbox-exec.sh 内の CUR は `pwd -W` で正規化した絶対パスであり、mktemp が返す
+# $PRINT_PLAN_REPO の生の表記（Windows では /tmp 配下のエイリアス表記）とは文字列として
+# 一致しない場合がある。比較前に同じ方法（cd && pwd -W）で正規化する
+# （sandbox-exec.sh:216 の CUR 解決と同じ作法）。
+PRINT_PLAN_REPO_CANON="$(cd "$PRINT_PLAN_REPO" && { pwd -W 2>/dev/null || pwd; })"
+
+HOST_PLAN_OUTPUT="$(
+  cd "$PRINT_PLAN_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 PATH="${FAKE_BIN_DIR}:${PATH}" bash scripts/sandbox-exec.sh --print-plan
+)"
+
+assert_eq "host: mode=host" "host" "$(plan_value mode "$HOST_PLAN_OUTPUT")"
+assert_eq "host: workdir は実行ディレクトリ（カレント）" "$PRINT_PLAN_REPO_CANON" "$(plan_value workdir "$HOST_PLAN_OUTPUT")"
+assert_eq "host: mount_source は空（マウントが無い）" "" "$(plan_value mount_source "$HOST_PLAN_OUTPUT")"
+assert_eq "host: mount_target は空（マウントが無い）" "" "$(plan_value mount_target "$HOST_PLAN_OUTPUT")"
+assert_eq "host: container は空（コンテナという概念が無い）" "" "$(plan_value container "$HOST_PLAN_OUTPUT")"
+assert_eq "host: image は空（イメージという概念が無い）" "" "$(plan_value image "$HOST_PLAN_OUTPUT")"
+
+if printf '%s\n' "$HOST_PLAN_OUTPUT" | grep -q '^cache_volume='; then
+  fail "host: --print-plan に cache_volume 行を出さない" "output=[${HOST_PLAN_OUTPUT}]"
+else
+  pass "host: --print-plan に cache_volume 行を出さない"
+fi
+
+if [ -s "$DOCKER_CALLED_MARKER" ]; then
+  fail "host: --print-plan は docker を起動しない" "docker が呼ばれました: $(cat "$DOCKER_CALLED_MARKER")"
+else
+  pass "host: --print-plan は docker を起動しない"
+fi
+
+# --- 実行: 終了コードがそのまま返る ---
+HOST_TRUE_EXIT=0
+(
+  cd "$PRINT_PLAN_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 PATH="${FAKE_BIN_DIR}:${PATH}" bash scripts/sandbox-exec.sh 'true'
+) >/dev/null 2>&1 || HOST_TRUE_EXIT=$?
+assert_exit_code "host: 'true' の終了コード(0)がそのまま返る" 0 "$HOST_TRUE_EXIT"
+
+HOST_FALSE_EXIT=0
+(
+  cd "$PRINT_PLAN_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 PATH="${FAKE_BIN_DIR}:${PATH}" bash scripts/sandbox-exec.sh 'false'
+) >/dev/null 2>&1 || HOST_FALSE_EXIT=$?
+assert_exit_code "host: 'false' の終了コード(1)がそのまま返る" 1 "$HOST_FALSE_EXIT"
+
+if [ -s "$DOCKER_CALLED_MARKER" ]; then
+  fail "host: 実行時も docker を起動しない" "docker が呼ばれました: $(cat "$DOCKER_CALLED_MARKER")"
+else
+  pass "host: 実行時も docker を起動しない"
+fi
+
+# --- 実行ディレクトリ: マウント元ではなく呼び出し元のカレントディレクトリで実行する ---
+HOST_PWD_OUT_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-test-host-pwd.XXXXXX")"
+(
+  cd "$PRINT_PLAN_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 PATH="${FAKE_BIN_DIR}:${PATH}" \
+    bash scripts/sandbox-exec.sh 'pwd -W 2>/dev/null || pwd' > "$HOST_PWD_OUT_FILE" 2>/dev/null
+)
+assert_eq "host: コマンドは呼び出し元のカレントディレクトリで実行される" \
+  "$PRINT_PLAN_REPO_CANON" "$(cat "$HOST_PWD_OUT_FILE")"
+
+# --- --rebuild は警告つきで無視され、コマンド自体は実行される（docker固有オプションとは
+#     別枠。常駐コンテナの作り直しという概念が無いだけで、コマンド実行は no-op にしない） ---
+HOST_REBUILD_STDERR="$(mktemp "${TMPDIR:-/tmp}/dw-test-host-rebuild-stderr.XXXXXX")"
+HOST_REBUILD_EXIT=0
+(
+  cd "$PRINT_PLAN_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 PATH="${FAKE_BIN_DIR}:${PATH}" bash scripts/sandbox-exec.sh --rebuild 'true'
+) 2>"$HOST_REBUILD_STDERR" >/dev/null || HOST_REBUILD_EXIT=$?
+assert_exit_code "host: --rebuild 指定時もコマンド自体は成功する" 0 "$HOST_REBUILD_EXIT"
+if grep -qF -- "--rebuild" "$HOST_REBUILD_STDERR"; then
+  pass "host: --rebuild は警告付きで無視される"
+else
+  fail "host: --rebuild は警告付きで無視される" "stderr=[$(cat "$HOST_REBUILD_STDERR")]"
+fi
+
+# --- docker固有の後片付け系オプション（--down/--ls/--reset-cache/--init）は
+#     警告つきで no-op（exit 0）になり、エラー終了しない ---
+for HOST_NOOP_OPT in --down --ls --reset-cache --init; do
+  HOST_NOOP_STDERR="$(mktemp "${TMPDIR:-/tmp}/dw-test-host-noop-stderr.XXXXXX")"
+  HOST_NOOP_EXIT=0
+  (
+    cd "$PRINT_PLAN_REPO" || exit 1
+    DEV_WORKFLOW_SANDBOX_HOST=1 PATH="${FAKE_BIN_DIR}:${PATH}" bash scripts/sandbox-exec.sh "$HOST_NOOP_OPT"
+  ) 2>"$HOST_NOOP_STDERR" >/dev/null || HOST_NOOP_EXIT=$?
+  assert_exit_code "host: ${HOST_NOOP_OPT} はエラー終了しない（no-op, exit 0）" 0 "$HOST_NOOP_EXIT"
+  if grep -qF -- "$HOST_NOOP_OPT" "$HOST_NOOP_STDERR"; then
+    pass "host: ${HOST_NOOP_OPT} は警告を出す"
+  else
+    fail "host: ${HOST_NOOP_OPT} は警告を出す" "stderr=[$(cat "$HOST_NOOP_STDERR")]"
+  fi
+  if [ -s "$DOCKER_CALLED_MARKER" ]; then
+    fail "host: ${HOST_NOOP_OPT} は docker を呼ばない" "docker が呼ばれました: $(cat "$DOCKER_CALLED_MARKER")"
+  else
+    pass "host: ${HOST_NOOP_OPT} は docker を呼ばない"
+  fi
+done
+
+# --- --detach/--wait: 既存の detach ディレクトリ機構を docker 非依存のまま流用できる ---
+HOST_DETACH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-host-detach-home.XXXXXX")"
+
+HOST_DETACH_START=$(date +%s)
+HOST_DETACH_OUTPUT="$(
+  cd "$PRINT_PLAN_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 DEV_WORKFLOW_DETACH_HOME="$HOST_DETACH_HOME" \
+    PATH="${FAKE_BIN_DIR}:${PATH}" \
+    bash scripts/sandbox-exec.sh --detach --handle hosttest 'sleep 2 && echo hello-from-host-detach'
+)"
+HOST_DETACH_LAUNCH_EXIT=$?
+HOST_DETACH_END=$(date +%s)
+HOST_DETACH_ELAPSED=$((HOST_DETACH_END - HOST_DETACH_START))
+
+assert_exit_code "host: --detach の起動コマンド自体は成功（exit 0）で返る" 0 "$HOST_DETACH_LAUNCH_EXIT"
+
+if [ "$HOST_DETACH_ELAPSED" -lt 2 ]; then
+  pass "host: 2秒かかるコマンドでも --detach の呼び出しは即座に返る（経過${HOST_DETACH_ELAPSED}秒）"
+else
+  fail "host: 2秒かかるコマンドでも --detach の呼び出しは即座に返る" \
+    "経過=${HOST_DETACH_ELAPSED}秒（前景実行のままになっている）"
+fi
+
+case "$HOST_DETACH_OUTPUT" in
+  *"handle=hosttest"*) pass "host: --detach の出力にhandle名が含まれる" ;;
+  *) fail "host: --detach の出力にhandle名が含まれる" "output=[${HOST_DETACH_OUTPUT}]" ;;
+esac
+
+HOST_DETACH_WAIT_OUTPUT="$(
+  cd "$PRINT_PLAN_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 DEV_WORKFLOW_DETACH_HOME="$HOST_DETACH_HOME" \
+    DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    bash scripts/sandbox-exec.sh --wait --handle hosttest
+)"
+HOST_DETACH_WAIT_EXIT=$?
+assert_exit_code "host: --wait は完了したコマンドの終了コード(0)をそのまま返す" 0 "$HOST_DETACH_WAIT_EXIT"
+
+case "$HOST_DETACH_WAIT_OUTPUT" in
+  *"hello-from-host-detach"*) pass "host: --wait 完了後にログ（標準出力）が読める" ;;
+  *) fail "host: --wait 完了後にログ（標準出力）が読める" "output=[${HOST_DETACH_WAIT_OUTPUT}]" ;;
+esac
+
+if [ -s "$DOCKER_CALLED_MARKER" ]; then
+  fail "host: --detach/--wait も docker を起動しない" "docker が呼ばれました: $(cat "$DOCKER_CALLED_MARKER")"
+else
+  pass "host: --detach/--wait も docker を起動しない"
+fi
+
 # ---------------------------------------------------------------------------
 # ケース7a: normalize_mount_source（Docker 非依存の純粋関数、issue #25）
 #

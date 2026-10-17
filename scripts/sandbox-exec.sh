@@ -454,12 +454,17 @@ lane_cache_declarations() {
 # 実行時に渡す -e 引数とmkdir対象パス（レーンスコープが shared 以外のときだけ埋める）。
 # shared のときは現行と完全に同一の挙動（env 上書きなし）にする。
 LANE_ENV_ARGS=()
+# LANE_ENV_KV: LANE_ENV_ARGS と同じ宣言を "NAME=VALUE" 形式（docker の -e 接頭辞無し）
+# で保持する。host モード（#270）は docker 引数を組み立てないため、この形のまま
+# `export` にそのまま渡せる（LANE_ENV_ARGS をパースし直さない）。
+LANE_ENV_KV=()
 LANE_CACHE_MKDIR_PATHS=()
 if [ "$LANE_SCOPE" != "shared" ]; then
   while IFS='|' read -r lane_var_name lane_base_path; do
     [ -n "$lane_var_name" ] || continue
     lane_path="${lane_base_path}/lanes/${LANE_SCOPE}"
     LANE_ENV_ARGS+=("-e" "${lane_var_name}=${lane_path}")
+    LANE_ENV_KV+=("${lane_var_name}=${lane_path}")
     LANE_CACHE_MKDIR_PATHS+=("$lane_path")
   done < <(lane_cache_declarations)
 fi
@@ -497,6 +502,13 @@ print_plan() {
       printf 'mount_target=\n'
       printf 'workdir=%s\n' "$COMPOSE_WORKDIR"
       ;;
+    host)
+      # host モード（#270）はマウント・パス変換が無く、実行ディレクトリ（カレント）
+      # がそのまま workdir になる。
+      printf 'mount_source=\n'
+      printf 'mount_target=\n'
+      printf 'workdir=%s\n' "$CUR"
+      ;;
     *)
       printf 'mount_source=\n'
       printf 'mount_target=\n'
@@ -504,8 +516,15 @@ print_plan() {
       ;;
   esac
 
-  printf 'container=%s\n' "$CONTAINER"
-  printf 'image=%s\n'     "${DEV_WORKFLOW_SANDBOX_IMAGE:-}"
+  if [ "${DEV_WORKFLOW_SANDBOX_MODE:-}" = "host" ]; then
+    # host モードはコンテナ・イメージという概念が無いため空にする（分かれて使われている
+    # ように誤読させない。--print-plan は「実際に使われるものだけを表示する」方針）。
+    printf 'container=\n'
+    printf 'image=\n'
+  else
+    printf 'container=%s\n' "$CONTAINER"
+    printf 'image=%s\n'     "${DEV_WORKFLOW_SANDBOX_IMAGE:-}"
+  fi
   printf 'dockerfile=%s\n'     "${DEV_WORKFLOW_SANDBOX_DOCKERFILE:-}"
   printf 'build_context=%s\n' "${DEV_WORKFLOW_SANDBOX_CONTEXT:-}"
   printf 'compose_file=%s\n'    "${DEV_WORKFLOW_SANDBOX_COMPOSE:-}"
@@ -896,8 +915,21 @@ down_all_compose() {
 
 eval "$(bash "${SCRIPT_DIR}/resolve-sandbox.sh")"
 
+# host モード（#270）では docker 固有の後片付け系オプションは意味を持たない。
+# 「警告を出して no-op（exit 0）」として扱い、エラー終了させない
+# （呼び出し側のインターフェースを変えないため。run と generator は mode を知らずに
+# 同じオプションを叩く）。
+host_noop_if_needed() {
+  # host_noop_if_needed <オプション名>
+  if [ "$DEV_WORKFLOW_SANDBOX_MODE" = "host" ]; then
+    echo "WARNING: host モードでは ${1} は意味を持たないため no-op です" >&2
+    exit 0
+  fi
+}
+
 case "$ACTION" in
   down)
+    host_noop_if_needed "--down"
     if [ "$ALL" -eq 1 ]; then
       down_all
       # dockerfile モードの残骸（dw-sandbox-*）とは別系統なので、compose モードで
@@ -922,12 +954,14 @@ case "$ACTION" in
     exit 0
     ;;
   ls)
+    host_noop_if_needed "--ls"
     list_managed
     # compose モードで解決された場合のみ compose project の状態も表示する（issue #28）。
     [ "$DEV_WORKFLOW_SANDBOX_MODE" = "compose" ] && list_managed_compose
     exit 0
     ;;
   reset-cache)
+    host_noop_if_needed "--reset-cache"
     # 1. 削除対象の volume 名をすべて列挙して表示する（成否によらず必ず表示する）。
     echo "削除対象のキャッシュ volume（repo=${PROJECT}。作用範囲はepicではなくリポジトリ全体です）:"
     for path in $CACHE_PATHS; do
@@ -1020,6 +1054,7 @@ case "$ACTION" in
     exit "$WAIT_EXIT_CODE"
     ;;
   init)
+    host_noop_if_needed "--init"
     do_init
     exit 0
     ;;
@@ -1104,6 +1139,26 @@ case "$DEV_WORKFLOW_SANDBOX_MODE" in
     fi
 
     run_and_report_or_detach compose_cmd exec -T -w "$COMPOSE_WORKDIR" "${LANE_ENV_ARGS[@]}" "$COMPOSE_SERVICE" sh -c "$(lane_cache_mkdir_prefix)${CMD}"
+    exit $?
+    ;;
+
+  host)
+    # host モード（#269/#270）: クラウド環境等、Docker を使わずに実行する明示的な
+    # モード。マウント・パス変換は無く、呼び出し元のカレントディレクトリ
+    # （= Epic 専用 worktree / レーン worktree）でそのまま実行する。
+    # 終了コードは sh -c の終了コードをそのまま返す（docker exec と同じ契約）。
+    if [ "$REBUILD" -eq 1 ]; then
+      echo "WARNING: host モードでは --rebuild は意味を持たないため無視します" >&2
+    fi
+
+    # レーン別キャッシュ env を export して実行する（docker の -e 相当）。
+    # mkdir は行わない（LANE_CACHE_MKDIR_PATHS はコンテナ内パス前提であり、
+    # none モードと同様にホストの / を触ってしまうため）。
+    if [ "${#LANE_ENV_KV[@]}" -gt 0 ]; then
+      export "${LANE_ENV_KV[@]}"
+    fi
+
+    run_and_report_or_detach sh -c "$CMD"
     exit $?
     ;;
 
