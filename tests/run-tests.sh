@@ -21500,6 +21500,105 @@ esac
 unset NS288_RUN_SKILL_BODY
 
 # ---------------------------------------------------------------------------
+# Codex版（skills-codex/）へのクラウド対応の反映（Task #281）
+#
+# host モードの受け入れ（#272相当）・Docker必須判定のdetect-env.sh委譲（#287相当）・
+# 単一ブランチ運用（#278相当）をCodex版に反映した。GitHub操作の抽象化（#276相当）だけは
+# Codexで`mcp__github__*`が未検証のため、フォールバックではなく明示停止にした（意図的な
+# divergenceとして`docs/dev-workflow-multi-vendor-guide.md`に明記）。#277/#278/#279と同じ
+# 作法（静的grepによるSKILL.md契約文言の確認）で検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Codex版へのクラウド対応の反映（#281） =="
+
+NS281_CODEX_RUN_BODY="$(cat "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md")"
+NS281_CODEX_GOAL_BODY="$(cat "${REPO_ROOT}/skills-codex/dev-workflow-goal/SKILL.md")"
+NS281_GUIDE_BODY="$(cat "${REPO_ROOT}/docs/dev-workflow-multi-vendor-guide.md")"
+
+# --- skills-codex/dev-workflow-run/SKILL.md: gh不可時はMCPフォールバック無しで明示停止する ---
+case "$NS281_CODEX_RUN_BODY" in
+  *'dev_workflow_gh_available'*'mcp__github__'*'未実装'*'exit 1'*)
+    pass "skills-codex/dev-workflow-run/SKILL.md: gh不可時にMCPフォールバック無しで明示停止する（#276相当, #281）" ;;
+  *)
+    fail "skills-codex/dev-workflow-run/SKILL.md: gh不可時にMCPフォールバック無しで明示停止する（#276相当, #281）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills-codex/dev-workflow-run/SKILL.md: mode=hostで警告を出して継続し、Epic issueへコメントを残す ---
+case "$NS281_CODEX_RUN_BODY" in
+  *'mode=host'*'WARNING'*'gh issue comment'*'host モード'*)
+    pass "skills-codex/dev-workflow-run/SKILL.md: mode=hostで警告を出して継続し、Epic issueへコメントを残す（#272相当, #281）" ;;
+  *)
+    fail "skills-codex/dev-workflow-run/SKILL.md: mode=hostで警告を出して継続し、Epic issueへコメントを残す（#272相当, #281）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills-codex/dev-workflow-run/SKILL.md: mode=dockerfile/composeのDocker必須判定をdetect-env.shに委譲している ---
+case "$NS281_CODEX_RUN_BODY" in
+  *'mode=(dockerfile|compose)'*'dev_workflow_docker_available'*'exit 1'*)
+    pass "skills-codex/dev-workflow-run/SKILL.md: mode=dockerfile/composeのDocker必須判定をdev_workflow_docker_availableに委譲している（#287相当, #281）" ;;
+  *)
+    fail "skills-codex/dev-workflow-run/SKILL.md: mode=dockerfile/composeのDocker必須判定をdev_workflow_docker_availableに委譲している（#287相当, #281）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills-codex/dev-workflow-run/SKILL.md: dev_workflow_is_remoteに基づきSINGLE_BRANCH_MODEを決定する ---
+case "$NS281_CODEX_RUN_BODY" in
+  *'dev_workflow_is_remote'*'SINGLE_BRANCH_MODE=1'*)
+    pass "skills-codex/dev-workflow-run/SKILL.md: dev_workflow_is_remoteに基づきSINGLE_BRANCH_MODEを決定する（#278相当, #281）" ;;
+  *)
+    fail "skills-codex/dev-workflow-run/SKILL.md: dev_workflow_is_remoteに基づきSINGLE_BRANCH_MODEを決定する（#278相当, #281）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills-codex/dev-workflow-run/SKILL.md: 単一ブランチ運用でセッション指定ブランチをepicブランチとして扱う ---
+case "$NS281_CODEX_RUN_BODY" in
+  *'EPIC_BRANCH="$SESSION_BRANCH"'*'EPIC_WT="."'*)
+    pass "skills-codex/dev-workflow-run/SKILL.md: 単一ブランチ運用でセッション指定ブランチをepicブランチとして扱う（#278相当, #281）" ;;
+  *)
+    fail "skills-codex/dev-workflow-run/SKILL.md: 単一ブランチ運用でセッション指定ブランチをepicブランチとして扱う（#278相当, #281）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills-codex/dev-workflow-run/SKILL.md: レーン取り込みで--single-branchを使う分岐がある ---
+if grep -qF -- '--single-branch' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md"; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: レーン取り込みで--single-branchを使う分岐がある（#278相当, #281）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: レーン取り込みで--single-branchを使う分岐がある（#278相当, #281）"
+fi
+
+# --- skills-codex/dev-workflow-run/SKILL.md: push対象がセッション指定ブランチと異なる場合は理由を明示して停止する ---
+case "$NS281_CODEX_RUN_BODY" in
+  *'push対象'*'SESSION_BRANCH'*'停止'*)
+    pass "skills-codex/dev-workflow-run/SKILL.md: push対象がセッション指定ブランチと異なる場合は停止する旨が明記されている（#278相当, #281）" ;;
+  *)
+    fail "skills-codex/dev-workflow-run/SKILL.md: push対象がセッション指定ブランチと異なる場合は停止する旨が明記されている（#278相当, #281）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills-codex/dev-workflow-goal/SKILL.md: host モードへの言及がある ---
+case "$NS281_CODEX_GOAL_BODY" in
+  *'host モード'*)
+    pass "skills-codex/dev-workflow-goal/SKILL.md: host モードへの言及がある（#272相当, #281）" ;;
+  *)
+    fail "skills-codex/dev-workflow-goal/SKILL.md: host モードへの言及がある（#272相当, #281）" \
+      "記述が見つからない" ;;
+esac
+
+# --- docs/dev-workflow-multi-vendor-guide.md: GitHub操作の抽象化の意図的なdivergenceが
+#     理由とともに明記されている（完了条件: 一致させられない点は理由とともに明記） ---
+case "$NS281_GUIDE_BODY" in
+  *'GitHub操作の抽象化'*'未検証'*)
+    pass "docs/dev-workflow-multi-vendor-guide.md: GitHub操作の抽象化のdivergenceが理由とともに明記されている（#281）" ;;
+  *)
+    fail "docs/dev-workflow-multi-vendor-guide.md: GitHub操作の抽象化のdivergenceが理由とともに明記されている（#281）" \
+      "記述が見つからない" ;;
+esac
+
+unset NS281_CODEX_RUN_BODY NS281_CODEX_GOAL_BODY NS281_GUIDE_BODY
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 

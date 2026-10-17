@@ -191,7 +191,28 @@ Codex が非対応なのは 3.3.3 の worktree 隔離の粒度による制約（
 として同じコードパスを通るため、両 run スキル（`skills/run/SKILL.md` /
 `skills-codex/dev-workflow-run/SKILL.md`）の記述は一致する。
 
-#### 3.3.4. ターン上限の相当物はない
+#### 3.3.6. クラウド対応のCodexへの反映（Task #281）
+
+Epic #267 でClaude版（`skills/run/SKILL.md`）に入れたクラウド対応（host モードの受け入れ・
+GitHub操作の抽象化・単一ブランチ運用）を、Codex版（`skills-codex/dev-workflow-run/SKILL.md`）
+にも反映した（当初 Codex 版は未追随のままだった。#287のレビュー指摘と同種の取りこぼし）。
+
+| 項目 | Claude Code | Codex | 一致／divergence |
+| --- | --- | --- | --- |
+| host モードの受け入れ（`mode=host`で警告継続・Epic issueへコメント） | 実装（Task #272） | 実装 | **一致** |
+| Docker必須判定の委譲（`dev_workflow_docker_available`） | 実装（Task #287で独自実装から委譲へ修正） | 実装（最初から委譲） | **一致** |
+| 単一ブランチ運用（`dev_workflow_is_remote`→`SINGLE_BRANCH_MODE`、wave ブランチを作らず直接Epicブランチへ取り込む） | 実装（Task #278） | 実装 | **一致** |
+| **GitHub操作の抽象化**（`gh`不可時の振る舞い） | `gh`不可時は`mcp__github__*`へフォールバックする（選択規則は`core/references/github-access.md`。Task #276） | **`gh`必須。フォールバックなしで明示停止する** | **意図的なdivergence（理由は次項）** |
+
+GitHub操作の抽象化だけはClaude版と同じ形にしなかった。**Codexで`mcp__github__*`相当のMCP
+ツールが実際に使えるかは未検証**である（Claude Codeの `mcp__github__*` という命名規則自体が
+Claude Code固有のMCPサーバー結線を前提にしており、Codex側に同名・同機能のツールが存在する
+保証がない）。未検証のまま「使える前提」でフォールバック経路を書くと、実際に`gh`が使えない
+環境で経路自体が存在しないツールを呼びに行き、**黙って劣化する**（エラーの原因が分かりにくい
+形で失敗する）。そのため Codex 版は `dev_workflow_gh_available`（#268）が偽であれば
+「Codex版のdev-workflow-runはghに依存しており、mcp__github__へのフォールバックは未実装です」
+と明示してその場で停止する方針を採る。将来 Codex 側のMCP GitHub連携ツールが実測で確認できた
+時点で、Claude版と同じフォールバック経路を追加することを検討する。
 
 `maxTurns: 200` / `120` に相当する設定は Codex に存在しない。最も近いのは
 `features.rollout_budget`（`enabled` / `limit_tokens` / `prefill_token_weight` /
