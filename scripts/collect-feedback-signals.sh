@@ -5,6 +5,10 @@
 # **どこに何があるかの探索まで自然言語の指示に任せると、毎回違う場所を見て違う結論が出る**。
 # 探索と一次集計はここに固定し、スキル側には「読むべきファイルと数字」だけを渡す。
 # Docker には一切触れない。gh も呼ばない（ネットワークとレート制限に依存させない）。
+# この性質により gh が使えない環境（api.github.com 403 等。クラウド対応・Task #275。
+# core/references/github-access.md 参照）でも挙動は1ビットも変わらない。還流先の
+# feedback-ledger.sh（path/record/list/count/ready/render-upstream）も同様にgh非依存で、
+# issue還流（gh issue create）だけがこのスクリプト群の外（skills/feedback）でスキップされる。
 #
 # **追加の依存物（jq 等）は一切使わない。** 素の bash と sed だけで完結する。
 #

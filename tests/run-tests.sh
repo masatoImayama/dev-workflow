@@ -4055,6 +4055,24 @@ else
   pass "gh モード: 「- Epic: なし（単発タスク）」の #400 は除外される（#208）"
 fi
 
+# --- ケース12b: gh不可時（DEV_WORKFLOW_GH_UNAVAILABLE=1）は --epic モードで
+#     理由を明示して停止する。黙って空のPLAN_LIST（1レーン相当）に落とさない（Task #275）。
+#     実際の403環境やネットワークは不要（#268 の dev_workflow_gh_available を直接上書きする）。 ---
+PW_NOGH_STDERR="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw-nogh-stderr.XXXXXX")"
+DEV_WORKFLOW_GH_UNAVAILABLE=1 bash "$PLAN_WAVES_SCRIPT" --epic 14 >/dev/null 2>"$PW_NOGH_STDERR"
+assert_exit_code "gh不可時: --epic モードは exit 2 で停止する（#275）" 2 "$?"
+case "$(cat "$PW_NOGH_STDERR")" in
+  *'gh'*'--from-file'*) pass "gh不可時: --from-file への切り替えを案内する（#275）" ;;
+  *) fail "gh不可時: --from-file への切り替えを案内する（#275）" "$(cat "$PW_NOGH_STDERR")" ;;
+esac
+
+# gh不可でも --from-file モードは影響を受けない（ファイル入力経路はgh非依存であることの確認）
+DEV_WORKFLOW_GH_UNAVAILABLE=1 bash "$PLAN_WAVES_SCRIPT" --from-file "$PW_DEPSWARN_NONE_FIXTURE" >/dev/null 2>&1
+assert_exit_code "gh不可でも --from-file モードは影響を受けない（#275）" 0 "$?"
+
+# 回帰: ghが使える環境（ケース12の偽gh。auth status/api rate_limitも暗黙に成功する）では
+# --epic モードの挙動は変わらない（exit 0 で従来どおり完了することをケース12で確認済み）。
+
 # ---------------------------------------------------------------------------
 # plan-waves.sh: 対象ファイルの重なりによるサブバッチ分割（Task #216）
 #
@@ -7085,6 +7103,28 @@ DEV_WORKFLOW_MARKER_ROOT="$WB_ROOT_NOGH" DEV_WORKFLOW_WATCHDOG_NOW=1700700000 \
 WB_BUDGET_NOGH="$(grep '^budget_sec=' "${WB_ROOT_NOGH}/.claude/.dev-workflow-run-state" \
   | cut -d= -f2)"
 assert_eq "watchdog.sh --wave: ghが使えない場合は既定5400秒になる" "5400" "$WB_BUDGET_NOGH"
+
+# gh不可時の既定フォールバックは「仕様」であり、沈黙せず _watchdog_log に記録する（#275）
+WB_NOGH_LOG="${WB_ROOT_NOGH}/.claude/.dev-workflow-watchdog.log"
+if [ -f "$WB_NOGH_LOG" ] && grep -q 'budget-estimate-unavailable' "$WB_NOGH_LOG"; then
+  pass "watchdog.sh --wave: ghが使えない場合、想定時間が取れなかった旨をログに記録する（#275）"
+else
+  fail "watchdog.sh --wave: ghが使えない場合、想定時間が取れなかった旨をログに記録する（#275）" \
+    "log=[$(cat "$WB_NOGH_LOG" 2>/dev/null)]"
+fi
+
+# gh が使える（想定時間を取得できた）場合はこのログ行を出さない（回帰防止・#275）。
+# WB_ROOT_EST は204・205（想定時間が取れないケース）でも使い回しているため、累積の
+# ログには既に budget-estimate-unavailable 行が含まれている。新規に発行される行だけを
+# 見るため、専用の新しいマーカールートを使う（他タスクの履歴と混ざらないようにする）。
+WB_ROOT_EST_FOUND="$(wd_new_root)"
+WB_EST_FOUND_LOG="${WB_ROOT_EST_FOUND}/.claude/.dev-workflow-watchdog.log"
+DEV_WORKFLOW_MARKER_ROOT="$WB_ROOT_EST_FOUND" DEV_WORKFLOW_WATCHDOG_NOW=1700700001 \
+  WB_GH_BODY_DIR="$WB_GH_BODY_DIR" PATH="${WB_FAKE_GH_BIN}:${PATH}" \
+  bash "$WD_SCRIPT" --wave --epic 48 --wave-no 1 --tasks "201" > /dev/null 2>&1
+WB_EST_UNAVAIL_FOR_201="$(grep -c 'budget-estimate-unavailable' "$WB_EST_FOUND_LOG" 2>/dev/null || true)"
+assert_eq "watchdog.sh --wave: 想定時間が取得できたタスクではbudget-estimate-unavailableを記録しない（回帰防止・#275）" \
+  "0" "$WB_EST_UNAVAIL_FOR_201"
 
 # ---------------------------------------------------------------------------
 # scripts/watchdog.sh: スリープ抑止（Task #49、Epic #42）
@@ -16049,6 +16089,55 @@ case "$FL_PATH_OUT" in
     pass "path: 台帳のパスが駆動先リポジトリの外にある（ハーネス非注入原則）" ;;
 esac
 
+# --- gh-available（#268 の dev_workflow_gh_available をそのまま返す薄いラッパー、#275） ---
+
+DEV_WORKFLOW_GH_UNAVAILABLE=1 fl gh-available >/dev/null 2>&1
+assert_exit_code "gh-available: DEV_WORKFLOW_GH_UNAVAILABLE=1 なら exit 1（偽）" 1 "$?"
+
+FL_GHAVAIL_FAKE_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-fl-ghavail.XXXXXX")"
+cat > "${FL_GHAVAIL_FAKE_BIN}/gh" <<'FAKE_GH_EOF'
+#!/bin/bash
+exit 0
+FAKE_GH_EOF
+chmod +x "${FL_GHAVAIL_FAKE_BIN}/gh"
+PATH="${FL_GHAVAIL_FAKE_BIN}:${PATH}" fl gh-available >/dev/null 2>&1
+assert_exit_code "gh-available: gh auth status・gh api rate_limit が両方成功すれば exit 0（真）" 0 "$?"
+
+# --- unreflected-path（gh不可・未承認時に還流本文を保存する先。記録が失われない契約、#275） ---
+
+FL_UNREF_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-fl-unref.XXXXXX")"
+FL_UNREF_OUT="$(DEV_WORKFLOW_FEEDBACK_DIR="$FL_UNREF_DIR" bash "$FL_SCRIPT" unreflected-path --key gate-flaky)"
+assert_eq "unreflected-path: 台帳ディレクトリ配下の upstream/<key>.md を返す（#275）" \
+  "${FL_UNREF_DIR}/upstream/gate-flaky.md" "$FL_UNREF_OUT"
+
+if [ -d "${FL_UNREF_DIR}/upstream" ]; then
+  pass "unreflected-path: 保存先ディレクトリを事前に作る（#275）"
+else
+  fail "unreflected-path: 保存先ディレクトリを事前に作る（#275）" "${FL_UNREF_DIR}/upstream が存在しない"
+fi
+
+DEV_WORKFLOW_FEEDBACK_DIR="$FL_UNREF_DIR" bash "$FL_SCRIPT" unreflected-path >/dev/null 2>&1
+assert_exit_code "unreflected-path: --key が無ければ exit 2" 2 "$?"
+
+# --- 回帰: gh が使えても feedback-ledger.sh の既存コマンド（record/list/count/ready/
+#     render-upstream/upstream-repo/path/redact）の挙動は1ビットも変わらない（#275）。
+#     これらのコマンド自身が gh を一切呼ばないため、DEV_WORKFLOW_GH_UNAVAILABLE の
+#     有無で出力が変わらないことを確認する。 ---
+FL_REGRESSION_WITH_GH="$(DEV_WORKFLOW_FEEDBACK_DIR="$FL_DIR" bash "$FL_SCRIPT" count --key gate-flaky)"
+FL_REGRESSION_WITHOUT_GH="$(DEV_WORKFLOW_GH_UNAVAILABLE=1 DEV_WORKFLOW_FEEDBACK_DIR="$FL_DIR" \
+  bash "$FL_SCRIPT" count --key gate-flaky)"
+assert_eq "回帰(#275): count はgh可否に関わらず同じ結果を返す（gh非依存）" \
+  "$FL_REGRESSION_WITH_GH" "$FL_REGRESSION_WITHOUT_GH"
+
+# --- 静的確認: feedback-ledger.sh自身は gh を一切呼ばない（gh-available以外では
+#     文字列 "gh " がコマンド呼び出しとして出てこない。コメント中の言及は対象外にする） ---
+if grep -vE '^[[:space:]]*#' "$FL_SCRIPT" | grep -qE '(^|[^A-Za-z0-9_])gh[[:space:]]+(issue|api|auth|pr)\b'; then
+  fail "回帰(#275): feedback-ledger.sh は gh issue/api/auth/pr を直接呼ばない（還流投稿はSKILL側の責務）" \
+    "$(grep -vE '^[[:space:]]*#' "$FL_SCRIPT" | grep -nE '(^|[^A-Za-z0-9_])gh[[:space:]]+(issue|api|auth|pr)\b')"
+else
+  pass "回帰(#275): feedback-ledger.sh は gh issue/api/auth/pr を直接呼ばない（還流投稿はSKILL側の責務）"
+fi
+
 # ---------------------------------------------------------------------------
 # scripts/collect-feedback-signals.sh（実行ログの所在と一次集計）
 # ---------------------------------------------------------------------------
@@ -16167,6 +16256,30 @@ assert_eq "状態ファイルが無いことを available=0 で明示する（�
   "0" "$(plan_value runstate.available "$CFS_OUT_EMPTY")"
 assert_eq "transcript が無いことを available=0 で明示する" \
   "0" "$(plan_value transcripts.available "$CFS_OUT_EMPTY")"
+
+# --- 静的確認: collect-feedback-signals.sh自身は gh を一切呼ばない（Task #275） ---
+if grep -vE '^[[:space:]]*#' "$CFS_SCRIPT" | grep -qE '(^|[^A-Za-z0-9_])gh[[:space:]]+(issue|api|auth|pr)\b'; then
+  fail "回帰(#275): collect-feedback-signals.sh は gh を直接呼ばない（ネットワーク・レート制限に依存させない）" \
+    "$(grep -vE '^[[:space:]]*#' "$CFS_SCRIPT" | grep -nE '(^|[^A-Za-z0-9_])gh[[:space:]]+(issue|api|auth|pr)\b')"
+else
+  pass "回帰(#275): collect-feedback-signals.sh は gh を直接呼ばない（ネットワーク・レート制限に依存させない）"
+fi
+
+# --- 回帰: DEV_WORKFLOW_GH_UNAVAILABLE=1 でも出力が変わらない（gh非依存の確認）。
+#     collected_at / since_ts / heartbeat.age_sec は `date +%s` 現在時刻由来で
+#     呼び出すたびに変わる（gh可否とは無関係な既存の非決定性）ため、比較前に除く。 ---
+CFS_OUT_NOGH="$(
+  cd "$CFS_REPO" || exit 1
+  DEV_WORKFLOW_MARKER_ROOT="$CFS_REPO" \
+  CLAUDE_PROJECTS_DIR="$CFS_PROJECTS" \
+  DEV_WORKFLOW_FEEDBACK_DIR="${CFS_HOME}/ledger" \
+  DEV_WORKFLOW_GH_UNAVAILABLE=1 \
+  bash "$CFS_SCRIPT" --since 3650
+)"
+CFS_STABLE_FILTER='^(collected_at|since_ts|heartbeat\.age_sec)='
+assert_eq "回帰(#275): DEV_WORKFLOW_GH_UNAVAILABLE=1 でも出力が変わらない（現在時刻依存の行は除く）" \
+  "$(printf '%s\n' "$CFS_OUT" | grep -vE "$CFS_STABLE_FILTER")" \
+  "$(printf '%s\n' "$CFS_OUT_NOGH" | grep -vE "$CFS_STABLE_FILTER")"
 
 # ---------------------------------------------------------------------------
 # skills/feedback/SKILL.md（修正範囲と承認ゲートの回帰防止）
@@ -20043,6 +20156,94 @@ case "$JEV_EVAL_DRY_OUT" in
     fail "jev-shadow-eval.sh: --dry-run が鍵を要求していない" "鍵エラーが出ている" ;;
   *)
     pass "jev-shadow-eval.sh: --dry-run が鍵を要求していない" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# jev-shadow-eval.sh: gh不可時のfail-soft（case1・case3のみ。Task #275）
+#
+# DEV_WORKFLOW_GH_UNAVAILABLE=1 で dev_workflow_gh_available を偽に強制し、
+# 実際の403環境やネットワークを要求せずに「gh issue list に依存する検証を実行せず、
+# 理由を表示してexit 0で退く」挙動を検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== jev-shadow-eval.sh: gh不可時のfail-soft（#275） =="
+
+JEV_NOGH_OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-jev-nogh.XXXXXX")"
+
+# --- case1（①指摘の重複排除）: gh不可ならexit 0でスキップし、データセットを作らない ---
+JEV_NOGH_CASE1_OUT="$(
+  DEV_WORKFLOW_GH_UNAVAILABLE=1 DEV_WORKFLOW_JEV_EVAL_DIR="${JEV_NOGH_OUT_DIR}/case1" \
+    bash "$JEV_EVAL_SH" build --case 1 2>&1
+)"
+JEV_NOGH_CASE1_EXIT=$?
+assert_exit_code "jev-shadow-eval.sh: gh不可時、case1のbuildはexit 0で退く（#275）" 0 "$JEV_NOGH_CASE1_EXIT"
+case "$JEV_NOGH_CASE1_OUT" in
+  *'gh が使えない'*'case1'*) pass "jev-shadow-eval.sh: gh不可時、case1で理由を表示する（#275）" ;;
+  *) fail "jev-shadow-eval.sh: gh不可時、case1で理由を表示する（#275）" "$JEV_NOGH_CASE1_OUT" ;;
+esac
+if [ -f "${JEV_NOGH_OUT_DIR}/case1/case1-dataset.tsv" ]; then
+  fail "jev-shadow-eval.sh: gh不可時、case1はデータセットを作らない（検証自体を実行しない・#275）" \
+    "case1-dataset.tsv が作られていた"
+else
+  pass "jev-shadow-eval.sh: gh不可時、case1はデータセットを作らない（検証自体を実行しない・#275）"
+fi
+
+# --- case3（③確度判定のトリアージ）: 同様にgh不可ならexit 0でスキップする ---
+JEV_NOGH_CASE3_OUT="$(
+  DEV_WORKFLOW_GH_UNAVAILABLE=1 DEV_WORKFLOW_JEV_EVAL_DIR="${JEV_NOGH_OUT_DIR}/case3" \
+    bash "$JEV_EVAL_SH" build --case 3 2>&1
+)"
+JEV_NOGH_CASE3_EXIT=$?
+assert_exit_code "jev-shadow-eval.sh: gh不可時、case3のbuildはexit 0で退く（#275）" 0 "$JEV_NOGH_CASE3_EXIT"
+case "$JEV_NOGH_CASE3_OUT" in
+  *'gh が使えない'*'case3'*) pass "jev-shadow-eval.sh: gh不可時、case3で理由を表示する（#275）" ;;
+  *) fail "jev-shadow-eval.sh: gh不可時、case3で理由を表示する（#275）" "$JEV_NOGH_CASE3_OUT" ;;
+esac
+
+# --- case2（②台帳の分類）: ghに依存しないため、gh不可でも通常どおり動く（影響範囲が
+#     case1/3に限定されていることの確認） ---
+JEV_NOGH_CASE2_FEEDBACK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-jev-nogh-feedback.XXXXXX")"
+JEV_NOGH_CASE2_EXIT=0
+DEV_WORKFLOW_GH_UNAVAILABLE=1 DEV_WORKFLOW_JEV_EVAL_DIR="${JEV_NOGH_OUT_DIR}/case2" \
+  DEV_WORKFLOW_FEEDBACK_DIR="$JEV_NOGH_CASE2_FEEDBACK_DIR" \
+  bash "$JEV_EVAL_SH" build --case 2 >/dev/null 2>&1 || JEV_NOGH_CASE2_EXIT=$?
+assert_exit_code "jev-shadow-eval.sh: gh不可でもcase2（台帳/scope.md、gh非依存）は通常どおり動く（#275）" \
+  0 "$JEV_NOGH_CASE2_EXIT"
+if [ -f "${JEV_NOGH_OUT_DIR}/case2/case2-dataset.tsv" ]; then
+  pass "jev-shadow-eval.sh: gh不可でもcase2はデータセットを作る（#275）"
+else
+  fail "jev-shadow-eval.sh: gh不可でもcase2はデータセットを作る（#275）" "case2-dataset.tsv が作られていない"
+fi
+
+# --- 回帰: ghが使える環境ではcase1のbuildが従来どおりgh issue listへ進む（スキップしない） ---
+JEV_FAKEGH_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-jev-fakegh.XXXXXX")"
+cat > "${JEV_FAKEGH_BIN}/gh" <<'FAKE_GH_EOF'
+#!/bin/bash
+case "$1 $2" in
+  "auth status") exit 0 ;;
+esac
+if [ "$1" = "api" ]; then exit 0; fi
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+  exit 0
+fi
+exit 1
+FAKE_GH_EOF
+chmod +x "${JEV_FAKEGH_BIN}/gh"
+
+JEV_WITHGH_CASE1_OUT="$(
+  PATH="${JEV_FAKEGH_BIN}:${PATH}" DEV_WORKFLOW_JEV_EVAL_DIR="${JEV_NOGH_OUT_DIR}/case1-withgh" \
+    bash "$JEV_EVAL_SH" build --case 1 2>&1
+)"
+case "$JEV_WITHGH_CASE1_OUT" in
+  *'gh が使えない'*)
+    fail "jev-shadow-eval.sh: ghが使える環境ではcase1をスキップしない（回帰防止・#275）" \
+      "$JEV_WITHGH_CASE1_OUT" ;;
+  *'review issue を取得中'*)
+    pass "jev-shadow-eval.sh: ghが使える環境ではcase1をスキップしない（回帰防止・#275）" ;;
+  *)
+    fail "jev-shadow-eval.sh: ghが使える環境ではcase1をスキップしない（回帰防止・#275）" \
+      "$JEV_WITHGH_CASE1_OUT" ;;
 esac
 
 # ---------------------------------------------------------------------------

@@ -66,8 +66,8 @@ GitHub へ到達する必要がある場合、取れる道は次の2つしかな
 | `scripts/feedback-ledger.sh` / `scripts/collect-feedback-signals.sh` | 台帳へのローカル記録は続け、**issue 還流だけをスキップ**して「未還流」として残す |
 | Jev の shadow 評価スクリプト（任意機能。詳細は `docs/adr/0012-jev-system-one-decision-points.md`） | `gh issue list` 依存の検証は実行せず、理由を表示して exit 0（shadow 検証は任意機能のため安全に縮退できる） |
 
-上記スクリプト本体の実装（fail-soft化・ファイル入力経路の追加）は本タスクのスコープ外
-であり、別タスク（#276）で行う。この文書はその実装が従うべき方針を定めるだけである。
+上記スクリプト本体の実装（fail-soft化・ファイル入力経路の追加）は本タスク（#274）の
+スコープ外であり、別タスク（#275）で行う。この文書はその実装が従うべき方針を定めるだけである。
 
 ## `core/instructions.md`「停止させるものと、記録して進めるもの」との対応
 
