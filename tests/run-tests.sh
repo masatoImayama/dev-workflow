@@ -20950,6 +20950,98 @@ case "$(cat "$GHSKILL_DOC" 2>/dev/null)" in
 esac
 
 # ---------------------------------------------------------------------------
+# ウェーブ計画の入力ファイル受け渡しをrunに実装する（#277）
+#
+# plan-waves.sh は --epic 時に gh を直接呼ぶため、gh が使えない環境（クラウド等）では
+# run自身がMCPでTask issue群を取得し --from-file 用の入力ファイルを書き出す必要がある。
+# MCP呼び出し自体はシェルスクリプトからテストできないため、ここでは
+# 1) skills/run/SKILL.md が dev_workflow_gh_available に基づいて --epic / --from-file を
+#    切り替える旨を明記していること、2) 書き出し失敗時に黙ってフォールバックせず停止する旨が
+#    明記されていること、3) plan-waves.sh 側のドキュメントが誰がファイルを作るかを
+#    説明していること、を静的に検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== ウェーブ計画の入力ファイル受け渡し（#277） =="
+
+NS277_RUN_SKILL_BODY="$(cat "${REPO_ROOT}/skills/run/SKILL.md")"
+NS277_PLAN_WAVES_BODY="$(cat "${REPO_ROOT}/scripts/plan-waves.sh")"
+
+# --- skills/run/SKILL.md: dev_workflow_gh_available に基づいて --epic / --from-file を切り替える ---
+case "$NS277_RUN_SKILL_BODY" in
+  *'dev_workflow_gh_available'*'--epic "$EPIC_ISSUE_NUM"'*'--from-file'*)
+    pass "skills/run/SKILL.md: dev_workflow_gh_availableに基づき--epic/--from-fileを切り替える（#277）" ;;
+  *)
+    fail "skills/run/SKILL.md: dev_workflow_gh_availableに基づき--epic/--from-fileを切り替える（#277）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: gh不可時にMCPでTask issueを取得して書き出す手順がある ---
+case "$NS277_RUN_SKILL_BODY" in
+  *'mcp__github__'*'--from-file'*)
+    pass "skills/run/SKILL.md: gh不可時にMCPでTask issueを取得し--from-file用ファイルを書き出す手順がある（#277）" ;;
+  *)
+    fail "skills/run/SKILL.md: gh不可時にMCPでTask issueを取得し--from-file用ファイルを書き出す手順がある（#277）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: 書き出し失敗時は黙ってフォールバックせず停止する旨が明記されている ---
+case "$NS277_RUN_SKILL_BODY" in
+  *'書き出しに失敗した場合'*'停止'*)
+    pass "skills/run/SKILL.md: 入力ファイル書き出し失敗時は停止する旨が明記されている（#277）" ;;
+  *)
+    fail "skills/run/SKILL.md: 入力ファイル書き出し失敗時は停止する旨が明記されている（#277）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: 列定義・区切り文字は既存load_from_fileの仕様をそのまま使う旨が明記されている ---
+case "$NS277_RUN_SKILL_BODY" in
+  *'新しいフォーマットは'*'増やさない'*)
+    pass "skills/run/SKILL.md: load_from_fileの既存フォーマットをそのまま使い増やさない旨が明記されている（#277）" ;;
+  *)
+    fail "skills/run/SKILL.md: load_from_fileの既存フォーマットをそのまま使い増やさない旨が明記されている（#277）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: 書き出し先ファイル名が check-repo-hygiene.sh の既存除外パターンに一致する ---
+#     （/.claude/.dev-workflow-* 。新規.gitignore追記が不要であることの根拠）
+if grep -qF '/.claude/.dev-workflow-*' "${REPO_ROOT}/scripts/check-repo-hygiene.sh"; then
+  case "$NS277_RUN_SKILL_BODY" in
+    *'.claude/.dev-workflow-wave-tasks.tsv'*)
+      pass "skills/run/SKILL.md: 書き出し先がcheck-repo-hygiene.shの既存除外パターンに一致する命名である（#277）" ;;
+    *)
+      fail "skills/run/SKILL.md: 書き出し先がcheck-repo-hygiene.shの既存除外パターンに一致する命名である（#277）" \
+        "記述が見つからない" ;;
+  esac
+else
+  fail "skills/run/SKILL.md: 書き出し先がcheck-repo-hygiene.shの既存除外パターンに一致する命名である（#277）" \
+    "check-repo-hygiene.sh に /.claude/.dev-workflow-* パターンが見つからない（前提が崩れている）"
+fi
+
+# --- scripts/plan-waves.sh: --from-file のコメントがファイルの作成者（runがMCPで書き出す）を説明している ---
+case "$NS277_PLAN_WAVES_BODY" in
+  *'このファイルは誰が作るか'*'MCP'*)
+    pass "scripts/plan-waves.sh: --from-fileの入力ファイルを誰が作るかがコメントで説明されている（#277）" ;;
+  *)
+    fail "scripts/plan-waves.sh: --from-fileの入力ファイルを誰が作るかがコメントで説明されている（#277）" \
+      "記述が見つからない" ;;
+esac
+
+# --- gh が使える環境では従来どおり load_from_gh（--epic経路）を通ることの回帰確認 ---
+#     （dev_workflow_gh_available=true 相当。既存のEpic #3実データ相当のPLAN_ARGS組み立てが
+#      --from-fileに置き換わっていないことを、SKILL.md側の分岐記述で確認する。
+#      plan-waves.sh自体の--epic/--from-file排他動作は既存テストで検証済み）
+case "$NS277_RUN_SKILL_BODY" in
+  *'if dev_workflow_gh_available; then'*'PLAN_ARGS+=(--epic "$EPIC_ISSUE_NUM")'*)
+    pass "skills/run/SKILL.md: gh利用可能時は従来どおり--epic経路のPLAN_ARGSを組み立てる（#277）" ;;
+  *)
+    fail "skills/run/SKILL.md: gh利用可能時は従来どおり--epic経路のPLAN_ARGSを組み立てる（#277）" \
+      "記述が見つからない" ;;
+esac
+
+unset NS277_RUN_SKILL_BODY NS277_PLAN_WAVES_BODY
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 

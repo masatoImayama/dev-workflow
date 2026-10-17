@@ -591,7 +591,14 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/plan-waves.sh" --epic 259 --lanes 3 --print
 ```
 
 - `--epic <Epic issue番号>`: 数値のEpic issue番号。`gh issue list --label task --state open --json number,body --limit 200` から依存グラフを構築する。本文の「- Epic: #N」行でNが異なるタスクは除外する（行が無い場合はフェイルオープンで含める）
-- `--from-file <TSV>`: GitHub に依存しないテスト用の入力差し替え
+- `--from-file <TSV>`: `gh` に依存しない入力差し替え。テストのフィクスチャとして使うだけでなく、
+  `gh` が使えない環境（クラウド等。`dev_workflow_gh_available` が偽）では**本番の自律実行でも
+  この経路を使う**。`plan-waves.sh` 自身は `mcp__github__*` を呼べない（シェルスクリプトのため）
+  ので、その場合は **`run`（`skills/run/SKILL.md`「Step 1」）が MCP で Task issue 群を取得し、
+  このファイルを書き出してから `--from-file` で渡す**。書き出しに失敗した場合は `run` が
+  理由を明示して停止する（黙って `--epic` にフォールバックしたり1レーンに縮退したりしない。
+  詳細は `core/references/github-access.md`）。列定義・区切り文字は常に1つ（上記 TSV 形式）で、
+  用途がテストか本番かでフォーマットを変えない
 - `--lanes N`: 並列度（既定は `DEV_WORKFLOW_MAX_LANES`、無ければ3）
 - `--skipped 4,7`: カンマ区切りの issue 番号。それらに依存するタスクを推移的にスキップする
 - `--print`: 上記のような人間向けの表を出力する（既定は機械可読な TSV）

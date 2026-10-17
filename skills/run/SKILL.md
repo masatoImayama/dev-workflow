@@ -477,14 +477,73 @@ fmt_duration() {
 再計算のたびに残りのタスクだけを対象とした**新しいウェーブ1**が得られる。
 すなわち、**出力の `wave 1 tasks ...` が常に「次に実行すべきウェーブ」である。**
 
+`gh` が使える場合は `--epic` を使う（従来どおり）。`gh` が使えない環境（クラウド等）では
+`plan-waves.sh` 自身は GitHub へ行けないため、**`--from-file` へ切り替え、その入力ファイルは
+このrun自身がMCPで取得して書き出す**（詳細は次項「`gh`不可時: MCPでTask issueを取得し
+`--from-file`用ファイルを書き出す」）。選択規則は `core/references/github-access.md` の
+`dev_workflow_gh_available` 1つに従う:
+
 ```bash
 cd "$EPIC_WT"
-PLAN_ARGS=(--epic "$EPIC_ISSUE_NUM" --lanes "$LANES")
+PLAN_ARGS=(--lanes "$LANES")
 [ -n "$SKIPPED_CSV" ] && PLAN_ARGS+=(--skipped "$SKIPPED_CSV")
+
+# shellcheck disable=SC1091
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/detect-env.sh"
+if dev_workflow_gh_available; then
+  PLAN_ARGS+=(--epic "$EPIC_ISSUE_NUM")
+else
+  # 次項の手順でMCPから取得したTask issue群を書き出した先（まだ書いていなければ
+  # 次項を先に実行する）。書き出しに失敗した場合は --from-file を渡さず、理由を
+  # 明示してここで停止する（黙って1レーンに落とさない）
+  WAVE_TASKS_FILE="${EPIC_WT}/.claude/.dev-workflow-wave-tasks.tsv"
+  PLAN_ARGS+=(--from-file "$WAVE_TASKS_FILE")
+fi
+
 PLAN="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/plan-waves.sh" "${PLAN_ARGS[@]}")"
 PLAN_EXIT=$?
 echo "$PLAN"
 ```
+
+#### `gh`不可時: MCPでTask issueを取得し`--from-file`用ファイルを書き出す
+
+**`plan-waves.sh` はシェルスクリプトであり、`mcp__github__*` を呼べない**
+（`core/references/github-access.md`「スクリプト層は『fail-soft＋ファイル入力』または
+『明示して退く』のどちらかにする」）。そのため `gh` が使えない環境では、**run 自身
+（このスキルを解釈しているエージェント）が** MCP で Task issue 群を取得し、
+`plan-waves.sh --from-file` が読める形式のファイルへ書き出す。
+
+1. `mcp__github__*` の該当ツールで、**label=`task`・state=`open`** の issue を本文
+   （`body`）付きで取得する（`gh issue list --label task --state open --json number,body`
+   の MCP 相当）
+2. 各 issue の本文から次を抜き出す（`scripts/plan-waves.sh` の `load_from_gh` が
+   `jq` で行っている抽出と同じ規則。**フォーマットを増やさない**）:
+   - 本文中の `- Epic:` 行。無ければ判定不能として含める（フェイルオープン）。
+     あれば `#<番号>` を取り出し、今回の Epic 番号と一致する行だけを残す
+     （一致しない・番号を含まない宣言は除外。`plan-waves.sh` 冒頭コメント参照）
+   - 本文中の `- 前提:` で始まる行（そのままの生テキスト。無ければ空文字列）
+   - 本文の `## 対象ファイル` 見出し直後の `- ` で始まる行をカンマ区切りにしたもの
+     （見出しが無ければ空文字列）
+3. 2 で残った open の Task issue の `- 前提:` 行が参照する issue 番号のうち、
+   1 の結果に含まれないものを `mcp__github__*` で個別に確認する（`state` と
+   `task` ラベルの有無）。**`--from-file` モードには `--epic` モードが持つ
+   「未知の依存を個別に`gh issue view`で確認する」機能が無いため**、closed
+   な前提タスクをあらかじめ行として含めておかないと `warn unknown-dep` として
+   無視されてしまう（依存が常に充足済みとして計算されるわけではない。
+   「失敗時の扱い」上は安全側だが、意図しない早期実行を招きうるため避ける）。
+   `task` ラベル付き・`CLOSED` 状態のものだけを3列目・4列目を空文字列にして追加する
+4. タブ区切り・1行1タスクで書き出す（`<issue番号>\t<state>\t<前提行>\t<対象ファイル>`。
+   列定義・区切り文字は `load_from_file` の既存仕様そのままであり、新しいフォーマットは
+   増やさない。`scripts/plan-waves.sh` 冒頭コメントの `--from-file` 節を参照）。
+   書き出し先は `${EPIC_WT}/.claude/.dev-workflow-wave-tasks.tsv`
+   （**ファイル名は `check-repo-hygiene.sh` が `.git/info/exclude` に整備済みの
+   `/.claude/.dev-workflow-*` パターンに一致させる。これにより新たな `.gitignore`
+   追記は不要**。ハーネス生成物を駆動先リポジトリのコミット履歴に混入させない
+   「ハーネス非注入原則」をそのまま満たす）
+5. **書き出しに失敗した場合（MCP取得の失敗・書き込み権限エラー等）は、`--from-file`
+   を渡さずここで停止し、理由を Epic issue にコメントする。** 黙って `--epic` に
+   フォールバックしたり、1レーンの完全逐次実行に落としたりしない
+   （`core/references/github-access.md`「行けないことを明示して退く」）
 
 - `PLAN_EXIT` が **3**（循環依存）なら、列挙されたタスクをそのままEpic issueにコメントし停止する
 - `warn missing-deps <番号>` / `warn unknown-dep <番号> <dep番号>` が出力に含まれる場合、
