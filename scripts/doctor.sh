@@ -95,16 +95,18 @@ fi
 
 echo
 
-if command -v docker >/dev/null 2>&1; then
-  if docker info >/dev/null 2>&1; then
-    echo "[OK] docker: $(command -v docker)（デーモンが起動しています）"
-  else
-    echo "[警告] docker info: Docker デーモンが起動していません。Docker Desktop を起動してください。"
-    echo "  クラウド等で Docker を使わない場合は DEV_WORKFLOW_SANDBOX_HOST=1 で host モードが使えます。"
-    echo "  成立しない機能: ビルドキャッシュ・検証スタンプ・コンテナ隔離（host モードでも実行自体は継続できます）"
-  fi
+# 最終判定は dev_workflow_docker_available に委譲する（gh 診断セクションと同様。
+# DEV_WORKFLOW_DOCKER_UNAVAILABLE による上書きもここで一元的に反映される。#291）。
+# command -v docker / docker info の直接呼び出しは、判定が偽だった場合の原因特定
+# （未インストール / デーモン未起動）の文言分岐にのみ使う。
+if dev_workflow_docker_available; then
+  echo "[OK] docker: $(command -v docker)（デーモンが起動しています）"
 else
-  echo "[警告] docker: 見つかりません。https://docs.docker.com/get-docker/ からインストールしてください。"
+  if command -v docker >/dev/null 2>&1; then
+    echo "[警告] docker info: Docker デーモンが起動していません。Docker Desktop を起動してください。"
+  else
+    echo "[警告] docker: 見つかりません。https://docs.docker.com/get-docker/ からインストールしてください。"
+  fi
   echo "  クラウド等で Docker を使わない場合は DEV_WORKFLOW_SANDBOX_HOST=1 で host モードが使えます。"
   echo "  成立しない機能: ビルドキャッシュ・検証スタンプ・コンテナ隔離（host モードでも実行自体は継続できます）"
 fi

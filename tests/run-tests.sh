@@ -19215,6 +19215,124 @@ DOCTOR_SIDEEFFECT2_STATUS_AFTER="$(cd "$DOCTOR_SIDEEFFECT_REPO" && git status --
 assert_eq "doctor.sh: クラウド判定・host強制でも副作用が無い（#273）" \
   "$DOCTOR_SIDEEFFECT2_STATUS_BEFORE" "$DOCTOR_SIDEEFFECT2_STATUS_AFTER"
 
+# --- ケース21: DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 時、必須依存セクションの Docker 診断が
+#     dev_workflow_docker_available に委譲され、サンドボックスセクション（hostモード・
+#     クラウド判定（Docker 利用不可））と矛盾しない（レビュー#291）。
+#     docker コマンド自体は（スタブ経由で）実在・起動済みだが、上書き変数で強制的に
+#     「利用不可」として扱われるシナリオであり、command -v docker / docker info を
+#     直接呼ぶ実装では [OK] のまま表示され続けて矛盾が再現する ---
+DOCTOR_DOCKER_UNAVAILABLE_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 DEV_WORKFLOW_FORCE_REMOTE=true \
+    HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_DOCKER_UNAVAILABLE_OUT" 2>&1
+)
+
+case "$(cat "$DOCTOR_DOCKER_UNAVAILABLE_OUT")" in
+  *"[OK] docker:"*) \
+    fail "doctor.sh: DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 時は必須依存セクションのdockerが[OK]にならない（#291）" \
+      "$(cat "$DOCTOR_DOCKER_UNAVAILABLE_OUT")" ;;
+  *"[警告] docker"*) \
+    pass "doctor.sh: DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 時は必須依存セクションのdockerが[警告]になる（#291）" ;;
+  *) fail "doctor.sh: DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 時は必須依存セクションのdockerが[警告]になる（#291）" \
+    "$(cat "$DOCTOR_DOCKER_UNAVAILABLE_OUT")" ;;
+esac
+
+case "$(cat "$DOCTOR_DOCKER_UNAVAILABLE_OUT")" in
+  *"hostモード"*"クラウド判定（Docker 利用不可）"*) \
+    pass "doctor.sh: サンドボックスセクションは hostモード（クラウド判定・Docker利用不可）を表示する（#291）" ;;
+  *) fail "doctor.sh: サンドボックスセクションは hostモード（クラウド判定・Docker利用不可）を表示する（#291）" \
+    "$(cat "$DOCTOR_DOCKER_UNAVAILABLE_OUT")" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# scripts/doctor.sh: docker / gh の判定ロジック直接再実装の再発防止（レビュー#291）
+#
+# Epic #267 でこのアンチパターン（command -v docker / docker info / gh auth status を
+# detect-env.sh を経由せず直接呼ぶ）が #283・#287・#291 と3回再発した（ADR-0013「教訓2」）。
+# 4度目を機械的に防ぐため、scripts/lib/detect-env.sh 以外のスクリプトがこれらを
+# 直接呼んでいないかを静的に検査する。許可リスト（AST_DIRECT_ENV_CALL_ALLOWLIST）に
+# 載っているファイルは、すでに正当な理由（原因特定の文言分岐）がコード側のコメントに
+# 残っている前提で許容する。scripts/doctor.sh を検知対象（走査対象のファイル集合）に
+# 含めることで、将来 doctor.sh に再び判定バイパスが混入してもファイル一覧の抜け漏れでは
+# 検知できなくなることを防ぐ（許可リストに載っていても最終判定の委譲自体は別途検証する）。
+# ---------------------------------------------------------------------------
+
+echo "== scripts/*: docker/gh 判定ロジックの直接再実装が無いことの静的検査（再発防止・レビュー#291） =="
+
+AST_DIRECT_ENV_CALL_PATTERN='command -v docker|docker info|gh auth status'
+
+# 許可リスト: 「原因特定の文言分岐」等、正当な理由があって直接呼んでいるファイル。
+# 新たにここへ追加する場合は、追加先のコード側にも理由をコメントで残すこと。
+#   - scripts/lib/detect-env.sh: 判定ロジックそのものの実装（正本）
+#   - scripts/check-prerequisites.sh: #283 で dev_workflow_docker_available /
+#     dev_workflow_gh_available への委譲に修正済み。直接呼び出しは原因特定のみ
+#     （docker_warning_message / gh_warning_message 内のコメント参照）
+#   - scripts/doctor.sh: #291 で同様に修正済み。直接呼び出しは原因特定のみ
+AST_DIRECT_ENV_CALL_ALLOWLIST='
+scripts/lib/detect-env.sh
+scripts/check-prerequisites.sh
+scripts/doctor.sh
+'
+
+check_no_direct_env_calls() {
+  # scripts/ 配下を走査し、docker/gh の判定を直接再実装している行が無いかを調べる。
+  # 許可リストに載っているファイルはスキップする（走査対象の一覧には含める。
+  # find の対象ディレクトリから単純に除外すると「検知対象に含める」という完了条件が
+  # 形骸化するため、ファイル単位で明示的に読んでから許可判定する）。
+  local hits=""
+  local f base
+  while IFS= read -r f; do
+    base="${f#"${REPO_ROOT}"/}"
+    case "$AST_DIRECT_ENV_CALL_ALLOWLIST" in
+      *$'\n'"${base}"$'\n'*) continue ;;
+    esac
+    # コメント専用行（grep -n 出力の "行番号:" 直後が # で始まる行）は、判定の
+    # 由来・経緯を説明する地の文であり実際の呼び出しではないため除外する
+    # （例: scripts/feedback-ledger.sh の `gh auth status` への言及はコメントのみ）。
+    local file_hits
+    file_hits="$(grep -nE "$AST_DIRECT_ENV_CALL_PATTERN" "$f" 2>/dev/null \
+      | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+    if [ -n "$file_hits" ]; then
+      hits="${hits}${base}:
+${file_hits}
+"
+    fi
+  done < <(find "${REPO_ROOT}/scripts" -type f -name '*.sh' | sort)
+
+  if [ -z "$hits" ]; then
+    pass "scripts/*: detect-env.sh / 許可リスト以外に docker/gh 判定の直接呼び出しが無い（レビュー#291）"
+  else
+    fail "scripts/*: detect-env.sh / 許可リスト以外に docker/gh 判定の直接呼び出しが無い（レビュー#291）" "$hits"
+  fi
+}
+
+check_no_direct_env_calls
+
+# 許可リストに載っているファイルが実際に走査対象のファイル集合に含まれていることを
+# 確認する（「検知対象に scripts/doctor.sh を含む」という完了条件そのものの検査）。
+AST_SCANNED_FILES="$(find "${REPO_ROOT}/scripts" -type f -name '*.sh' | sed "s#^${REPO_ROOT}/##" | sort)"
+for allowlisted_file in scripts/lib/detect-env.sh scripts/check-prerequisites.sh scripts/doctor.sh; do
+  case "$AST_SCANNED_FILES" in
+    *"$allowlisted_file"*) pass "scripts/*: 静的検査の走査対象に ${allowlisted_file} が含まれている（レビュー#291）" ;;
+    *) fail "scripts/*: 静的検査の走査対象に ${allowlisted_file} が含まれている（レビュー#291）" \
+      "$AST_SCANNED_FILES" ;;
+  esac
+done
+unset allowlisted_file
+
+# scripts/doctor.sh は許可リストに載っているが、そこに残る直接呼び出しは
+# 「判定が偽だった場合の原因特定の文言分岐」のみであり、最終判定自体は
+# dev_workflow_docker_available / dev_workflow_gh_available に委譲していることを確認する
+# （許可リストに載せたからといって判定ロジックの再実装が許されるわけではない）。
+if grep -qE 'if[[:space:]]+dev_workflow_docker_available[[:space:]]*;[[:space:]]*then' "$DOCTOR_SCRIPT_SRC"; then
+  pass "doctor.sh: Docker診断の最終判定を dev_workflow_docker_available に委譲している（レビュー#291）"
+else
+  fail "doctor.sh: Docker診断の最終判定を dev_workflow_docker_available に委譲している（レビュー#291）" \
+    "$(cat "$DOCTOR_SCRIPT_SRC")"
+fi
+
 # ---------------------------------------------------------------------------
 # scripts/install-optional-mcp.sh（任意MCPの導入。既定 dry-run。Task #219）
 #
