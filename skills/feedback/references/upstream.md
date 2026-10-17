@@ -11,6 +11,10 @@
 - 還流させるのは `scope=harness` かつ閾値に達したキーだけ
 - 駆動先が dev-workflow 自身のとき（`repo.is_dev_workflow=1`）は還流しない。その場で直す
 - **ユーザーの明示的な承認なしに投稿しない。** 外部サービスへの送信は取り消せない
+- **GitHub操作について**: 以下の `gh issue create` / `gh issue list --search` は
+  **ghバックエンドでの実行例**である。選択規則・MCP（`mcp__github__*`）との対応表は
+  `core/references/github-access.md` が正本であり、ここでは再掲しない。`gh` が使えない
+  環境では同文書の対応表から該当する `mcp__github__*` ツールを選ぶ
 
 ## 手順
 
@@ -64,6 +68,14 @@ GitHub / Slack / API のトークン様文字列・Windows と POSIX のホー�
 
 ### 5. 投稿する
 
+まず `gh` が使えるか確認する（#268 の判定を再実装しない）:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/feedback-ledger.sh" gh-available
+```
+
+exit 0（使える）なら `gh` バックエンドで投稿する:
+
 ```bash
 gh issue create --repo "${UPSTREAM}" \
   --title "<タイトル>" \
@@ -74,32 +86,40 @@ gh issue create --repo "${UPSTREAM}" \
 - タイトルは現象を1行で。`[feedback] ` の接頭辞を付ける
 - `--label` が存在しないリポジトリではラベル指定を外して再実行する（ラベルの有無で投稿を止めない）
 - 本文は `--body` に直接渡さず、いったんファイルへ書き出してから `--body-file` で渡す
-  （改行・引用符・日本語がシェルを通る回数を減らすため）。書き出し先は台帳配下:
+  （改行・引用符・日本語がシェルを通る回数を減らすため）
 
-```bash
-LEDGER_DIR="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/feedback-ledger.sh" path)"
-mkdir -p "${LEDGER_DIR}/upstream"
-# -> ${LEDGER_DIR}/upstream/<key>.md
-```
+exit 1（使えない）なら `mcp__github__*` の issue 作成ツール（`core/references/github-access.md`
+の対応表参照）で同じ内容（owner/repo・タイトル・本文・ラベル）を投稿する。
 
 ### 6. 投稿できないときの扱い
 
-次の場合は投稿せず、本文を `${LEDGER_DIR}/upstream/<key>.md` に残してパスを案内する:
+次の場合は投稿せず、本文を保存してパスを案内する:
 
-- `gh auth status` が失敗する（未認証）
+- `gh` も MCP も使えない、またはいずれも失敗した
 - ユーザーが投稿を承認しなかった
-- ネットワーク・権限エラーで `gh issue create` が失敗した
+- ネットワーク・権限エラーで作成が失敗した
+
+保存先は `unreflected-path` が返す絶対パスを使う（`${LEDGER_DIR}/upstream/<key>.md` を
+手で組み立てない。保存先ディレクトリも事前に作られる）:
+
+```bash
+UNREFLECTED_PATH="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/feedback-ledger.sh" unreflected-path --key "<key>")"
+```
 
 **投稿しなかったことを「還流済み」と報告しない。** 完了報告には
-「還流: なし（未認証のため本文を保存: <パス>）」のように理由とパスを書く。
+「還流: なし（gh/MCPが使えないため本文を保存: <パス>）」のように理由とパスを書く。
+台帳の観測記録自体は残るため（レコードを削除しない）、次回 `ready --scope harness` で
+同じキーが再び拾われ、後から還流し直せる（記録が失われない）。
 
 ## 重複を作らない
 
 同じキーで既に issue を作っている場合、新しい issue を立てずに既存 issue へコメントする。
+`gh` が使える場合:
 
 ```bash
 gh issue list --repo "${UPSTREAM}" --search "<key> in:body" --state all --json number,title,state
 ```
 
-`render-upstream` の本文にはキーが `` `<key>` `` として入るので、検索で拾える。
+`gh` が使えない場合は `mcp__github__*` の issue 検索ツールで同じ条件（`<key> in:body`）を
+検索する。`render-upstream` の本文にはキーが `` `<key>` `` として入るので、検索で拾える。
 既存 issue があれば、追加の観測回数と新しい根拠だけをコメントする。

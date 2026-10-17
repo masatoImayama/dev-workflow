@@ -29,6 +29,20 @@ worktree もサブエージェントの isolation worktree も**追加設定な�
 generator の Read/Edit のたびに確認が入る（＝自律動作が止まる）。だから worktree は必ず
 `.claude/worktrees/` 配下に作る。
 
+## GitHub操作について
+
+このスキル本文の `gh issue` / `gh pr` のbash片は**ghバックエンドでの実行例**である。
+GitHub操作（issue参照・コメント・作成・PR作成等）の選択規則・`gh`とMCP（`mcp__github__*`）の
+対応表は `core/references/github-access.md` が正本であり、ここでは再掲しない。`gh` が
+使えない環境（クラウド等）では、同文書の対応表から該当する `mcp__github__*` ツールを選ぶ。
+
+下記「起動時の確認」の `!`gh issue view $ARGUMENTS ...`` / `!`gh issue list ...`` の2行は
+Claude Codeがプロンプト構築時に自動実行する bash 直書き（コンテキスト注入）であり、
+MCPツール呼び出しに置き換えられない（MCPはツール呼び出しであり bash から呼べないため）。
+**この2行はghバックエンド限定である。** `gh` が使えない環境ではこの自動注入が空になりうるため、
+以降のPhaseで必要な情報（Epic本文・Task一覧）が不足していると感じた場合は、
+`mcp__github__*` で明示的に取得し直すこと。
+
 ## 起動時の確認
 
 **リポジトリ衛生プリフライトを最初に実行する。** git追跡された `.claude/settings.local.json`
@@ -104,10 +118,42 @@ echo "応答言語: ${RESOLVED_LANG}（source=${LANG_SOURCE}）"
   `RESOLVED_LANG` に関わらず英語規約のまま変えない（対象・対象外の表は
   `core/instructions.md`「応答言語」節を参照）
 
+### ブランチ運用モード（ローカル / 単一ブランチ運用）
+
+クラウドセッションでは**指定されたブランチ以外への push が想定されていない**ため、Epic
+ブランチと wave ブランチの2段構成（下記「ブランチ戦略」参照）が成立しない（Epic #267 D6・
+Task #278）。この場合は wave ブランチを作らず、**セッションに与えられた1本のブランチを
+epic ブランチとして扱う**単一ブランチ運用モードに切り替える。
+
+切り替え条件は `dev_workflow_is_remote`（#268）。明示上書きも用意する:
+
+```bash
+# shellcheck disable=SC1091
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/detect-env.sh"
+SESSION_BRANCH="$(git rev-parse --abbrev-ref HEAD)"   # run開始時点でセッションが既にチェックアウトしているブランチ
+
+if [ -n "${DEV_WORKFLOW_SINGLE_BRANCH:-}" ]; then
+  case "$DEV_WORKFLOW_SINGLE_BRANCH" in
+    0|false) SINGLE_BRANCH_MODE=0 ;;
+    *)       SINGLE_BRANCH_MODE=1 ;;
+  esac
+elif dev_workflow_is_remote; then
+  SINGLE_BRANCH_MODE=1
+else
+  SINGLE_BRANCH_MODE=0
+fi
+```
+
+- **ローカル（`SINGLE_BRANCH_MODE=0`、既定）**: 以降は従来どおり（この節の残りの変更は無い）
+- **単一ブランチ運用（`SINGLE_BRANCH_MODE=1`）**: 次項「Epicブランチ + 作業worktreeの準備」の
+  手順が変わる。`--lanes` の並列度自体は維持する（ブランチが1本でも worktree は複数持てる。
+  generator の isolation worktree は従来どおりレーンごとに作られる）
+
 ### Epicブランチ + 作業 worktree の準備
 
 Epic issue本文の「ブランチ」セクションからブランチ名を取得し、**Epic 専用の作業 worktree を
 `.claude/worktrees/<epicN>` に作成**する（`../<repo>-epicN` のような**兄弟ディレクトリは作らない**）。
+**これはローカル（`SINGLE_BRANCH_MODE=0`）のときの手順である。**
 
 なぜ `.claude/worktrees/` 配下か:
 - **並行 epic 実行**が可能（各 epic が独立した worktree を持つ）。
@@ -118,35 +164,49 @@ Epic issue本文の「ブランチ」セクションからブランチ名を取�
 - メインリポのチェックアウトを切り替えないので、他の作業を壊さない。
 
 ```bash
-# Epic issueからブランチ名を取得 (形式: epic/epicXX/[機能名])
-EPIC_BRANCH=$(gh issue view $ARGUMENTS --json body -q '.body' | grep -oP '`epic/epic\d+/[^`]+`' | tr -d '`' | head -1)
-EPIC_NUM=$(printf '%s' "$EPIC_BRANCH" | grep -oP 'epic\d+' | head -1)   # 例: epic259（sandbox-exec.sh の --epic 用の識別子）
-EPIC_ISSUE_NUM="${EPIC_NUM#epic}"   # 例: 259（plan-waves.sh の --epic 用。数値のEpic issue番号。ブランチ名の命名規則epic/epicXX上、epicXXの数値部分=Epic issue番号）
-
-# ブランチの存在確認
-git fetch origin
-git rev-parse --verify "origin/${EPIC_BRANCH}" >/dev/null 2>&1 || { echo "ERROR: ブランチ ${EPIC_BRANCH} が見つかりません"; exit 1; }
-
-# ローカル追跡ブランチを用意（無ければ origin から作成）
-git show-ref --verify --quiet "refs/heads/${EPIC_BRANCH}" || git branch "${EPIC_BRANCH}" "origin/${EPIC_BRANCH}"
-
-# Epic 専用 worktree を .claude/worktrees/<epicN> に作成（既存なら再利用）
-EPIC_WT=".claude/worktrees/${EPIC_NUM}"
-if [ -d "$EPIC_WT" ]; then
-  git -C "$EPIC_WT" checkout "${EPIC_BRANCH}" 2>/dev/null || true
+if [ "$SINGLE_BRANCH_MODE" -eq 1 ]; then
+  # 単一ブランチ運用: セッションが既にチェックアウトしているブランチ（$SESSION_BRANCH）を
+  # epic ブランチとして扱う。origin からの fetch・新規ブランチ作成・別worktreeの作成は
+  # 一切行わない（指定ブランチ以外への操作を避けるため）。EPIC_WT="." として、以降の
+  # 全ステップの `git -C "$EPIC_WT"` / `cd "$EPIC_WT"` をそのままセッションの作業ディレクトリに
+  # 向ける（この1変数だけで以降のステップは無変更で単一ブランチ運用に対応する）
+  EPIC_BRANCH="$SESSION_BRANCH"
+  EPIC_NUM=$(printf '%s' "$EPIC_BRANCH" | grep -oP 'epic\d+' | head -1)
+  EPIC_ISSUE_NUM="${EPIC_NUM#epic}"
+  EPIC_WT="."
 else
-  git worktree add "$EPIC_WT" "${EPIC_BRANCH}"
+  # Epic issueからブランチ名を取得 (形式: epic/epicXX/[機能名])
+  EPIC_BRANCH=$(gh issue view $ARGUMENTS --json body -q '.body' | grep -oP '`epic/epic\d+/[^`]+`' | tr -d '`' | head -1)
+  EPIC_NUM=$(printf '%s' "$EPIC_BRANCH" | grep -oP 'epic\d+' | head -1)   # 例: epic259（sandbox-exec.sh の --epic 用の識別子）
+  EPIC_ISSUE_NUM="${EPIC_NUM#epic}"   # 例: 259（plan-waves.sh の --epic 用。数値のEpic issue番号。ブランチ名の命名規則epic/epicXX上、epicXXの数値部分=Epic issue番号）
+
+  # ブランチの存在確認
+  git fetch origin
+  git rev-parse --verify "origin/${EPIC_BRANCH}" >/dev/null 2>&1 || { echo "ERROR: ブランチ ${EPIC_BRANCH} が見つかりません"; exit 1; }
+
+  # ローカル追跡ブランチを用意（無ければ origin から作成）
+  git show-ref --verify --quiet "refs/heads/${EPIC_BRANCH}" || git branch "${EPIC_BRANCH}" "origin/${EPIC_BRANCH}"
+
+  # Epic 専用 worktree を .claude/worktrees/<epicN> に作成（既存なら再利用）
+  EPIC_WT=".claude/worktrees/${EPIC_NUM}"
+  if [ -d "$EPIC_WT" ]; then
+    git -C "$EPIC_WT" checkout "${EPIC_BRANCH}" 2>/dev/null || true
+  else
+    git worktree add "$EPIC_WT" "${EPIC_BRANCH}"
+  fi
 fi
 ```
 
 **重要**: 以降の**すべてのステップ**（Docker 準備・タスクループ・generator/evaluator 起動・
-commit/push・PR 作成・クリーンアップ）は、この `$EPIC_WT`（= `.claude/worktrees/<epicN>`）を
-**作業ディレクトリ**として実行すること。**git コマンドは `cd "$EPIC_WT"` してから叩かず、
-必ず `git -C "$EPIC_WT" ...` で対象を明示する**（`cd` 直後の git 実行は「未信頼な hooks が
-走りうる」として承認プロンプトを誘発するため。issue #140）。`sandbox-exec.sh` /
-`check-readability.sh` のように呼び出し元 cwd に依存するコマンドを叩く場合に限り
-`cd "$EPIC_WT"` を使い、その直後に git を続けない。
-**メインリポのチェックアウトを epic ブランチに切り替えてはならない**（兄弟 worktree も作らない）。
+commit/push・PR 作成・クリーンアップ）は、この `$EPIC_WT`（ローカルは
+`.claude/worktrees/<epicN>`、単一ブランチ運用は `.`）を**作業ディレクトリ**として実行すること。
+**git コマンドは `cd "$EPIC_WT"` してから叩かず、必ず `git -C "$EPIC_WT" ...` で対象を明示する**
+（`cd` 直後の git 実行は「未信頼な hooks が走りうる」として承認プロンプトを誘発するため。
+issue #140）。`sandbox-exec.sh` / `check-readability.sh` のように呼び出し元 cwd に依存する
+コマンドを叩く場合に限り `cd "$EPIC_WT"` を使い、その直後に git を続けない。
+**メインリポのチェックアウトを epic ブランチに切り替えてはならない**（兄弟 worktree も作らない。
+単一ブランチ運用では `$EPIC_WT="."` 自体がセッションのメインの作業ディレクトリであり、
+この制約は該当しない）。
 
 ### 自律実行の開始を記録
 
@@ -157,6 +217,12 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/notify-slack.sh" run-start "Epic #$ARGUMENTS
 ```
 
 worktree内から実行してもマーカーはメインリポのルートに置かれるため、実行場所は問わない。
+
+**このマーカーの1行目（`Epic #$ARGUMENTS`）は、Slackが使えない環境（クラウド等）での
+Epic issueフォールバック（Task #280）がEpic番号を取り出す際にも使われる。** ラベルの書式を
+変える場合は `scripts/notify-slack.sh` のフォールバック実装（`EPIC_NUM` の抽出）も合わせて
+確認すること。詳細は `scripts/notify-slack.sh` のヘッダコメントを参照（正本はスクリプト側、
+ここでは再掲しない）。
 
 run マーカーが置かれた直後に、ハング・スリープを検知する watchdog を起動する（`--start`
 自体は自己デタッチして**即座に返る**。監視ループはプロセス外で動く常駐プロセスに移る）。
@@ -174,7 +240,22 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/watchdog.sh" --start --epic "$EPIC_NUM" --la
 
 **`docker build` / `docker compose up` を直接叩いてはならない。** イメージのビルド・
 コンテナの起動・compose サービスの起動はすべて `sandbox-exec.sh` に集約されている（後述）。
-スキル側がやることは、`--print-plan` で解決結果を確認し、`--warm` を1回流すことだけである。
+スキル側がやることは、`--print-plan` で解決結果（`mode=dockerfile` / `mode=compose` /
+`mode=host` / `mode=none`）を確認し、**mode ごとに次の3つへ分岐すること**である
+（#271 で SessionStart の Docker 必須判定は非ブロッキング警告へ格下げされたため、
+**実際に Docker が必要なタイミング＝ここ run/goal の冒頭**で止める責務を引き継ぐ）。
+
+- **`mode=dockerfile` / `mode=compose`**: Docker の有無とデーモン起動をここで確認し、
+  **不足していればここで停止する**
+- **`mode=host`**: Docker を使わずホスト上で直接実行する。**警告を出して継続**し、
+  **Epic issue に「host モードで実行した」事実をコメントで残す**（後からログを見た人が
+  「コンテナ分離無しで走った」と判別できるようにするため）。この場合、generator /
+  evaluator の分離は**コンテナ分離（epicごとのコンテナ）から worktree 分離に代わる**。
+  各レーンは既に isolation worktree を使っているため**追加実装は不要**であり、ここでの
+  変更は「隔離の説明が変わる」だけである
+- **`mode=none`**: サンドボックス定義が見つからない。**従来どおりエラーで停止する**
+  （供給経路の案内に「クラウドでは `DEV_WORKFLOW_SANDBOX_HOST=1` で host モードが
+  使える」旨も含める）
 
 ```bash
 cd "$EPIC_WT"   # 以降の作業ディレクトリを Epic 専用 worktree に固定
@@ -191,10 +272,38 @@ if printf '%s\n' "$PLAN" | grep -q '^mode=none$'; then
   echo "     雛形を自動生成する場合: bash ${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh --init"
   echo "  2. 環境変数で渡す: DEV_WORKFLOW_DOCKERFILE / DEV_WORKFLOW_DOCKER_COMPOSE_FILE / DEV_WORKFLOW_DOCKER_IMAGE"
   echo "  3. リポジトリ直下に置いてコミットする（チームで run を共有する場合のみ）"
+  echo "  クラウド等で Docker を使わない場合は DEV_WORKFLOW_SANDBOX_HOST=1 で host モードが使えます"
   exit 1
 fi
 
-# キャッシュを温める（イメージが無ければここで自動ビルドされる。最初のタスクにビルドコストを負担させない）
+# mode=host: サンドボックス定義未検出、または DEV_WORKFLOW_SANDBOX_HOST 明示指定により
+# Docker を使わずホスト上で直接実行する。隔離は generator/evaluator の isolation worktree
+# に委ねる（コンテナ分離 → worktree 分離。各レーンは既にworktree単位なので追加実装は不要）。
+# 警告を出して継続し、Epic issue に「host モードで実行した」事実をコメントで残す
+# （後からログを見た人がコンテナ分離無しで走ったと判別できるようにするため）
+if printf '%s\n' "$PLAN" | grep -q '^mode=host$'; then
+  echo "WARNING: サンドボックス定義が見つからないか DEV_WORKFLOW_SANDBOX_HOST が指定されたため、host モードで実行します。"
+  echo "WARNING: 実装・テスト・ビルドはDockerコンテナではなくホスト上で直接実行されます（隔離はworktree単位になります）。"
+  gh issue comment "$ARGUMENTS" \
+    --body "NOTE: このrunはサンドボックス定義未検出、または明示指定により host モード（Dockerコンテナ分離なし）で実行されました。generator/evaluatorの隔離はisolation worktreeに委ねられています。"
+fi
+
+# mode=dockerfile / mode=compose: 実際に Docker が必要になるのはここ。SessionStart
+# （check-prerequisites.sh）は非ブロッキング警告止まりなので（#271）、必須判定はここで
+# 行い、不足していれば停止する（従来 SessionStart が担っていたブロック責務の移設）。
+# 判定は scripts/lib/detect-env.sh の dev_workflow_docker_available に委譲する（独自の
+# command -v docker / docker info 再実装はしない。#283 と同じアンチパターンの再発防止。#287）
+# shellcheck disable=SC1091
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/detect-env.sh"
+if printf '%s\n' "$PLAN" | grep -qE '^mode=(dockerfile|compose)$'; then
+  if ! dev_workflow_docker_available; then
+    echo "ERROR: Docker が使用できません（docker コマンド未検出、またはデーモン未起動）。https://docs.docker.com/get-docker/ からインストールするか、Docker Desktop を起動してください。"
+    exit 1
+  fi
+fi
+
+# キャッシュを温める（イメージが無ければここで自動ビルドされる。最初のタスクにビルドコストを負担させない。
+# host モードでは --warm に渡したビルドコマンドがそのままホスト上で実行される）
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sandbox-exec.sh" --epic "$EPIC_NUM" --warm '[build-command]'
 ```
 
@@ -414,14 +523,73 @@ fmt_duration() {
 再計算のたびに残りのタスクだけを対象とした**新しいウェーブ1**が得られる。
 すなわち、**出力の `wave 1 tasks ...` が常に「次に実行すべきウェーブ」である。**
 
+`gh` が使える場合は `--epic` を使う（従来どおり）。`gh` が使えない環境（クラウド等）では
+`plan-waves.sh` 自身は GitHub へ行けないため、**`--from-file` へ切り替え、その入力ファイルは
+このrun自身がMCPで取得して書き出す**（詳細は次項「`gh`不可時: MCPでTask issueを取得し
+`--from-file`用ファイルを書き出す」）。選択規則は `core/references/github-access.md` の
+`dev_workflow_gh_available` 1つに従う:
+
 ```bash
 cd "$EPIC_WT"
-PLAN_ARGS=(--epic "$EPIC_ISSUE_NUM" --lanes "$LANES")
+PLAN_ARGS=(--lanes "$LANES")
 [ -n "$SKIPPED_CSV" ] && PLAN_ARGS+=(--skipped "$SKIPPED_CSV")
+
+# shellcheck disable=SC1091
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/detect-env.sh"
+if dev_workflow_gh_available; then
+  PLAN_ARGS+=(--epic "$EPIC_ISSUE_NUM")
+else
+  # 次項の手順でMCPから取得したTask issue群を書き出した先（まだ書いていなければ
+  # 次項を先に実行する）。書き出しに失敗した場合は --from-file を渡さず、理由を
+  # 明示してここで停止する（黙って1レーンに落とさない）
+  WAVE_TASKS_FILE="${EPIC_WT}/.claude/.dev-workflow-wave-tasks.tsv"
+  PLAN_ARGS+=(--from-file "$WAVE_TASKS_FILE")
+fi
+
 PLAN="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/plan-waves.sh" "${PLAN_ARGS[@]}")"
 PLAN_EXIT=$?
 echo "$PLAN"
 ```
+
+#### `gh`不可時: MCPでTask issueを取得し`--from-file`用ファイルを書き出す
+
+**`plan-waves.sh` はシェルスクリプトであり、`mcp__github__*` を呼べない**
+（`core/references/github-access.md`「スクリプト層は『fail-soft＋ファイル入力』または
+『明示して退く』のどちらかにする」）。そのため `gh` が使えない環境では、**run 自身
+（このスキルを解釈しているエージェント）が** MCP で Task issue 群を取得し、
+`plan-waves.sh --from-file` が読める形式のファイルへ書き出す。
+
+1. `mcp__github__*` の該当ツールで、**label=`task`・state=`open`** の issue を本文
+   （`body`）付きで取得する（`gh issue list --label task --state open --json number,body`
+   の MCP 相当）
+2. 各 issue の本文から次を抜き出す（`scripts/plan-waves.sh` の `load_from_gh` が
+   `jq` で行っている抽出と同じ規則。**フォーマットを増やさない**）:
+   - 本文中の `- Epic:` 行。無ければ判定不能として含める（フェイルオープン）。
+     あれば `#<番号>` を取り出し、今回の Epic 番号と一致する行だけを残す
+     （一致しない・番号を含まない宣言は除外。`plan-waves.sh` 冒頭コメント参照）
+   - 本文中の `- 前提:` で始まる行（そのままの生テキスト。無ければ空文字列）
+   - 本文の `## 対象ファイル` 見出し直後の `- ` で始まる行をカンマ区切りにしたもの
+     （見出しが無ければ空文字列）
+3. 2 で残った open の Task issue の `- 前提:` 行が参照する issue 番号のうち、
+   1 の結果に含まれないものを `mcp__github__*` で個別に確認する（`state` と
+   `task` ラベルの有無）。**`--from-file` モードには `--epic` モードが持つ
+   「未知の依存を個別に`gh issue view`で確認する」機能が無いため**、closed
+   な前提タスクをあらかじめ行として含めておかないと `warn unknown-dep` として
+   無視されてしまう（依存が常に充足済みとして計算されるわけではない。
+   「失敗時の扱い」上は安全側だが、意図しない早期実行を招きうるため避ける）。
+   `task` ラベル付き・`CLOSED` 状態のものだけを3列目・4列目を空文字列にして追加する
+4. タブ区切り・1行1タスクで書き出す（`<issue番号>\t<state>\t<前提行>\t<対象ファイル>`。
+   列定義・区切り文字は `load_from_file` の既存仕様そのままであり、新しいフォーマットは
+   増やさない。`scripts/plan-waves.sh` 冒頭コメントの `--from-file` 節を参照）。
+   書き出し先は `${EPIC_WT}/.claude/.dev-workflow-wave-tasks.tsv`
+   （**ファイル名は `check-repo-hygiene.sh` が `.git/info/exclude` に整備済みの
+   `/.claude/.dev-workflow-*` パターンに一致させる。これにより新たな `.gitignore`
+   追記は不要**。ハーネス生成物を駆動先リポジトリのコミット履歴に混入させない
+   「ハーネス非注入原則」をそのまま満たす）
+5. **書き出しに失敗した場合（MCP取得の失敗・書き込み権限エラー等）は、`--from-file`
+   を渡さずここで停止し、理由を Epic issue にコメントする。** 黙って `--epic` に
+   フォールバックしたり、1レーンの完全逐次実行に落としたりしない
+   （`core/references/github-access.md`「行けないことを明示して退く」）
 
 - `PLAN_EXIT` が **3**（循環依存）なら、列挙されたタスクをそのままEpic issueにコメントし停止する
 - `warn missing-deps <番号>` / `warn unknown-dep <番号> <dep番号>` が出力に含まれる場合、
@@ -770,34 +938,52 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/record-agent-tokens.sh" record \
 **読み取れない場合はそのレーンの記録をスキップしてよい。記録の成否で自律ループを止めない。**
 連続処理により1レコードが複数タスク分になるため、Epic #42 のベースライン（81k〜150k/タスク）と
 比較するときは `--note` のタスク件数で割って読むこと。
-### Step 5: wave ブランチへレーンを取り込む
+### Step 5: レーンを取り込む（wave ブランチ運用 / 単一ブランチ運用）
 
-全レーン完了後、Epic worktreeでwaveブランチを作成し、（1件以上のタスクを取り込めた）レーンを
-レーン記号順に取り込む。**1レーンは複数タスク分のコミットを持つ**ため、`--task` にはそのレーンで
-成功したタスク番号をカンマ区切りで渡す。**`--create` は「1本目のレーン」ではなく、最初に実際に取り込むレーンに
-付ける。** 取り込み対象はレーン内ゲートに通ったレーンに限られるため、issue番号順で先頭の
-レーン（例: レーンA）がレーン内ゲートに失敗していれば、`--create` はレーンBなど次に取り込む
-レーンに付く。
+全レーン完了後、（1件以上のタスクを取り込めた）レーンをレーン記号順に取り込む。**1レーンは
+複数タスク分のコミットを持つ**ため、`--task` にはそのレーンで成功したタスク番号をカンマ区切りで
+渡す。取り込み先は `$SINGLE_BRANCH_MODE`（「ブランチ運用モード」節）で分岐する。
+
+- **ローカル（既定）**: Epic worktreeでwaveブランチを作成し、そこへ取り込む。`--create` は
+  「1本目のレーン」ではなく、**最初に実際に取り込むレーン**に付ける。取り込み対象はレーン内
+  ゲートに通ったレーンに限られるため、issue番号順で先頭のレーン（例: レーンA）がレーン内ゲートに
+  失敗していれば、`--create` はレーンBなど次に取り込むレーンに付く
+- **単一ブランチ運用（クラウド等）**: wave ブランチを**作らず**、レーンを直接 `$EPIC_BRANCH`
+  （= このモードでは `$EPIC_WT` でチェックアウト済みのブランチそのもの）へ取り込む。
+  `--single-branch` を渡し、**`--create` は常に付けない**（宛先は常に既存の epic ブランチ
+  であり新規作成しないため。`scripts/merge-lane.sh` 側も `--create` との併用を exit 2 で拒否する）
 
 ```bash
 cd "$EPIC_WT"
 MERGE_START_SEC=$(date +%s)   # 「統合」フェーズ（merge-lane.sh群）の計測開始
 
-# 最初に実際に取り込むレーン（レーンAとは限らない）: --create でwaveブランチをWAVE_BASEから作成する
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/merge-lane.sh" \
-  --wave-branch "wave/${EPIC_NUM}/${WAVE_NO}" --expected-base "$WAVE_BASE" \
-  --lane-branch "[レーンAの作業ブランチ]" --task "<レーンAで成功したタスク番号のカンマ区切り>" --create
+MERGE_ARGS=(--expected-base "$WAVE_BASE")
+if [ "$SINGLE_BRANCH_MODE" -eq 1 ]; then
+  MERGE_TARGET="$EPIC_BRANCH"
+  MERGE_ARGS+=(--single-branch)   # 宛先は既存のepicブランチなので--createは常に付けない
+else
+  MERGE_TARGET="wave/${EPIC_NUM}/${WAVE_NO}"
+fi
 
-# 2本目以降: waveブランチは既に存在するので --create は不要
+# 最初に実際に取り込むレーン（レーンAとは限らない）。ローカルのみ --create でwaveブランチを
+# WAVE_BASEから作成する
+FIRST_MERGE_ARGS=("${MERGE_ARGS[@]}")
+[ "$SINGLE_BRANCH_MODE" -eq 0 ] && FIRST_MERGE_ARGS+=(--create)
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/merge-lane.sh" \
-  --wave-branch "wave/${EPIC_NUM}/${WAVE_NO}" --expected-base "$WAVE_BASE" \
+  --wave-branch "$MERGE_TARGET" "${FIRST_MERGE_ARGS[@]}" \
+  --lane-branch "[レーンAの作業ブランチ]" --task "<レーンAで成功したタスク番号のカンマ区切り>"
+
+# 2本目以降: ローカルはwaveブランチが既に存在するので--create不要。単一ブランチ運用も同様に
+# --createを付けない（宛先が最初から存在するepicブランチのため、1本目と扱いは変わらない）
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/merge-lane.sh" \
+  --wave-branch "$MERGE_TARGET" "${MERGE_ARGS[@]}" \
   --lane-branch "[レーンBの作業ブランチ]" --task "<レーンBで成功したタスク番号のカンマ区切り>"
 
 MERGE_END_SEC=$(date +%s)
 MERGE_SEC=$((MERGE_END_SEC - MERGE_START_SEC))
 ```
 
-終了コードで扱いを分岐する:
+終了コードで扱いを分岐する（モードに関わらず共通。検証ロジックはモードで変わらない）:
 
 | 終了コード | 意味 | 扱い |
 |---|---|---|
@@ -807,35 +993,45 @@ MERGE_SEC=$((MERGE_END_SEC - MERGE_START_SEC))
 | 2 | 引数エラー | runの呼び出しミス。停止して報告する |
 | 1 | その他の失敗 | 停止して報告する |
 
-取り込めなかったレーンはこの時点でwaveに含まれない。**先に取り込めたレーンの成果は活かし、
-ウェーブ全体は捨てない。**
+取り込めなかったレーンはこの時点で `$MERGE_TARGET` に含まれない。**先に取り込めたレーンの成果は
+活かし、ウェーブ全体は捨てない。**
 
 **取り込めたレーンが0本の場合**（全レーンがレーン内ゲートに失敗した、またはレーン内ゲートに
-通った全レーンが `merge-lane.sh` から exit 10/11 で拒否された）、`merge-lane.sh --create` が
-一度も成功しておらず `wave/${EPIC_NUM}/${WAVE_NO}` は存在しない。この場合は **Step 6・Step 7 を
-実行せず**、このウェーブの各タスクの試行回数を加算したうえで Step 1 に戻る（次ウェーブへ）。
+通った全レーンが `merge-lane.sh` から exit 10/11 で拒否された）:
+- **ローカル**: `merge-lane.sh --create` が一度も成功しておらず `wave/${EPIC_NUM}/${WAVE_NO}` は
+  存在しない
+- **単一ブランチ運用**: `$EPIC_BRANCH` 自体が一切動いていない
 
-### Step 6: wave ブランチの取り込み検証（可読性ガード）
+いずれの場合も **Step 6・Step 7 を実行せず**、このウェーブの各タスクの試行回数を加算したうえで
+Step 1 に戻る（次ウェーブへ）。
 
-全レーンの取り込み（成功分のみ）が終わったら、waveブランチ上で**可読性ガードだけ**を実行する。
-merge-base 完全一致検証は Step 5 の `merge-lane.sh` が既に行っている。**プロジェクトの全テストは
-ここでは走らせない**（Epic につき1回、全ウェーブ完了後の「Epic 統合ゲート」節に集約する。
-「機械的ゲートの三段構成」参照）。
+### Step 6: 取り込み検証（可読性ガード）
+
+全レーンの取り込み（成功分のみ）が終わったら、取り込み先ブランチ上で**可読性ガードだけ**を
+実行する。merge-base 完全一致検証は Step 5 の `merge-lane.sh` が既に行っている。**プロジェクトの
+全テストはここでは走らせない**（Epic につき1回、全ウェーブ完了後の「Epic 統合ゲート」節に集約
+する。「機械的ゲートの三段構成」参照）。
 **このStepはStep 5で取り込めたレーンが1本以上ある場合のみ実行する**（0本の場合はStep 5末尾の
-分岐を参照）。念のため冒頭で wave ブランチの存在を確認してから進む:
+分岐を参照）。
+
+- **ローカル**: 念のため冒頭で wave ブランチの存在を確認してから checkout する
+- **単一ブランチ運用**: `merge-lane.sh` が既に `$EPIC_BRANCH` を checkout 済みなので、
+  追加の checkout は不要（存在確認も不要。宛先は Step 5 開始前から常に存在する）
 
 ```bash
 # git は git -C で対象 worktree を明示する（cd 直後の git 実行を避ける。issue #140）
-git -C "$EPIC_WT" rev-parse --verify -q "refs/heads/wave/${EPIC_NUM}/${WAVE_NO}" >/dev/null || {
-  echo "ERROR: wave/${EPIC_NUM}/${WAVE_NO} が存在しません（取り込めたレーンが0本）。Step 7を実行せずStep 1へ戻ってください"
-  exit 1
-}
-git -C "$EPIC_WT" checkout "wave/${EPIC_NUM}/${WAVE_NO}"
+if [ "$SINGLE_BRANCH_MODE" -eq 0 ]; then
+  git -C "$EPIC_WT" rev-parse --verify -q "refs/heads/wave/${EPIC_NUM}/${WAVE_NO}" >/dev/null || {
+    echo "ERROR: wave/${EPIC_NUM}/${WAVE_NO} が存在しません（取り込めたレーンが0本）。Step 7を実行せずStep 1へ戻ってください"
+    exit 1
+  }
+  git -C "$EPIC_WT" checkout "wave/${EPIC_NUM}/${WAVE_NO}"
+fi
 
 # check-readability.sh は内部で bare git（cwd依存）を使うため、ここでは cd が必要
 # （git の実行そのものは上で完了しており、この cd の後に git は続かない）
 cd "$EPIC_WT"
-# 可読性ガード — waveブランチの差分に対して実行（PostToolUseフックと同じ判定）
+# 可読性ガード — 取り込み先ブランチの差分に対して実行（PostToolUseフックと同じ判定）
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-readability.sh" --git
 
 MERGE_END_SEC=$(date +%s)   # 「統合」フェーズ（merge-lane.sh群＋可読性ガード）の計測終了
@@ -860,14 +1056,30 @@ MERGE_SEC=$((MERGE_END_SEC - MERGE_START_SEC))
 
 epicへの取り込みは、waveがWAVE_BASEの子孫であるため取り込み検証通過後は必ずfast-forwardになる。
 
+- **ローカル**: wave ブランチを epic ブランチへ `--ff-only` で進める
+- **単一ブランチ運用**: Step 5 で既にレーンを `$EPIC_BRANCH` へ直接取り込んでいるため、
+  この `--ff-only` マージ自体は不要（取り込み先が最初から epic ブランチなので進める先が無い）。
+  **push だけは両モード共通で必要**
+
 ```bash
 # git は git -C で対象 worktree を明示する（cd 直後の git 実行を避ける。issue #140）
 git -C "$EPIC_WT" checkout "${EPIC_BRANCH}"
-git -C "$EPIC_WT" merge --ff-only "wave/${EPIC_NUM}/${WAVE_NO}"
+if [ "$SINGLE_BRANCH_MODE" -eq 0 ]; then
+  git -C "$EPIC_WT" merge --ff-only "wave/${EPIC_NUM}/${WAVE_NO}"
+fi
+
+# push対象が指定ブランチと異なる場合は理由を明示して停止する（Task #278。クラウドでは
+# 指定されたブランチ以外へのpushが想定されていない。SESSION_BRANCHは「ブランチ運用モード」
+# 節で記録済み）
+if [ "$SINGLE_BRANCH_MODE" -eq 1 ] && [ "$EPIC_BRANCH" != "$SESSION_BRANCH" ]; then
+  echo "ERROR: push対象（${EPIC_BRANCH}）がセッション指定ブランチ（${SESSION_BRANCH}）と異なります。停止します。" >&2
+  exit 1
+fi
 git -C "$EPIC_WT" push origin "${EPIC_BRANCH}"
 ```
 
-**Epicへのforce pushは行わない。waveブランチはoriginへpushしない**（ローカルの一時ブランチ）。
+**Epicへのforce pushは行わない。waveブランチはoriginへpushしない**（ローカルの一時ブランチ。
+単一ブランチ運用ではwaveブランチ自体を作らないため、そもそも該当しない）。
 
 1. 取り込めたレーンに対応するTask issueをクローズする: `gh issue close [番号]`
 2. Epic issueの進捗を更新する
@@ -1235,6 +1447,15 @@ BODY
 
 一括レビューまで終えたら、**必ずPRを作成する。** これがrunコマンドの最終出力であり、PRのURLを表示して完了とする。
 PRを作成せずにrunを終了してはならない。
+
+下記の `git push` / `gh pr create` は**ghバックエンドでの実行例**である（`core/references/github-access.md`
+参照）。`gh` が使えない場合は該当する `mcp__github__*` のPR作成ツールを使う。**MCPでも作成できない
+場合**（ツールが無い・呼び出しが失敗する等）は、コードを失わないことを優先する: **push はこの時点で
+既に完了している前提**（`git push` 自体は MCP 不要の git 操作であり、常に実行できる）なので、
+「コミット・push済みであること」と「PR未作成であること」を Epic issue にコメントで残し、**そこで
+停止する**（Task #278。黙って完了通知を出さない。達成条件5「main向けPRが作成されている」を
+満たせないまま終える旨も明記する）。単一ブランチ運用（`SINGLE_BRANCH_MODE=1`）かどうかに関わらず
+同じ扱いである（PR作成の経路自体はブランチ運用モードに依存しない）。
 
 **Epic 統合ゲートが2回再試行後も不合格のまま終わった場合、下記PR本文の `## Summary` の直前に
 「⚠️ Epic 統合ゲート不合格: [失敗したテスト名の要約]」の1行を必ず追加すること。** 通過している

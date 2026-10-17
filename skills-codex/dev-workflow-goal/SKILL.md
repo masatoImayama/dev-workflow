@@ -41,6 +41,11 @@ planner の出力を確認し、承認を求める。
 `dev-workflow-run` の手順を Epic issue 番号に対して実行する。
 自律実行の開始記録・機械的ゲート・Epic一括レビュー・PR作成・完了通知まで含む。
 
+実装・テストは Docker sandbox 内で行うのが既定だが、サンドボックス定義が無い・
+`DEV_WORKFLOW_SANDBOX_HOST=1` が指定された場合は host モード（ホスト上で直接実行、
+隔離は Epic worktree 単位）になる（`dev-workflow-run`「サンドボックスの準備」参照）。
+いずれもユーザー確認なしで完全自律動作する。
+
 ## 注意
 
 ヘッドレス実行（`codex exec`）では Phase 2 の承認が取れない。

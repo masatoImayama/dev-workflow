@@ -42,6 +42,17 @@
 #   除去。#231）。要素が「なし」（正規化後の完全一致）の場合はその要素を実ファイルパスとして
 #   扱わない（対象ファイル0件の明示宣言。core/roles/planner.md「触るファイルが無いタスク」参照）。
 #
+#   このファイルは誰が作るか: 本番の自律実行（`dev-workflow:run`）では、`gh` が使えない
+#   環境（クラウド等。`dev_workflow_gh_available` が偽）のときに限り、**run 自身が MCP
+#   （`mcp__github__*`）で Task issue 群を取得して書き出す**（`skills/run/SKILL.md`
+#   「Step 1: ウェーブ計画を取得する」の `gh`不可時の節）。このスクリプト自身は
+#   `mcp__github__*` を呼べない（シェルスクリプトのため）ので、MCP結果の受け渡しは
+#   常にこのファイル経由になる。`tests/run-tests.sh` がテスト用フィクスチャとして使うのも
+#   同じ入力経路であり、フォーマットは両者で共通（新しいフォーマットを増やさない）。
+#   `load_from_gh` が持つ「未知の依存先issueの state を個別に確認する」機能はこの経路には
+#   無いため、書き出す側は closed な前提タスクもあらかじめ行として含めておく必要がある
+#   （含めないと `warn unknown-dep` として無視される）。
+#
 # --lanes N: 既定3。環境変数 DEV_WORKFLOW_MAX_LANES があればそれを既定にする。
 # --skipped: カンマ区切りの issue 番号。それらに依存するタスクは推移的にスキップする。
 # --print: 人間向けの表を出す（ドライラン。既定は機械可読な TSV）。
@@ -110,9 +121,14 @@
 #      実効並列度 = 実際に割り当てられた各(ウェーブ,サブバッチ)組の最大タスク数。0件のときは出さない）
 #   skip	<番号>	reason	depends-on-skipped	<依存先番号>
 #
-# 終了コード: 0=成功 2=引数エラー 3=循環依存（循環に含まれるタスクを stderr に列挙して停止）
+# 終了コード: 0=成功 2=引数エラー（`--epic` 使用時に `gh` が利用不可の場合を含む。#275）
+#            3=循環依存（循環に含まれるタスクを stderr に列挙して停止）
 
 set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/detect-env.sh
+. "${SCRIPT_DIR}/lib/detect-env.sh"
 
 # ---------------------------------------------------------------------------
 # 引数解析
@@ -229,6 +245,44 @@ load_from_gh() {
   # 増やさないため）。本文を行配列にし、見出し行のインデックスを探し、次の「## 」見出し
   # （または末尾）までの「- 」で始まる行を集めてカンマ区切りにする。見出しが無ければ
   # 空文字列（＝宣言漏れ）のまま。
+  #
+  # gh不可時のfail-soft（#275）: 出力を一旦変数で受けて終了コードを見る。従来の
+  # `done < <(gh issue list ...)` という process substitution のままだと、while
+  # ループ自体の終了コードしか見えず、gh issue list の失敗（api.github.com 403 等）を
+  # 検知できないまま0件（＝「依存0件・1レーン」相当の計画）に黙って落ちてしまう。
+  # gh が成功して0件（該当issueが無い）の場合との区別は exit code で行う（0件自体は
+  # 正常系であり、空出力というだけでは失敗と誤判定しない）。
+  # dev_workflow_gh_available はこの失敗時のメッセージ組み立てにのみ使う（成功時には
+  # 一切呼ばない＝ gh 呼び出し回数を増やさない。#216 の「issue list の呼び出しは
+  # 1回のまま」という既存契約を壊さないため）。
+  local gh_raw gh_rc
+  # shellcheck disable=SC2016  # 単一引用符は意図的。$L/$h/$files/$ln は jq 側の変数で、
+  # bash 側で展開してはならない（gojq が -q の引数として自分で解釈する）
+  gh_raw="$(gh issue list --label task --state open --json number,body --limit 200 \
+    -q '.[] | ((.body // "") | split("\n")) as $L
+      | ($L | index("## 対象ファイル")) as $h
+      | (if $h == null then ""
+         else
+           ($L[($h+1):]
+            | reduce .[] as $ln ({done:false, files:[]};
+                if .done then .
+                elif ($ln | startswith("## ")) then (.done = true)
+                elif ($ln | startswith("- ")) then (.files += [$ln[2:]])
+                else . end)
+            | .files | join(","))
+         end) as $files
+      | [(.number|tostring), ((.body // "") | split("\n") | map(select(startswith("- 前提:"))) | (.[0] // "")), ((.body // "") | split("\n") | map(select(startswith("- Epic:"))) | (.[0] // "")), $files] | join("\u001f")')"
+  gh_rc=$?
+  if [ "$gh_rc" -ne 0 ]; then
+    echo "ERROR: gh issue list の取得に失敗しました（exit ${gh_rc}）。" >&2
+    if ! dev_workflow_gh_available; then
+      echo "       gh が利用できないようです。api.github.com への接続がプロキシ等で遮断" >&2
+      echo "       されている環境では、--from-file でタスク一覧をTSVファイルとして渡して" >&2
+      echo "       ください（書式はファイル冒頭のコメント参照）。" >&2
+    fi
+    exit 2
+  fi
+
   local num deps_line epic_line files_line epic_in_line
   while IFS=$'\x1f' read -r num deps_line epic_line files_line; do
     [ -n "$num" ] || continue
@@ -243,23 +297,7 @@ load_from_gh() {
       fi
     fi
     register_task "$num" "open" "$deps_line" "$files_line"
-  done < <(
-    # shellcheck disable=SC2016  # 単一引用符は意図的。$L/$h/$files/$ln は jq 側の変数で、
-    # bash 側で展開してはならない（gojq が -q の引数として自分で解釈する）
-    gh issue list --label task --state open --json number,body --limit 200 \
-    -q '.[] | ((.body // "") | split("\n")) as $L
-      | ($L | index("## 対象ファイル")) as $h
-      | (if $h == null then ""
-         else
-           ($L[($h+1):]
-            | reduce .[] as $ln ({done:false, files:[]};
-                if .done then .
-                elif ($ln | startswith("## ")) then (.done = true)
-                elif ($ln | startswith("- ")) then (.files += [$ln[2:]])
-                else . end)
-            | .files | join(","))
-         end) as $files
-      | [(.number|tostring), ((.body // "") | split("\n") | map(select(startswith("- 前提:"))) | (.[0] // "")), ((.body // "") | split("\n") | map(select(startswith("- Epic:"))) | (.[0] // "")), $files] | join("\u001f")')
+  done <<< "$gh_raw"
 }
 
 if [ "$SOURCE_MODE" = "file" ]; then

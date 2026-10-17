@@ -30,6 +30,16 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh"
 リポジトリ衛生・CRLF設定をまとめて表示する。副作用は無い（何もインストールしない・
 何も書き換えない）。
 
+**クラウド環境の場合**（出力の「実行環境（CLAUDE_CODE_REMOTE）」が「クラウド環境として
+判定されました」）: そもそも `/dev-workflow:setup` や `/dev-workflow:run` といったコマンド
+自体が使えている時点で、このセッションはプラグインを認識できている。**まだ認識できていない
+場合**（`/dev-workflow:run` が存在しない等）は setup 自体が起動できないため、setup より前に
+README の「クラウドマシンから使う」節に従って駆動先リポジトリの `.claude/settings.json` へ
+`extraKnownMarketplaces` / `enabledPlugins` / `permissions.allow` を追記する必要がある
+（ユーザーレベル設定はクラウドセッションに引き継がれず、`CLAUDE_CODE_SYNC_PLUGINS=1` も
+実測で同期先が空だったため当てにできない）。`.claude/settings.json` の整備自体は setup の
+スコープ外であり、ユーザーが手動で（または別途エージェントに依頼して）行う。
+
 ### 2. 必須依存（gh / docker）が不足している場合
 
 **自動導入は行わない。** OSごとに手段と権限が分かれるため自動化の対象外（Epic #217 スコープ外）。

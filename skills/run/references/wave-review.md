@@ -3,6 +3,16 @@
 `skills/run/SKILL.md`「Step 3」「Step 7」から参照される。**wave-review の起動条件・差分範囲・
 `REVIEWED_COMMIT` の管理・指摘の扱いを詳しく知りたいときに読む。**
 
+**GitHub操作について**: 本資料の `gh issue comment` のbash片は**ghバックエンドでの実行例**
+である。選択規則・MCP（`mcp__github__*`）との対応表は `core/references/github-access.md`
+が正本であり、ここでは再掲しない。`gh` が使えない環境では同文書の対応表から該当する
+`mcp__github__*` ツールを選ぶ。
+
+**ブランチ運用モードについて（Task #278）**: 本資料の `WAVE_BASE` / `REVIEWED_COMMIT` /
+`EPIC_BRANCH` はいずれもコミット・ブランチ名ベースの値であり、wave ブランチを作る
+（ローカル）か epic ブランチへ直接取り込む（単一ブランチ運用）かという `scripts/merge-lane.sh`
+の宛先の違いに依存しない。そのため本資料の手順はどちらのモードでも**変更せずそのまま使う**。
+
 ## なぜ「レーン起動と同一メッセージ」でなければならないか
 
 Claude Code のサブエージェントは**バッチ全員が終わるまで結果が返らない**。したがって

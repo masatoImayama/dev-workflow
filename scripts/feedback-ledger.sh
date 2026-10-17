@@ -39,6 +39,10 @@
 #   feedback-ledger.sh ready [--scope <s>] [--threshold <N>]
 #   feedback-ledger.sh render-upstream --key <slug>
 #   feedback-ledger.sh upstream-repo   （還流先の owner/repo を出力）
+#   feedback-ledger.sh gh-available    （gh が使えるか。exit 0=使える 1=使えない。下記「gh依存について」参照）
+#   feedback-ledger.sh unreflected-path --key <slug>
+#                                       （還流をスキップしたとき本文を保存する先の絶対パスを出力。
+#                                        下記「gh依存について」参照）
 #   feedback-ledger.sh redact          （標準入力を redact して標準出力へ。単体テスト用）
 #   feedback-ledger.sh path            （台帳ディレクトリの絶対パスを出力）
 #
@@ -48,12 +52,28 @@
 #   DEV_WORKFLOW_FEEDBACK_THRESHOLD  昇格閾値（既定: 3）
 #   DEV_WORKFLOW_UPSTREAM_REPO       還流先の owner/repo を上書きする（既定: マニフェストの repository）
 #
+# gh依存について（クラウド対応・Task #275。core/references/github-access.md 参照）:
+#   このスクリプト自身は record/list/count/ready/render-upstream のいずれも `gh` を
+#   一切呼ばない（台帳の記録・集計・レポート生成はローカルのTSVだけで完結する）。
+#   `gh issue create`（実際の還流投稿）はこのスクリプトの外、skills/feedback の
+#   Phase 5 が担う。gh が使えない環境（api.github.com 403 等）でも台帳の記録は
+#   続けられ、スキップされるのは「issue還流」だけである。
+#   `gh-available` サブコマンドは `scripts/lib/detect-env.sh` の
+#   `dev_workflow_gh_available`（#268）をそのまま返す薄いラッパーで、
+#   各所で `gh auth status` を個別に再実装させないための単一の判定経路である。
+#   gh不可時に還流を見送った本文は `unreflected-path --key <slug>` が返すパスへ保存する
+#   契約とし、TSVの観測記録自体も消さない（次回 `ready` で再び拾えるため「未還流」として
+#   記録が失われない）。
+#
 # 終了コード: 0=成功 / 1=書き込み・読み取り失敗 / 2=引数エラー・置き場所を解決できない
 #            ready と count は「該当0件」でも 0 を返す（件数は標準出力で表す）
+#            gh-available は 0=使える 1=使えない（dev_workflow_gh_available の真偽をそのまま返す）
 
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/detect-env.sh
+. "${SCRIPT_DIR}/lib/detect-env.sh"
 
 usage() {
   sed -n '/^# 使い方:/,/^# 終了コード:/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -624,6 +644,55 @@ cmd_path() {
   return 0
 }
 
+cmd_gh_available() {
+  # gh が使えるか（#268 の dev_workflow_gh_available をそのまま返す薄いラッパー）。
+  # 標準出力には何も出さず、終了コードだけで真偽を伝える（呼び出し側は
+  # `if bash feedback-ledger.sh gh-available; then ... fi` のように使う）。
+  # 判定ロジック自体はここで再実装しない（#268/#274の原則。重複すると片方だけ
+  # 直して食い違う事故が起きる）。
+  dev_workflow_gh_available
+}
+
+cmd_unreflected_path() {
+  # gh不可・未承認等でissue還流を見送った本文の保存先を返す（#275）。
+  # skills/feedback/references/upstream.md「投稿できないときの扱い」が
+  # 手作業で組み立てていたパス（${LEDGER_DIR}/upstream/<key>.md）を、ここで
+  # 単一の契約として定義する。ディレクトリは呼び出し側が書き込む前提で
+  # 事前に作る（mkdir -p）。TSVの観測記録自体は別に残るため、ここで保存した
+  # 本文が失われても再度 render-upstream で作り直せる（記録が失われない）。
+  local key=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --key) _require_opt_value unreflected-path "$1" "$#" || return 2; key="$2"; shift 2 ;;
+      *)
+        echo "ERROR: unreflected-path: 不明な引数: $1" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  if [ -z "$key" ]; then
+    echo "ERROR: unreflected-path: --key は必須です" >&2
+    return 2
+  fi
+  if ! _is_slug "$key"; then
+    echo "ERROR: unreflected-path: --key はスラッグ形式で指定してください: [${key}]" >&2
+    return 2
+  fi
+
+  local dir
+  dir="$(_feedback_dir)" || {
+    echo "ERROR: unreflected-path: 台帳の置き場所を解決できませんでした" >&2
+    return 2
+  }
+  mkdir -p "${dir}/upstream" || {
+    echo "ERROR: unreflected-path: 保存先ディレクトリを作成できません: ${dir}/upstream" >&2
+    return 1
+  }
+  printf '%s/upstream/%s.md\n' "$dir" "$key"
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # エントリポイント
 # ---------------------------------------------------------------------------
@@ -641,6 +710,8 @@ case "$1" in
   render-upstream) shift; cmd_render_upstream "$@"; exit $? ;;
   redact)          shift; _redact; exit $? ;;
   upstream-repo)   shift; cmd_upstream_repo "$@"; exit $? ;;
+  gh-available)    shift; cmd_gh_available "$@"; exit $? ;;
+  unreflected-path) shift; cmd_unreflected_path "$@"; exit $? ;;
   path)            shift; cmd_path "$@"; exit $? ;;
   -h|--help)       usage; exit 0 ;;
   *)

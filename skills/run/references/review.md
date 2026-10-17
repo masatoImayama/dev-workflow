@@ -3,6 +3,11 @@
 `skills/run/SKILL.md`「Epic一括レビュー」の R1 の結果マージ、および R2 以降。**R1 が
 REQUEST_CHANGES を返したとき、または変更が 50 ファイルを超えたときにだけ読む。**
 
+**GitHub操作について**: 本資料の `gh issue comment` / `gh issue create` のbash片は
+**ghバックエンドでの実行例**である。選択規則・MCP（`mcp__github__*`）との対応表は
+`core/references/github-access.md` が正本であり、ここでは再掲しない。`gh` が使えない
+環境では同文書の対応表から該当する `mcp__github__*` ツールを選ぶ。
+
 ### R1の結果マージ
 
 R1 は `correctness` / `readability` / `over-engineering` / `security` の4観点を

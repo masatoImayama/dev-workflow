@@ -46,27 +46,124 @@ claude
 claude --plugin-dir /path/to/dev-workflow
 ```
 
+## クラウドマシンから使う
+
+**クラウドマシン自体を Docker sandbox の代替隔離と認め、Docker が使えない環境向けに
+host モードを正式化している（設計判断の詳細は `docs/adr/0013-cloud-session-host-mode.md`）。**
+
+上記「インストール」はユーザーレベル設定（`~/.claude/settings.json`）にプラグインの有効化が
+閉じる方法である。**Claude Code のクラウドセッション（使い捨てコンテナ）はこのユーザー設定を
+引き継がない。** さらに `/plugin marketplace add` で追加したマーケットプレイスの
+`source.path` は、追加した**その場のマシンのローカル絶対パス**（例: `C:\Users\...`）を指す
+ため、別マシンであるクラウドコンテナには存在せず解決できない。この2つが重なり、
+**クラウドセッションでは `/dev-workflow:run` コマンド自体が存在しない**（Epic #267 背景）。
+
+`CLAUDE_CODE_SYNC_PLUGINS=1` を設定するとユーザー設定をクラウドへ同期する仕組みがあるが、
+**実測では同期先のフォルダが空だった。** そのため同期を当てにしない。
+
+代わりに、**駆動先リポジトリの `.claude/settings.json`（git 追跡＝コミット対象。チームで
+共有する設定）にプラグインの有効化設定を直接書く。** これはクラウドセッションにも常に
+含まれるため、ユーザー設定やローカル絶対パスに依存しない。
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "dev-workflow-marketplace": {
+      "source": {
+        "source": "git",
+        "repo": "https://github.com/masatoImayama/claude-dev-workflow-marketplace.git"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "dev-workflow@dev-workflow-marketplace": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Bash(gh *)",
+      "Bash(npm *)",
+      "Bash(make *)"
+    ]
+  }
+}
+```
+
+- **`extraKnownMarketplaces` は git URL のみを指定する。ローカル絶対パス（`source.path`）を
+  書いてはならない。** クラウドコンテナのファイルシステムにはそのパスが存在せず、解決に失敗する
+  （上記の背景そのもの）
+- `enabledPlugins` に `dev-workflow@dev-workflow-marketplace` を書き、プラグインを有効化する
+- `permissions.allow` には **`git` / `gh` / ビルド系コマンドの最小セット**を含める。
+  `skills/run/SKILL.md`「パーミッション確認」節（`:20`）が要求する自動承認であり、これが
+  無いと確認プロンプト（「Do you want to proceed?」）が自律ループを止める。上記の
+  `npm` / `make` はあくまで例であり、**プロジェクトの実際のビルド・テストコマンドに
+  合わせて追加・変更する**こと（広範な `Bash(*)` を置かない。git 追跡された設定に
+  広範な allow をコミットする危険性は上記「YOLOモード」節「パーミッション設定」参照）
+- **secret は書かない。** Slack webhook（`notify-slack.sh` が使う `.claude/slack-webhook`）・
+  APIキー（`JEV_API_KEY` 等）は `.claude/settings.local.json`（gitignore 対象。コミットされない）
+  に残す。`.claude/settings.json` は駆動先リポジトリに**コミットされ、clone した全員に見える**
+  ため、secret を置くと漏洩する
+
+### `DEV_WORKFLOW_SANDBOX_HOST=1` の渡し方（2通り。副作用が異なる）
+
+クラウドでは Docker sandbox が使えないことが多く、host モード（上記「前提条件」「Docker
+sandbox のセットアップ」参照）が必要になる。渡し方は2通りあり、**副作用が異なる**:
+
+1. **クラウドセッション側の環境変数として渡す（推奨）。** そのセッションにのみ効き、
+   ローカルには一切影響しない
+2. **`.claude/settings.json` の `env` に書く。** この設定ファイルはローカルでも読まれるため、
+   **同じ値がローカルのセッションにも効き、ローカルでも host モードになる**（Docker
+   コンテナ分離が効かなくなる）。この副作用を理解した上で、チーム全体を host モードに
+   揃えたい場合にのみ使うこと
+
+```json
+{
+  "env": {
+    "DEV_WORKFLOW_SANDBOX_HOST": "1"
+  }
+}
+```
+
 ## 前提条件
 
-- [GitHub CLI (`gh`)](https://cli.github.com/) がインストール・認証済み
-- [Docker](https://docs.docker.com/get-docker/) がインストール・起動済み
-- Git リポジトリ内で実行
-- サンドボックス定義（`Dockerfile.dev` または `docker-compose.dev.yml`）を次の3択のいずれかで
-  供給する。**駆動先の業務リポジトリを汚さない選択肢を第一候補とする**（詳細は下記
-  「Docker sandbox のセットアップ」参照）
+- **Git リポジトリ内で実行（必須・ブロック）**。代替手段が無く、どのスキルも成立しないため、
+  セッション開始時にブロックされます
+- [GitHub CLI (`gh`)](https://cli.github.com/) のインストール・認証は**推奨であり必須ではありません**。
+  クラウド（Docker 無しで走る環境）では `gh auth status` が通らないことが多いため、Task #271
+  で非ブロッキング警告に格下げしました。GitHub 操作には MCP バックエンドという代替があります。
+  `gh` / MCP の選択規則と操作の対応表は
+  [`core/references/github-access.md`](core/references/github-access.md) が正本です
+- [Docker](https://docs.docker.com/get-docker/) のインストール・起動も**推奨であり必須ではありません**。
+  `run` / `goal` でサンドボックス実行を使う場合にのみ必要です。クラウド等で Docker を使わない場合は
+  `DEV_WORKFLOW_SANDBOX_HOST=1` で host モードが使えます
+- 上記2つが満たされない場合は**セッション開始時に警告が出ますが、ブロックはされません**。
+  `run` / `goal` は冒頭でサンドボックス定義を解決し、`mode=dockerfile` / `mode=compose`
+  （Docker が実際に必要）であれば改めて Docker の有無・デーモン起動を確認してそこで
+  停止します。`mode=host`（サンドボックス定義が無い、または `DEV_WORKFLOW_SANDBOX_HOST=1`
+  指定）であれば警告を出して host モードのまま継続し、Epic issue に実行モードをコメントします
+- `bash scripts/doctor.sh`（環境診断コマンド）の終了コードも同じ方針です: **Docker 不足・
+  gh 不足（未認証を含む）はいずれも警告であり `exit 0`**。**唯一のブロック要因は git
+  リポジトリ外での実行（`exit 1`）**です。クラウド判定（`CLAUDE_CODE_REMOTE`）・解決された
+  サンドボックスモードと host になった理由・Docker/gh 不足で成立しない機能の一覧・駆動先の
+  `.claude/settings*.json` の `mcpServers` に Windows 絶対パスが含まれる場合の警告も表示します
+  （副作用は無く、何も作らない・インストールしない・書き換えません）
+- サンドボックス実行（`run` / `goal` 等）を使う場合は、サンドボックス定義（`Dockerfile.dev`
+  または `docker-compose.dev.yml`）を次の3択のいずれかで供給する。**駆動先の業務リポジトリを
+  汚さない選択肢を第一候補とする**（詳細は下記「Docker sandbox のセットアップ」参照）
   1. 規約パスに置く（推奨）: `~/.claude/dev-workflow/sandbox/<リポジトリ名>/Dockerfile.dev`
      （または同ディレクトリの `docker-compose.dev.yml`）
   2. 環境変数で渡す: `DEV_WORKFLOW_DOCKERFILE` / `DEV_WORKFLOW_DOCKER_COMPOSE_FILE` /
      `DEV_WORKFLOW_DOCKER_IMAGE`
   3. リポジトリ直下に置いてコミットする（チームで run を共有する場合のみ）
-- 上記が満たされない場合、セッション開始時にブロックされます
 
 ### 自動設定（SessionStart時）
 
 プラグインのセッション開始フックが以下を自動的に行います:
 
-- **`gh auth setup-git`** — gitの認証をgh CLIに委任し、push/PR作成時のアカウント選択ポップアップを防止
-- **Docker起動チェック** — Docker デーモンが未起動の場合にブロック
+- **`gh auth setup-git`** — gh があって認証済みの場合のみ、gitの認証をgh CLIに委任し、
+  push/PR作成時のアカウント選択ポップアップを防止
+- **Docker / gh の状態通知** — Docker 不在・デーモン未起動、gh 不在・未認証は**警告として
+  通知されますが、セッションはブロックされません**（Task #271）
 
 ## 任意依存の外部ツール
 
@@ -341,6 +438,10 @@ main (保護: 人間のみマージ可)
 - 複数Epicの並行開発に対応（ブランチ・Docker sandboxが独立）
 - 各タスク開始前にEpicブランチを最新に同期（古いベースからの分岐を防止）
 - 全タスク完了後にmain向けPRを作成し、人間がレビュー・マージする
+- 上記はEpicブランチ配下の運用を**ローカル**（wave ブランチを都度作る）の場合で説明している。
+  クラウドセッションのように**指定された1本のブランチ以外へpushできない環境**では、wave
+  ブランチを作らない**単一ブランチ運用**に切り替わる（下記「単一ブランチ運用（クラウド等）」参照）。
+  レーンのworktree分離・`--lanes`の並列度はいずれのモードでも変わらない
 
 ### worktree運用の注意
 
@@ -491,6 +592,42 @@ main（保護: 人間のみマージ可）
 - **Epic ブランチにはウェーブ末の取り込み検証を通過したコミットが載る。** プロジェクトの全テストはEpic統合ゲート（Epicにつき1回）で検証するため、Epicブランチに「フルスイート未通過のコミット」が一時的に載りうる（従来の不変条件「Epicブランチには統合ゲートを通ったコミットだけが載る」からの変更。トレードオフは上記「機械的ゲートの三段構成」参照）
 - **Epic ブランチへの force push は行わない。wave ブランチは origin へ push しない**（ローカルの一時ブランチ）
 
+### 単一ブランチ運用（クラウド等。Task #278）
+
+クラウドセッションでは**指定された1本のブランチ以外へのpushが想定されていない**（Epic #267 D6。
+`docs/adr/0013-cloud-session-host-mode.md`）。
+上記のウェーブ・waveブランチ運用（Epicブランチと、ウェーブごとの一時wave ブランチの2段構成）は、
+この制約の下では成立しない。そのため、次の条件でwave ブランチを作らない**単一ブランチ運用**に
+切り替わる。
+
+```
+main（保護: 人間のみマージ可）
+ └─ epic/epicXX/[機能名]（= セッションが与えられた1本のブランチ）
+     └─ 各レーンの作業ブランチ（generatorのisolation worktree由来）を直接マージ
+        （wave ブランチは作らない）
+```
+
+- **切り替え条件**: `dev_workflow_is_remote`（`scripts/lib/detect-env.sh`、#268）が真のとき。
+  `DEV_WORKFLOW_SINGLE_BRANCH=1` / `=0` で明示的に上書きできる
+- **epic ブランチの扱い**: Epic issue本文から別途ブランチ名を解決せず、**セッションが
+  run開始時点で既にチェックアウトしているブランチ**を epic ブランチとして扱う。origin からの
+  fetch・新規ブランチ作成・別worktreeの作成は行わない
+- **レーンの取り込み先**: `scripts/merge-lane.sh --single-branch` が、wave ブランチを作らず
+  レーンを**直接 epic ブランチへ**マージする。merge-base 完全一致検証・競合検出のロジックは
+  ローカルと完全に同一（宛先の名前解決だけが変わる）。`--create` は使わない（宛先は常に既存の
+  epic ブランチ）
+- **push**: epic ブランチのみ push する。push 対象がセッション指定ブランチと異なる場合は
+  理由を明示して停止する（黙って別ブランチへpushしない）
+- **PR作成**: `gh pr create` が使えない場合は MCP（`mcp__github__*`）のPR作成ツールを使う
+  （`core/references/github-access.md`）。**MCPでも作成できない場合**は、コミット・push済み
+  であることとPR未作成であることをEpic issueに残して停止する（push自体はgit操作のため常に
+  実行できる前提）
+- **並列度**: `--lanes` はこのモードでも維持する。ブランチが1本でも、各レーン（generatorの
+  isolation worktree）は従来どおり独立したworktreeで分離される
+- **REVIEWED_COMMIT / wave-review**: いずれもコミット・ブランチ名ベースの値であり、wave
+  ブランチの有無に依存しないため、`skills/run/references/wave-review.md` の手順は
+  両モードで変更せずそのまま使う
+
 ### `--ff-only` から merge-base 検証への変更理由
 
 従来の `git merge --ff-only <レーン>` は「ベース逸脱の検出」と「履歴の直線性の強制」という2つの役割を兼ねていた。しかし後者は同一ベースから分岐した並列レーンの取り込みを構造的に不可能にする（並列ブランチは原理的に fast-forward できない）。この2つの役割は分離できる。
@@ -572,7 +709,14 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/plan-waves.sh" --epic 259 --lanes 3 --print
 ```
 
 - `--epic <Epic issue番号>`: 数値のEpic issue番号。`gh issue list --label task --state open --json number,body --limit 200` から依存グラフを構築する。本文の「- Epic: #N」行でNが異なるタスクは除外する（行が無い場合はフェイルオープンで含める）
-- `--from-file <TSV>`: GitHub に依存しないテスト用の入力差し替え
+- `--from-file <TSV>`: `gh` に依存しない入力差し替え。テストのフィクスチャとして使うだけでなく、
+  `gh` が使えない環境（クラウド等。`dev_workflow_gh_available` が偽）では**本番の自律実行でも
+  この経路を使う**。`plan-waves.sh` 自身は `mcp__github__*` を呼べない（シェルスクリプトのため）
+  ので、その場合は **`run`（`skills/run/SKILL.md`「Step 1」）が MCP で Task issue 群を取得し、
+  このファイルを書き出してから `--from-file` で渡す**。書き出しに失敗した場合は `run` が
+  理由を明示して停止する（黙って `--epic` にフォールバックしたり1レーンに縮退したりしない。
+  詳細は `core/references/github-access.md`）。列定義・区切り文字は常に1つ（上記 TSV 形式）で、
+  用途がテストか本番かでフォーマットを変えない
 - `--lanes N`: 並列度（既定は `DEV_WORKFLOW_MAX_LANES`、無ければ3）
 - `--skipped 4,7`: カンマ区切りの issue 番号。それらに依存するタスクを推移的にスキップする
 - `--print`: 上記のような人間向けの表を出力する（既定は機械可読な TSV）
@@ -914,9 +1058,9 @@ YOLOモードではClaude Code本体のパーミッション確認を無効化�
 
 | 種別 | 例 | 扱い |
 |---|---|---|
-| **停止** | リポジトリ衛生プリフライト exit 2 / サンドボックス `mode=none` / 循環依存 | run を開始しない・停止する |
+| **停止** | リポジトリ衛生プリフライト exit 2 / サンドボックス `mode=none` / `mode=dockerfile`・`mode=compose` で Docker 不在・デーモン未起動 / 循環依存 | run / goal を開始しない・停止する |
 | **差し戻し** | レーン内ゲート失敗 / 統合ゲート失敗 / ベース逸脱・競合 | 取り込まず次ウェーブへ持ち越す（ループは止めない） |
-| **記録して進む** | `skips=unknown` / トークン数が読み取れない / 準備コマンドの `--warm` 失敗 / worktree 削除失敗 / Slack 通知失敗 | 事実を Epic issue と PR 本文に残し、そのまま次へ進む |
+| **記録して進む** | `skips=unknown` / トークン数が読み取れない / 準備コマンドの `--warm` 失敗 / worktree 削除失敗 / Slack 通知失敗 / サンドボックス `mode=host` で実行した | 事実を Epic issue と PR 本文に残し、そのまま次へ進む |
 
 「記録して進む」に分類したものを停止条件に格上げしない。これらは成果物の正しさを左右しない観測項目であり、ここで止めると人間が戻るまで run 全体が遊ぶ。**同時に、記録を省略して黙って進むことも禁止する**——`skips=unknown` を「0件」と読み替えないのはこの原則の帰結である。
 
@@ -1298,6 +1442,18 @@ DEV_WORKFLOW_FEEDBACK_DIR=path               # 台帳ディレクトリを直接
 DEV_WORKFLOW_FEEDBACK_THRESHOLD=3            # 反映・還流を提案するまでの再現回数（昇格閾値）
 DEV_WORKFLOW_UPSTREAM_REPO=owner/repo        # 還流先（既定: プラグインのマニフェストの repository）
 DEV_WORKFLOW_LANG=ja                         # 人間向け出力の言語（ja|en。未設定・空・不正値なら ja）
+DEV_WORKFLOW_SANDBOX_HOST=1                  # host モードの明示オプトイン（入力。#269）。resolve-sandbox.shの
+                                              # 出力 DEV_WORKFLOW_SANDBOX_MODE とは別名（eval済み環境で再解決した
+                                              # ときに前回の出力を入力として読んでしまう事故を避けるため）
+DEV_WORKFLOW_FORCE_REMOTE=true               # dev_workflow_is_remote の判定を上書きする（true|1で真、他は偽。#268）。
+                                              # テスト専用ではなく、クラウド判定（CLAUDE_CODE_REMOTE）が外れた
+                                              # 環境で人間が手動設定する逃げ道としても使う
+DEV_WORKFLOW_GH_UNAVAILABLE=1                # dev_workflow_gh_available を強制的に偽にする（値の内容は問わない。
+                                              # 実際の gh は呼ばない。#268）
+DEV_WORKFLOW_DOCKER_UNAVAILABLE=1            # dev_workflow_docker_available を強制的に偽にする（値の内容は問わない。
+                                              # 実際の docker は呼ばない。#268）
+DEV_WORKFLOW_SINGLE_BRANCH=1                 # 単一ブランチ運用（wave ブランチを作らない）への切り替えを明示上書き
+                                              # する（=0で無効化。既定はdev_workflow_is_remoteに従う。#278）
 ```
 
 ## Slack通知
@@ -1373,6 +1529,31 @@ https://hooks.slack.com/services/XXX/YYY/ZZZ
 同じ内容の通知が繰り返し発火した場合に備え、**同一内容は既定で10分間抑止される**。間隔は `DEV_WORKFLOW_NOTIFY_COOLDOWN`（秒、`0` で無効）で変更できる。
 
 それでも不要な通知が届く場合は `DEV_WORKFLOW_NOTIFY_DEBUG=1` を設定すると、受け取った payload が `.claude/.dev-workflow-notify.log` に記録され、どの文言で発火しているか確認できる。
+
+### Epic issueへのフォールバック（クラウド等でSlackが使えない場合、Task #280）
+
+`.claude/slack-webhook` は `.gitignore` 対象であり、クラウド（使い捨てコンテナ）には存在しない。
+加えてプロキシで egress が制限され送信自体も通りにくいため、**webhook が未解決、または実送信が
+失敗した場合は Epic issue へのコメントにフォールバックする。**
+
+- 対象は**節目イベントのみ**（`stop` / `run-complete` / `stall` / `stall-recovered` /
+  `sleep-gap` / `budget` / `sleep-inhibit-warn`）。**`notification`（アイドル・承認待ち通知）は
+  対象外**（issue が通知ログで埋まるため）
+- Epic 番号は run marker（`.claude/.dev-workflow-run`。1行目が `Epic #<N>` 形式）から取り出す
+- GitHub操作は `gh issue comment` で行う（MCPはシェルから呼べないため。
+  `core/references/github-access.md` 参照）。`gh` が使えない（未インストール・未認証・
+  `api.github.com` が403等）、または Epic 番号が取れない場合は、
+  `.claude/.dev-workflow-notify-fallback.log` にローカル記録するだけに退く
+  （**いずれの場合も run は止めない**）
+- **Epic issueコメントの本文には、直近応答の抜粋（`last_assistant_message`）を含めない。**
+  Slack webhook はユーザーが能動的に設定する秘匿チャネルだが、Epic issueはリポジトリの
+  共有・永続記録であり、閲覧者の範囲・永続性が異なる。本文はステータス行＋`$ARG`相当に
+  限定する（issue #285。経緯は `docs/adr/0013-cloud-session-host-mode.md`「教訓1」参照）。
+  Slack本文には従来どおり含める（Slack経路の挙動は変えない）
+- 連続する同一内容は、既存の `.claude/.dev-workflow-notify-last` による抑止
+  （`DEV_WORKFLOW_NOTIFY_COOLDOWN` 秒）で間引く
+- **Slack が生きている（送信に成功する）場合はこのフォールバックは一切発生しない**
+  （Slack設定済み環境での挙動は変わらない。多重通知にしない）
 
 ### 「完全な完了」と「途中停止」の区別
 

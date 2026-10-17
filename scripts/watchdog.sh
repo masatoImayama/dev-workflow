@@ -470,8 +470,17 @@ _watchdog_estimate_sec_from_body() {
 
 # _watchdog_wave_budget_sec <tasks_csv>
 # --tasks の各issue番号を `gh issue view --json body -q .body` で読み、`- 想定時間:` の
-# 最大値 × 2 + 900秒を返す。1件も取れない・ghが使えない場合は既定5400秒（Epic #42仕様書
-# 「4.2 ウェーブ予算超過」）。
+# 最大値 × 2 + 900秒を返す。
+#
+# fail-soft契約（Epic #42仕様書「4.2 ウェーブ予算超過」、gh不可時の扱いは#275で明記）:
+# `gh issue view` が1件でも失敗しても（`|| continue`）ループは止めず、残りのissueで
+# 続行する。全件失敗（gh不在・未認証・api.github.com 403等でも同様）・1件も
+# 「- 想定時間:」を取れなかった場合は、エラーにはせず既定5400秒にフォールバックする
+# （found=0）。watchdogはタスク実行を止める主体ではないため、ghが使えないことを理由に
+# ウェーブ予算監視そのものを止めてはならない（代わりに「見積もりが粗くなる」という
+# 劣化だけを受け入れる）。found=0のときは _watchdog_log に記録し、「想定時間が1件も
+# 取得できず既定値を使った」事実を監査可能にする（stdoutは呼び出し側が
+# `budget="$(...)"` で秒数だけを取り込む契約のため、ここでは使わない）。
 _watchdog_wave_budget_sec() {
   local tasks_csv="$1" default_sec=5400
   local max_sec=0 found=0
@@ -490,6 +499,8 @@ _watchdog_wave_budget_sec() {
   if [ "$found" -eq 1 ]; then
     printf '%s' $(( max_sec * 2 + 900 ))
   else
+    _watchdog_log "budget-estimate-unavailable" \
+      "tasks=${tasks_csv} default_sec=${default_sec}（想定時間を1件も取得できませんでした。gh不可またはissue本文に『- 想定時間:』の宣言が無い可能性があります）"
     printf '%s' "$default_sec"
   fi
 }

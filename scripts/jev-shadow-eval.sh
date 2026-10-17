@@ -58,11 +58,30 @@
 #   DEV_WORKFLOW_JEV_PAIR_SCOPE   ① の候補の絞り方。file（既定・同一ファイル）| line（同一ファイル:行）
 #
 # 終了コード: 0=成功 / 1=実行失敗（gh・Jev・書き込み） / 2=引数エラー
+#   gh が使えない環境（クラウド等。Task #275）で case1・case3（gh issue list 依存）を
+#   build/run すると、検証を実行せず理由を表示して exit 0 で退く（任意機能のため停止しない。
+#   core/references/github-access.md 参照）。case2（台帳/scope.md）はgh非依存のため影響しない。
 
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JEV_ASK="${SCRIPT_DIR}/jev-ask.sh"
+# shellcheck source=lib/detect-env.sh
+. "${SCRIPT_DIR}/lib/detect-env.sh"
+
+# _require_gh_or_skip <case番号>
+# case1・case3 は `gh issue list` 依存（_dump_review_issues）。gh が使えない環境
+# （api.github.com 403 等。クラウド対応・Task #275）では検証そのものを実行せず、
+# 理由を表示して exit 0 で退く。このスクリプトはハーネスから呼ばれない人間専用の
+# 任意評価ツールであり、run/自律ループを止める理由にはならない（安全に縮退できる）。
+# 判定は #268 の dev_workflow_gh_available を使う（再実装しない）。
+_require_gh_or_skip() {
+  dev_workflow_gh_available && return 0
+  echo "[build] gh が使えないため case${1} の検証をスキップします（gh issue list に依存するため）。" >&2
+  echo "        api.github.com への接続がプロキシ等で遮断されている可能性があります。" >&2
+  echo "        gh が使える環境で改めて実行してください（任意の評価ツールのため停止はしません）。" >&2
+  exit 0
+}
 
 # ① の統合しきい値。core/references/jev-assist.md と同じ値にすること。
 MERGE_THRESHOLD_PCT=85
@@ -128,6 +147,7 @@ _dump_review_issues() {
 
 build_case1() {
   local out="$1" tmp
+  _require_gh_or_skip 1
   tmp="$(mktemp)" || return 1
   echo "[build] review issue を取得中..." >&2
   _dump_review_issues > "$tmp" || { rm -f "$tmp"; echo "エラー: gh issue list に失敗しました" >&2; return 1; }
@@ -230,6 +250,7 @@ build_case2() {
 
 build_case3() {
   local out="$1" tmp
+  _require_gh_or_skip 3
   tmp="$(mktemp)" || return 1
 
   printf 'label\tref\tloc\tsev\ttitle\tdetail\tfix\n' > "$out"

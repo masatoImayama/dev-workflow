@@ -31,6 +31,8 @@ plannerに以下を依頼する:
 仕様サマリーをもとに仕様書と実装計画書を作成してください（ファイル出力不要、会話内で作成）。
 
 ### Phase 3: GitHub issue作成
+GitHub操作（issue作成）はghが使えなければMCP（`mcp__github__*`）を使う。選択規則・
+対応表は`core/references/github-access.md`が正本（ここでは再掲しない）。
 仕様書・計画書をEpic issue本文に埋め込んでGitHub issueを作成してください:
 - epicラベル付きの親issue（仕様書・計画書を`<details>`で本文に埋め込む）
 - taskラベル付きの子issue（計画書の各タスク）。各Task issueには以下を必ず含める

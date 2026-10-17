@@ -170,6 +170,7 @@ copy_sandbox_scripts() {
   cp "${REPO_ROOT}/scripts/lib/mount-path.sh"           "${dest}/scripts/lib/mount-path.sh"
   cp "${REPO_ROOT}/scripts/lib/container-membership.sh" "${dest}/scripts/lib/container-membership.sh"
   cp "${REPO_ROOT}/scripts/lib/compose-conflicts.sh"    "${dest}/scripts/lib/compose-conflicts.sh"
+  cp "${REPO_ROOT}/scripts/lib/detect-env.sh"           "${dest}/scripts/lib/detect-env.sh"
   cp "${REPO_ROOT}/Dockerfile.dev"             "${dest}/Dockerfile.dev"
   (
     cd "$dest" || exit 1
@@ -189,6 +190,7 @@ copy_sandbox_scripts_no_dockerfile() {
   cp "${REPO_ROOT}/scripts/lib/mount-path.sh"           "${dest}/scripts/lib/mount-path.sh"
   cp "${REPO_ROOT}/scripts/lib/container-membership.sh" "${dest}/scripts/lib/container-membership.sh"
   cp "${REPO_ROOT}/scripts/lib/compose-conflicts.sh"    "${dest}/scripts/lib/compose-conflicts.sh"
+  cp "${REPO_ROOT}/scripts/lib/detect-env.sh"           "${dest}/scripts/lib/detect-env.sh"
   (
     cd "$dest" || exit 1
     git add scripts
@@ -479,6 +481,204 @@ fi
 CASE1_CACHE="$(plan_value cache_volume "$CASE1_OUTPUT")"
 CASE3_CACHE="$(plan_value cache_volume "$CASE3_OUTPUT")"
 assert_eq "ケース6: cache_volume はリポジトリ単位（worktree から叩いても同じ）" "$CASE1_CACHE" "$CASE3_CACHE"
+
+# --- 回帰: host モード対応（#270）で dockerfile モードの container/image 出力が変わっていない ---
+if [ -n "$CASE1_CONTAINER" ]; then
+  pass "回帰(#270): dockerfile モードの --print-plan は container を空にしない"
+else
+  fail "回帰(#270): dockerfile モードの --print-plan は container を空にしない" "container が空でした"
+fi
+
+CASE1_IMAGE="$(plan_value image "$CASE1_OUTPUT")"
+# DEV_WORKFLOW_SANDBOX_IMAGE は resolve-sandbox.sh が Dockerfile.dev の hash から
+# 決めるため、具体的な値ではなく「空でないこと」だけを確認する（タグの値自体は
+# 他のテストが別途検証している）。
+if [ -n "$CASE1_IMAGE" ]; then
+  pass "回帰(#270): dockerfile モードの --print-plan は image を空にしない"
+else
+  fail "回帰(#270): dockerfile モードの --print-plan は image を空にしない" "image が空でした"
+fi
+
+# ---------------------------------------------------------------------------
+# ケース6b: host モード（Task #270。sandbox-exec.sh に host 実行分岐を追加する）
+#
+# DEV_WORKFLOW_SANDBOX_HOST=1 で明示的に host モードを強制する（resolve-sandbox.sh
+# 側の解決は #269 で実装済み）。Dockerfile.dev が存在する PRINT_PLAN_REPO でも
+# host モードが最優先されることを確認したうえで、--print-plan・実際の実行・
+# --detach/--wait・docker固有オプションの no-op 化を検証する。
+# ---------------------------------------------------------------------------
+
+echo "== host モード（#270） =="
+
+# sandbox-exec.sh 内の CUR は `pwd -W` で正規化した絶対パスであり、mktemp が返す
+# $PRINT_PLAN_REPO の生の表記（Windows では /tmp 配下のエイリアス表記）とは文字列として
+# 一致しない場合がある。比較前に同じ方法（cd && pwd -W）で正規化する
+# （sandbox-exec.sh:216 の CUR 解決と同じ作法）。
+PRINT_PLAN_REPO_CANON="$(cd "$PRINT_PLAN_REPO" && { pwd -W 2>/dev/null || pwd; })"
+
+HOST_PLAN_OUTPUT="$(
+  cd "$PRINT_PLAN_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 PATH="${FAKE_BIN_DIR}:${PATH}" bash scripts/sandbox-exec.sh --print-plan
+)"
+
+assert_eq "host: mode=host" "host" "$(plan_value mode "$HOST_PLAN_OUTPUT")"
+assert_eq "host: workdir は実行ディレクトリ（カレント）" "$PRINT_PLAN_REPO_CANON" "$(plan_value workdir "$HOST_PLAN_OUTPUT")"
+assert_eq "host: mount_source は空（マウントが無い）" "" "$(plan_value mount_source "$HOST_PLAN_OUTPUT")"
+assert_eq "host: mount_target は空（マウントが無い）" "" "$(plan_value mount_target "$HOST_PLAN_OUTPUT")"
+assert_eq "host: container は空（コンテナという概念が無い）" "" "$(plan_value container "$HOST_PLAN_OUTPUT")"
+assert_eq "host: image は空（イメージという概念が無い）" "" "$(plan_value image "$HOST_PLAN_OUTPUT")"
+
+if printf '%s\n' "$HOST_PLAN_OUTPUT" | grep -q '^cache_volume='; then
+  fail "host: --print-plan に cache_volume 行を出さない" "output=[${HOST_PLAN_OUTPUT}]"
+else
+  pass "host: --print-plan に cache_volume 行を出さない"
+fi
+
+if [ -s "$DOCKER_CALLED_MARKER" ]; then
+  fail "host: --print-plan は docker を起動しない" "docker が呼ばれました: $(cat "$DOCKER_CALLED_MARKER")"
+else
+  pass "host: --print-plan は docker を起動しない"
+fi
+
+# --- 実行: 終了コードがそのまま返る ---
+HOST_TRUE_EXIT=0
+(
+  cd "$PRINT_PLAN_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 PATH="${FAKE_BIN_DIR}:${PATH}" bash scripts/sandbox-exec.sh 'true'
+) >/dev/null 2>&1 || HOST_TRUE_EXIT=$?
+assert_exit_code "host: 'true' の終了コード(0)がそのまま返る" 0 "$HOST_TRUE_EXIT"
+
+HOST_FALSE_EXIT=0
+(
+  cd "$PRINT_PLAN_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 PATH="${FAKE_BIN_DIR}:${PATH}" bash scripts/sandbox-exec.sh 'false'
+) >/dev/null 2>&1 || HOST_FALSE_EXIT=$?
+assert_exit_code "host: 'false' の終了コード(1)がそのまま返る" 1 "$HOST_FALSE_EXIT"
+
+if [ -s "$DOCKER_CALLED_MARKER" ]; then
+  fail "host: 実行時も docker を起動しない" "docker が呼ばれました: $(cat "$DOCKER_CALLED_MARKER")"
+else
+  pass "host: 実行時も docker を起動しない"
+fi
+
+# --- 実行ディレクトリ: マウント元ではなく呼び出し元のカレントディレクトリで実行する ---
+HOST_PWD_OUT_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-test-host-pwd.XXXXXX")"
+(
+  cd "$PRINT_PLAN_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 PATH="${FAKE_BIN_DIR}:${PATH}" \
+    bash scripts/sandbox-exec.sh 'pwd -W 2>/dev/null || pwd' > "$HOST_PWD_OUT_FILE" 2>/dev/null
+)
+assert_eq "host: コマンドは呼び出し元のカレントディレクトリで実行される" \
+  "$PRINT_PLAN_REPO_CANON" "$(cat "$HOST_PWD_OUT_FILE")"
+
+# --- --rebuild は警告つきで無視され、コマンド自体は実行される（docker固有オプションとは
+#     別枠。常駐コンテナの作り直しという概念が無いだけで、コマンド実行は no-op にしない） ---
+HOST_REBUILD_STDERR="$(mktemp "${TMPDIR:-/tmp}/dw-test-host-rebuild-stderr.XXXXXX")"
+HOST_REBUILD_EXIT=0
+(
+  cd "$PRINT_PLAN_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 PATH="${FAKE_BIN_DIR}:${PATH}" bash scripts/sandbox-exec.sh --rebuild 'true'
+) 2>"$HOST_REBUILD_STDERR" >/dev/null || HOST_REBUILD_EXIT=$?
+assert_exit_code "host: --rebuild 指定時もコマンド自体は成功する" 0 "$HOST_REBUILD_EXIT"
+if grep -qF -- "--rebuild" "$HOST_REBUILD_STDERR"; then
+  pass "host: --rebuild は警告付きで無視される"
+else
+  fail "host: --rebuild は警告付きで無視される" "stderr=[$(cat "$HOST_REBUILD_STDERR")]"
+fi
+
+# --- docker固有の後片付け系オプション（--down/--ls/--reset-cache/--init）は
+#     警告つきで no-op（exit 0）になり、エラー終了しない ---
+for HOST_NOOP_OPT in --down --ls --reset-cache --init; do
+  HOST_NOOP_STDERR="$(mktemp "${TMPDIR:-/tmp}/dw-test-host-noop-stderr.XXXXXX")"
+  HOST_NOOP_EXIT=0
+  (
+    cd "$PRINT_PLAN_REPO" || exit 1
+    DEV_WORKFLOW_SANDBOX_HOST=1 PATH="${FAKE_BIN_DIR}:${PATH}" bash scripts/sandbox-exec.sh "$HOST_NOOP_OPT"
+  ) 2>"$HOST_NOOP_STDERR" >/dev/null || HOST_NOOP_EXIT=$?
+  assert_exit_code "host: ${HOST_NOOP_OPT} はエラー終了しない（no-op, exit 0）" 0 "$HOST_NOOP_EXIT"
+  if grep -qF -- "$HOST_NOOP_OPT" "$HOST_NOOP_STDERR"; then
+    pass "host: ${HOST_NOOP_OPT} は警告を出す"
+  else
+    fail "host: ${HOST_NOOP_OPT} は警告を出す" "stderr=[$(cat "$HOST_NOOP_STDERR")]"
+  fi
+  if [ -s "$DOCKER_CALLED_MARKER" ]; then
+    fail "host: ${HOST_NOOP_OPT} は docker を呼ばない" "docker が呼ばれました: $(cat "$DOCKER_CALLED_MARKER")"
+  else
+    pass "host: ${HOST_NOOP_OPT} は docker を呼ばない"
+  fi
+done
+
+# --- --detach/--wait: 既存の detach ディレクトリ機構を docker 非依存のまま流用できる ---
+HOST_DETACH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-host-detach-home.XXXXXX")"
+
+HOST_DETACH_START=$(date +%s)
+HOST_DETACH_OUTPUT="$(
+  cd "$PRINT_PLAN_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 DEV_WORKFLOW_DETACH_HOME="$HOST_DETACH_HOME" \
+    PATH="${FAKE_BIN_DIR}:${PATH}" \
+    bash scripts/sandbox-exec.sh --detach --handle hosttest 'sleep 2 && echo hello-from-host-detach'
+)"
+HOST_DETACH_LAUNCH_EXIT=$?
+HOST_DETACH_END=$(date +%s)
+HOST_DETACH_ELAPSED=$((HOST_DETACH_END - HOST_DETACH_START))
+
+assert_exit_code "host: --detach の起動コマンド自体は成功（exit 0）で返る" 0 "$HOST_DETACH_LAUNCH_EXIT"
+
+if [ "$HOST_DETACH_ELAPSED" -lt 2 ]; then
+  pass "host: 2秒かかるコマンドでも --detach の呼び出しは即座に返る（経過${HOST_DETACH_ELAPSED}秒）"
+else
+  fail "host: 2秒かかるコマンドでも --detach の呼び出しは即座に返る" \
+    "経過=${HOST_DETACH_ELAPSED}秒（前景実行のままになっている）"
+fi
+
+case "$HOST_DETACH_OUTPUT" in
+  *"handle=hosttest"*) pass "host: --detach の出力にhandle名が含まれる" ;;
+  *) fail "host: --detach の出力にhandle名が含まれる" "output=[${HOST_DETACH_OUTPUT}]" ;;
+esac
+
+HOST_DETACH_WAIT_OUTPUT="$(
+  cd "$PRINT_PLAN_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 DEV_WORKFLOW_DETACH_HOME="$HOST_DETACH_HOME" \
+    DEV_WORKFLOW_WAIT_POLL_SECONDS=1 \
+    bash scripts/sandbox-exec.sh --wait --handle hosttest
+)"
+HOST_DETACH_WAIT_EXIT=$?
+assert_exit_code "host: --wait は完了したコマンドの終了コード(0)をそのまま返す" 0 "$HOST_DETACH_WAIT_EXIT"
+
+case "$HOST_DETACH_WAIT_OUTPUT" in
+  *"hello-from-host-detach"*) pass "host: --wait 完了後にログ（標準出力）が読める" ;;
+  *) fail "host: --wait 完了後にログ（標準出力）が読める" "output=[${HOST_DETACH_WAIT_OUTPUT}]" ;;
+esac
+
+if [ -s "$DOCKER_CALLED_MARKER" ]; then
+  fail "host: --detach/--wait も docker を起動しない" "docker が呼ばれました: $(cat "$DOCKER_CALLED_MARKER")"
+else
+  pass "host: --detach/--wait も docker を起動しない"
+fi
+
+# --- レーン別キャッシュ env（issue #145 / review #286）: dockerfile モードには
+#     -e 付与・mkdirのend-to-endテストがあるが、host モードは `export` した環境変数が
+#     実行コマンドに実際に継承されることが未検証だった。agent worktree
+#     （LANE_SCOPE=agent-x）で実行し、実行コマンド側から値を読めることを確認する ---
+HOST_LANE_ENV_TMP="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hostlanecache.XXXXXX")"
+HOST_LANE_ENV_BASE="${HOST_LANE_ENV_TMP}/cargo-registry"
+HOST_LANE_ENV_OUT_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-test-hostlaneenv-out.XXXXXX")"
+
+(
+  cd "$AGENT_WORKTREE_DIR" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 PATH="${FAKE_BIN_DIR}:${PATH}" \
+    DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV="CARGO_HOME=${HOST_LANE_ENV_BASE}" \
+    bash scripts/sandbox-exec.sh 'printf "%s" "$CARGO_HOME"' > "$HOST_LANE_ENV_OUT_FILE" 2>/dev/null
+)
+
+assert_eq "host: レーン別キャッシュenvが実行コマンドに継承される（<path>/lanes/<scope>、#286）" \
+  "${HOST_LANE_ENV_BASE}/lanes/agent-x" "$(cat "$HOST_LANE_ENV_OUT_FILE")"
+
+if [ -s "$DOCKER_CALLED_MARKER" ]; then
+  fail "host: レーン別キャッシュenv実行時もdockerを起動しない" "docker が呼ばれました: $(cat "$DOCKER_CALLED_MARKER")"
+else
+  pass "host: レーン別キャッシュenv実行時もdockerを起動しない"
+fi
 
 # ---------------------------------------------------------------------------
 # ケース7a: normalize_mount_source（Docker 非依存の純粋関数、issue #25）
@@ -2616,6 +2816,290 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# docker_warning_message / gh_warning_message
+# （Docker / gh の必須判定を非ブロッキング警告へ格下げ、Task #271）
+#
+# クラウドでは Docker に接続できず gh も認証できない可能性が高いため、Docker/gh 単体の
+# 不在・未認証でセッション全体を止めない。crlf_warning_message / optional_tools_notice と
+# 同じ作法（check-prerequisites.sh を source して純粋関数だけを直接呼び出す）で検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== docker_warning_message / gh_warning_message（非ブロッキング警告への格下げ。Task #271） =="
+
+docker_warning_message_with_path() {
+  # docker_warning_message_with_path <PATH>
+  # 指定した PATH だけを使って docker_warning_message を呼び出し、標準出力を返す（stderr は捨てる）。
+  local fake_path="$1"
+  (
+    # shellcheck source=../scripts/check-prerequisites.sh
+    source "$CHECK_PREREQS_SCRIPT"
+    PATH="$fake_path" docker_warning_message
+  ) 2>/dev/null
+}
+
+gh_warning_message_with_path() {
+  # gh_warning_message_with_path <PATH>
+  # 指定した PATH だけを使って gh_warning_message を呼び出し、標準出力を返す（stderr は捨てる）。
+  local fake_path="$1"
+  (
+    # shellcheck source=../scripts/check-prerequisites.sh
+    source "$CHECK_PREREQS_SCRIPT"
+    PATH="$fake_path" gh_warning_message
+  ) 2>/dev/null
+}
+
+strip_tools_from_path() {
+  # strip_tools_from_path <tool名...>
+  # 指定した実行ファイル名を含むPATHエントリだけを取り除いたPATHを返す
+  # （strip_optional_tools_from_pathと同じ作法。cat/grep/bash等、他に必要な外部コマンドは
+  # そのまま残すため、docker/ghが「無い」ことを再現しても docker_warning_message /
+  # gh_warning_message 自体が依存する外部コマンドの欠落で壊れない）。
+  local dir out="" tool skip
+  local IFS=':'
+  for dir in $PATH; do
+    skip=0
+    for tool in "$@"; do
+      [ -x "${dir}/${tool}" ] && skip=1 && break
+    done
+    [ "$skip" -eq 1 ] && continue
+    out="${out:+${out}:}${dir}"
+  done
+  printf '%s' "$out"
+}
+
+# --- docker が無ければ警告を返す（インストール手順とhostモードへの言及を含む） ---
+PREREQ271_NO_DOCKER_PATH="$(strip_tools_from_path docker)"
+PREREQ271_DOCKER_MISSING="$(docker_warning_message_with_path "$PREREQ271_NO_DOCKER_PATH")"
+case "$PREREQ271_DOCKER_MISSING" in
+  *"インストールされていません"*"DEV_WORKFLOW_SANDBOX_HOST=1"*)
+    pass "docker_warning_message: dockerが無いとインストール手順とhostモードを案内する（#271）" ;;
+  *)
+    fail "docker_warning_message: dockerが無いとインストール手順とhostモードを案内する（#271）" \
+      "message=[${PREREQ271_DOCKER_MISSING}]" ;;
+esac
+
+# --- docker はあるが info が失敗する（デーモン未起動）場合も警告を返す ---
+PREREQ271_DOCKER_DOWN_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-prereq271-dockerdown.XXXXXX")"
+cat > "${PREREQ271_DOCKER_DOWN_BIN}/docker" <<'FAKE_DOCKER_DOWN271'
+#!/bin/bash
+exit 1
+FAKE_DOCKER_DOWN271
+chmod +x "${PREREQ271_DOCKER_DOWN_BIN}/docker"
+PREREQ271_DOCKER_DOWN="$(docker_warning_message_with_path "${PREREQ271_DOCKER_DOWN_BIN}:${PATH}")"
+case "$PREREQ271_DOCKER_DOWN" in
+  *"デーモンが起動していません"*)
+    pass "docker_warning_message: デーモン未起動でも警告を返す（#271）" ;;
+  *)
+    fail "docker_warning_message: デーモン未起動でも警告を返す（#271）" \
+      "message=[${PREREQ271_DOCKER_DOWN}]" ;;
+esac
+
+# --- docker があり info も成功すれば何も出力しない ---
+PREREQ271_DOCKER_OK_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-prereq271-dockerok.XXXXXX")"
+cat > "${PREREQ271_DOCKER_OK_BIN}/docker" <<'FAKE_DOCKER_OK271'
+#!/bin/bash
+exit 0
+FAKE_DOCKER_OK271
+chmod +x "${PREREQ271_DOCKER_OK_BIN}/docker"
+PREREQ271_DOCKER_OK="$(docker_warning_message_with_path "${PREREQ271_DOCKER_OK_BIN}:${PATH}")"
+assert_eq "docker_warning_message: dockerがあってinfoも成功すれば何も出力しない（#271）" "" "$PREREQ271_DOCKER_OK"
+
+# --- gh が無ければ警告を返す（インストール手順とMCPバックエンドへの言及を含む） ---
+PREREQ271_NO_GH_PATH="$(strip_tools_from_path gh)"
+PREREQ271_GH_MISSING="$(gh_warning_message_with_path "$PREREQ271_NO_GH_PATH")"
+case "$PREREQ271_GH_MISSING" in
+  *"インストールされていません"*"MCP バックエンド"*)
+    pass "gh_warning_message: ghが無いとインストール手順とMCPバックエンドの代替を案内する（#271）" ;;
+  *)
+    fail "gh_warning_message: ghが無いとインストール手順とMCPバックエンドの代替を案内する（#271）" \
+      "message=[${PREREQ271_GH_MISSING}]" ;;
+esac
+
+# --- gh はあるが未認証の場合も警告を返す ---
+PREREQ271_GH_UNAUTH_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-prereq271-ghunauth.XXXXXX")"
+cat > "${PREREQ271_GH_UNAUTH_BIN}/gh" <<'FAKE_GH_UNAUTH271'
+#!/bin/bash
+exit 1
+FAKE_GH_UNAUTH271
+chmod +x "${PREREQ271_GH_UNAUTH_BIN}/gh"
+PREREQ271_GH_UNAUTH="$(gh_warning_message_with_path "${PREREQ271_GH_UNAUTH_BIN}:${PATH}")"
+case "$PREREQ271_GH_UNAUTH" in
+  *"未認証です"*)
+    pass "gh_warning_message: 未認証でも警告を返す（#271）" ;;
+  *)
+    fail "gh_warning_message: 未認証でも警告を返す（#271）" "message=[${PREREQ271_GH_UNAUTH}]" ;;
+esac
+
+# --- gh があり認証済みなら何も出力しない ---
+PREREQ271_GH_OK_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-prereq271-ghok.XXXXXX")"
+cat > "${PREREQ271_GH_OK_BIN}/gh" <<'FAKE_GH_OK271'
+#!/bin/bash
+exit 0
+FAKE_GH_OK271
+chmod +x "${PREREQ271_GH_OK_BIN}/gh"
+PREREQ271_GH_OK="$(gh_warning_message_with_path "${PREREQ271_GH_OK_BIN}:${PATH}")"
+assert_eq "gh_warning_message: ghがあり認証済みなら何も出力しない（#271）" "" "$PREREQ271_GH_OK"
+
+# --- docker/gh が両方無い環境でも check-prerequisites.sh 全体は exit 0（ブロックしない） ---
+PREREQ271_NODEPS_REPO="$(make_temp_repo)"
+PREREQ271_NODEPS_STDERR="$(mktemp "${TMPDIR:-/tmp}/dw-test-prereq271-nodeps-stderr.XXXXXX")"
+PREREQ271_NODEPS_PATH="$(strip_tools_from_path docker gh)"
+PREREQ271_NODEPS_EXIT=0
+(
+  cd "$PREREQ271_NODEPS_REPO" || exit 1
+  PATH="$PREREQ271_NODEPS_PATH" bash "$CHECK_PREREQS_SCRIPT" 1>/dev/null 2>"$PREREQ271_NODEPS_STDERR"
+) || PREREQ271_NODEPS_EXIT=$?
+
+assert_exit_code "docker/ghが両方無くてもexit 0（ブロックしない、#271）" 0 "$PREREQ271_NODEPS_EXIT"
+
+if grep -q "Docker がインストールされていません" "$PREREQ271_NODEPS_STDERR" && \
+   grep -q "gh (GitHub CLI) がインストールされていません" "$PREREQ271_NODEPS_STDERR"; then
+  pass "check-prerequisites.sh 本体からもdocker/ghの警告が両方stderrに出る（#271）"
+else
+  fail "check-prerequisites.sh 本体からもdocker/ghの警告が両方stderrに出る（#271）" \
+    "stderr=[$(cat "$PREREQ271_NODEPS_STDERR")]"
+fi
+
+# --- git リポジトリ外では従来どおり exit 2（代替が無く、どのスキルも成立しない） ---
+PREREQ271_NONGIT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-prereq271-nongit.XXXXXX")"
+PREREQ271_NONGIT_EXIT=0
+(
+  cd "$PREREQ271_NONGIT_DIR" || exit 1
+  PATH="${CRLF_FAKE_BIN_DIR}:${PATH}" bash "$CHECK_PREREQS_SCRIPT" 1>/dev/null 2>/dev/null
+) || PREREQ271_NONGIT_EXIT=$?
+
+assert_exit_code "gitリポジトリ外では従来どおりexit 2（#271）" 2 "$PREREQ271_NONGIT_EXIT"
+
+# --- errors 配列に docker/gh の不在・未認証の文言が追加されていないこと（静的検査） ---
+if grep -n "errors+=" "$CHECK_PREREQS_SCRIPT" | \
+   grep -qiE "Docker.*インストールされていません|Docker デーモンが起動していません|gh \(GitHub CLI\) がインストールされていません|gh が未認証です"; then
+  fail "errors 配列にdocker/ghの不在・未認証が追加されていない（#271）" \
+    "$(grep -n "errors+=" "$CHECK_PREREQS_SCRIPT" | \
+       grep -iE "Docker.*インストールされていません|Docker デーモンが起動していません|gh \(GitHub CLI\) がインストールされていません|gh が未認証です")"
+else
+  pass "errors 配列にdocker/ghの不在・未認証が追加されていない（#271）"
+fi
+
+# --- README.md「前提条件」節が新しい扱い（非ブロッキング警告）を反映している ---
+PREREQ271_README="${REPO_ROOT}/README.md"
+if grep -qF "DEV_WORKFLOW_SANDBOX_HOST=1" "$PREREQ271_README"; then
+  pass "README.md: 前提条件節にDEV_WORKFLOW_SANDBOX_HOST=1への言及がある（#271）"
+else
+  fail "README.md: 前提条件節にDEV_WORKFLOW_SANDBOX_HOST=1への言及がある（#271）"
+fi
+
+if grep -qF "ブロックはされません" "$PREREQ271_README"; then
+  pass "README.md: Docker/ghの不在・未認証がブロックされない旨の記載がある（#271）"
+else
+  fail "README.md: Docker/ghの不在・未認証がブロックされない旨の記載がある（#271）"
+fi
+
+# ---------------------------------------------------------------------------
+# check-prerequisites.sh が detect-env.sh の判定関数を再利用し、上書き環境変数が
+# 一貫して効くこと（レビュー指摘 #283）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== check-prerequisites.sh: detect-env.sh への委譲・上書き変数の一貫性（#283） =="
+
+# --- check-prerequisites.sh が scripts/lib/detect-env.sh を source している（静的検査） ---
+if grep -qF 'source "$(dirname "${BASH_SOURCE[0]}")/lib/detect-env.sh"' "$CHECK_PREREQS_SCRIPT"; then
+  pass "check-prerequisites.sh: scripts/lib/detect-env.sh をsourceしている（#283）"
+else
+  fail "check-prerequisites.sh: scripts/lib/detect-env.sh をsourceしている（#283）"
+fi
+
+docker_warning_message_with_env() {
+  # docker_warning_message_with_env <PATH> <DEV_WORKFLOW_DOCKER_UNAVAILABLE値>
+  # DEV_WORKFLOW_DOCKER_UNAVAILABLE を指定して docker_warning_message を呼び出し、
+  # 標準出力を返す（stderr は捨てる）。空文字を渡せば未設定として扱われる。
+  local fake_path="$1" override="$2"
+  (
+    # shellcheck source=../scripts/check-prerequisites.sh
+    source "$CHECK_PREREQS_SCRIPT"
+    PATH="$fake_path" DEV_WORKFLOW_DOCKER_UNAVAILABLE="$override" docker_warning_message
+  ) 2>/dev/null
+}
+
+gh_warning_message_with_env() {
+  # gh_warning_message_with_env <PATH> <DEV_WORKFLOW_GH_UNAVAILABLE値>
+  local fake_path="$1" override="$2"
+  (
+    # shellcheck source=../scripts/check-prerequisites.sh
+    source "$CHECK_PREREQS_SCRIPT"
+    PATH="$fake_path" DEV_WORKFLOW_GH_UNAVAILABLE="$override" gh_warning_message
+  ) 2>/dev/null
+}
+
+# --- 実際には docker が使える（fake docker は常に成功）のに、
+#     DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 を指定すると警告が出る（上書きが効く、#283） ---
+PREREQ283_DOCKER_OVERRIDE="$(docker_warning_message_with_env "${PREREQ271_DOCKER_OK_BIN}:${PATH}" "1")"
+case "$PREREQ283_DOCKER_OVERRIDE" in
+  *"インストールされていません"*|*"デーモンが起動していません"*)
+    pass "docker_warning_message: DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 を指定すると実際のdocker状態に関わらず警告が出る（#283）" ;;
+  *)
+    fail "docker_warning_message: DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 を指定すると実際のdocker状態に関わらず警告が出る（#283）" \
+      "message=[${PREREQ283_DOCKER_OVERRIDE}]" ;;
+esac
+
+# --- 上書きを指定しない（空文字）場合は、docker が使えるときと同じく警告が出ない（既存挙動の回帰確認） ---
+PREREQ283_DOCKER_NO_OVERRIDE="$(docker_warning_message_with_env "${PREREQ271_DOCKER_OK_BIN}:${PATH}" "")"
+assert_eq "docker_warning_message: DEV_WORKFLOW_DOCKER_UNAVAILABLEが空ならdockerが使えるとき何も出力しない（#283）" \
+  "" "$PREREQ283_DOCKER_NO_OVERRIDE"
+
+# --- 実際には gh が使える（fake gh は常に成功）のに、
+#     DEV_WORKFLOW_GH_UNAVAILABLE=1 を指定すると警告が出る（上書きが効く、#283） ---
+PREREQ283_GH_OVERRIDE="$(gh_warning_message_with_env "${PREREQ271_GH_OK_BIN}:${PATH}" "1")"
+case "$PREREQ283_GH_OVERRIDE" in
+  *"インストールされていません"*|*"未認証です"*|*"到達できません"*)
+    pass "gh_warning_message: DEV_WORKFLOW_GH_UNAVAILABLE=1 を指定すると実際のgh状態に関わらず警告が出る（#283）" ;;
+  *)
+    fail "gh_warning_message: DEV_WORKFLOW_GH_UNAVAILABLE=1 を指定すると実際のgh状態に関わらず警告が出る（#283）" \
+      "message=[${PREREQ283_GH_OVERRIDE}]" ;;
+esac
+
+# --- 上書きを指定しない（空文字）場合は、ghが使えるときと同じく警告が出ない（既存挙動の回帰確認） ---
+PREREQ283_GH_NO_OVERRIDE="$(gh_warning_message_with_env "${PREREQ271_GH_OK_BIN}:${PATH}" "")"
+assert_eq "gh_warning_message: DEV_WORKFLOW_GH_UNAVAILABLEが空ならghが使えるとき何も出力しない（#283）" \
+  "" "$PREREQ283_GH_NO_OVERRIDE"
+
+# --- check-prerequisites.sh 本体を上書き変数つきで実行しても exit 0 のまま（ブロックしない） ---
+#     実際の docker/gh は fake（常に成功）に差し替え、上書き変数だけで警告へ倒す
+PREREQ283_FULL_REPO="$(make_temp_repo)"
+PREREQ283_FULL_STDERR="$(mktemp "${TMPDIR:-/tmp}/dw-test-prereq283-full-stderr.XXXXXX")"
+PREREQ283_FULL_EXIT=0
+(
+  cd "$PREREQ283_FULL_REPO" || exit 1
+  PATH="${PREREQ271_DOCKER_OK_BIN}:${PREREQ271_GH_OK_BIN}:${PATH}" \
+    DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 DEV_WORKFLOW_GH_UNAVAILABLE=1 \
+    bash "$CHECK_PREREQS_SCRIPT" 1>/dev/null 2>"$PREREQ283_FULL_STDERR"
+) || PREREQ283_FULL_EXIT=$?
+
+assert_exit_code "check-prerequisites.sh: 上書き変数指定時もexit 0のまま（ブロックしない、#283）" \
+  0 "$PREREQ283_FULL_EXIT"
+
+if grep -q "警告" "$PREREQ283_FULL_STDERR"; then
+  pass "check-prerequisites.sh: 上書き変数指定時に本体からも警告がstderrに出る（#283）"
+else
+  fail "check-prerequisites.sh: 上書き変数指定時に本体からも警告がstderrに出る（#283）" \
+    "stderr=[$(cat "$PREREQ283_FULL_STDERR")]"
+fi
+
+# --- gitリポジトリ外のブロック（exit 2）は上書き変数の有無に関わらず従来どおり維持されている ---
+PREREQ283_NONGIT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-prereq283-nongit.XXXXXX")"
+PREREQ283_NONGIT_EXIT=0
+(
+  cd "$PREREQ283_NONGIT_DIR" || exit 1
+  PATH="${PREREQ271_DOCKER_OK_BIN}:${PREREQ271_GH_OK_BIN}:${PATH}" \
+    DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 DEV_WORKFLOW_GH_UNAVAILABLE=1 \
+    bash "$CHECK_PREREQS_SCRIPT" 1>/dev/null 2>/dev/null
+) || PREREQ283_NONGIT_EXIT=$?
+
+assert_exit_code "check-prerequisites.sh: gitリポジトリ外のブロック（exit 2）は上書き変数指定時も維持される（#283）" \
+  2 "$PREREQ283_NONGIT_EXIT"
+
+# ---------------------------------------------------------------------------
 # 検出時の警告から dev-workflow:setup への導線（Task #222）
 # ---------------------------------------------------------------------------
 
@@ -3699,6 +4183,41 @@ else
   pass "gh モード: 「- Epic: なし（単発タスク）」の #400 は除外される（#208）"
 fi
 
+# --- ケース12b: gh不可時（DEV_WORKFLOW_GH_UNAVAILABLE=1）は --epic モードで
+#     理由を明示して停止する。黙って空のPLAN_LIST（1レーン相当）に落とさない（Task #275）。
+#     load_from_gh は実際に `gh issue list` を呼び、その終了コードで失敗を判定する実装
+#     であり、DEV_WORKFLOW_GH_UNAVAILABLE 自体は失敗後のメッセージ組み立てにしか使わない
+#     （呼び出し自体はゲートしない）。ケース12と同様にPATH経由で「issue listが非ゼロ終了
+#     する偽のgh」を置いて失敗を再現する（#284。gh導入済み環境で本物のghがこのリポジトリに
+#     対して成功し、検証したい分岐を通らなくなることの対策）。
+#     実際の403環境や実リポジトリへのネットワークアクセスは不要
+#     （#268 の dev_workflow_gh_available は DEV_WORKFLOW_GH_UNAVAILABLE=1 により実gh抜きで
+#     直接偽に上書きされる） ---
+PW_NOGH_FAKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-pw-noghfake.XXXXXX")"
+cat > "${PW_NOGH_FAKE_DIR}/gh" <<'FAKE_GH_FAIL'
+#!/bin/bash
+# tests/run-tests.sh 用の偽 gh。issue list 呼び出しを含め常に失敗させる（exit 1）。
+# 実ネットワークには一切触れない。
+exit 1
+FAKE_GH_FAIL
+chmod +x "${PW_NOGH_FAKE_DIR}/gh"
+
+PW_NOGH_STDERR="$(mktemp "${TMPDIR:-/tmp}/dw-test-pw-nogh-stderr.XXXXXX")"
+PATH="${PW_NOGH_FAKE_DIR}:${PATH}" DEV_WORKFLOW_GH_UNAVAILABLE=1 bash "$PLAN_WAVES_SCRIPT" --epic 14 >/dev/null 2>"$PW_NOGH_STDERR"
+assert_exit_code "gh不可時: --epic モードは exit 2 で停止する（#275, #284）" 2 "$?"
+case "$(cat "$PW_NOGH_STDERR")" in
+  *'gh'*'--from-file'*) pass "gh不可時: --from-file への切り替えを案内する（#275, #284）" ;;
+  *) fail "gh不可時: --from-file への切り替えを案内する（#275, #284）" "$(cat "$PW_NOGH_STDERR")" ;;
+esac
+
+# gh不可でも --from-file モードは影響を受けない（ファイル入力経路はgh非依存であることの確認。
+# この経路はgh自体を呼ばないため偽ghは不要だが、念のため同じPATHを使い回す）
+PATH="${PW_NOGH_FAKE_DIR}:${PATH}" DEV_WORKFLOW_GH_UNAVAILABLE=1 bash "$PLAN_WAVES_SCRIPT" --from-file "$PW_DEPSWARN_NONE_FIXTURE" >/dev/null 2>&1
+assert_exit_code "gh不可でも --from-file モードは影響を受けない（#275）" 0 "$?"
+
+# 回帰: ghが使える環境（ケース12の偽gh。auth status/api rate_limitも暗黙に成功する）では
+# --epic モードの挙動は変わらない（exit 0 で従来どおり完了することをケース12で確認済み）。
+
 # ---------------------------------------------------------------------------
 # plan-waves.sh: 対象ファイルの重なりによるサブバッチ分割（Task #216）
 #
@@ -4238,6 +4757,93 @@ case "$ML17_OUT" in
   *"取り込み成功"*) pass "ケース17: 出力に取り込み成功のメッセージが含まれる" ;;
   *) fail "ケース17: 出力に取り込み成功のメッセージが含まれる" "output=[${ML17_OUT}]" ;;
 esac
+
+# ---------------------------------------------------------------------------
+# merge-lane.sh --single-branch（単一ブランチ運用モード、Task #278）
+#
+# クラウド等、セッションに許可された1本のブランチ以外へpushできない環境向けに、
+# wave ブランチを新規作成せず、レーンを直接 epic ブランチへマージするモード。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== merge-lane.sh --single-branch（単一ブランチ運用モード、#278） =="
+
+# --- ケース18: --single-branch と --create の同時指定は exit 2 ---
+ML_REPO18="$(make_temp_repo)"
+ML18_BASE="$(ml_head_of "$ML_REPO18" HEAD)"
+ml_branch_from "$ML_REPO18" "lane-sb1" "$ML18_BASE"
+ml_commit_file "$ML_REPO18" "sb1.txt" "lane sb1\n" "lane sb1 change"
+
+run_merge_lane "$ML_REPO18" --wave-branch "$ML18_BASE" --expected-base "$ML18_BASE" --lane-branch lane-sb1 --single-branch --create >/dev/null 2>&1
+assert_exit_code "ケース18: --single-branch と --create の同時指定は exit 2" 2 "$?"
+
+# --- ケース19: --single-branch で宛先ブランチが存在しない場合は exit 1（新規作成しない） ---
+ML_REPO19="$(make_temp_repo)"
+ML19_BASE="$(ml_head_of "$ML_REPO19" HEAD)"
+ml_branch_from "$ML_REPO19" "lane-sb2" "$ML19_BASE"
+ml_commit_file "$ML_REPO19" "sb2.txt" "lane sb2\n" "lane sb2 change"
+
+run_merge_lane "$ML_REPO19" --wave-branch "no-such-epic-branch" --expected-base "$ML19_BASE" --lane-branch lane-sb2 --single-branch >/dev/null 2>&1
+assert_exit_code "ケース19: --single-branchで宛先ブランチが存在しなければexit 1" 1 "$?"
+
+if git -C "$ML_REPO19" rev-parse --verify -q refs/heads/no-such-epic-branch >/dev/null 2>&1; then
+  fail "ケース19: --single-branchは宛先ブランチを新規作成しない"
+else
+  pass "ケース19: --single-branchは宛先ブランチを新規作成しない"
+fi
+
+# --- ケース20: --single-branch で epic ブランチへ2レーンを直接・順に取り込める
+#     （wave ブランチを一切作らず、epicブランチ自身が宛先になる。ケース8の単一ブランチ版） ---
+ML_REPO20="$(make_temp_repo)"
+ML20_DEFAULT_BRANCH="$(cd "$ML_REPO20" && git rev-parse --abbrev-ref HEAD)"
+ml_commit_file "$ML_REPO20" "base.txt" "epic base\n" "epic base commit"
+ML20_BASE="$(ml_head_of "$ML_REPO20" HEAD)"
+ml_branch_from "$ML_REPO20" "lane-sb-a" "$ML20_BASE"
+ml_commit_file "$ML_REPO20" "sba.txt" "lane sb-a\n" "lane sb-a change"
+ml_branch_from "$ML_REPO20" "lane-sb-b" "$ML20_BASE"
+ml_commit_file "$ML_REPO20" "sbb.txt" "lane sb-b\n" "lane sb-b change"
+
+ML20_OUT1="$(run_merge_lane "$ML_REPO20" --wave-branch "$ML20_DEFAULT_BRANCH" --expected-base "$ML20_BASE" --lane-branch lane-sb-a --task 278 --single-branch)"
+ML20_EXIT1=$?
+assert_exit_code "ケース20: --single-branchで1本目（lane-sb-a）の取り込みはexit 0" 0 "$ML20_EXIT1"
+
+ML20_ACTUAL_BASE_2ND="$(cd "$ML_REPO20" && git merge-base "$ML20_DEFAULT_BRANCH" lane-sb-b)"
+assert_eq "ケース20: --single-branchでも2本目のmerge-base（実行前）はEXPECTED_BASEのまま" \
+  "$ML20_BASE" "$ML20_ACTUAL_BASE_2ND"
+
+ML20_OUT2="$(run_merge_lane "$ML_REPO20" --wave-branch "$ML20_DEFAULT_BRANCH" --expected-base "$ML20_BASE" --lane-branch lane-sb-b --task 278 --single-branch)"
+ML20_EXIT2=$?
+assert_exit_code "ケース20: --single-branchで2本目（lane-sb-b）の取り込みはexit 0（--createなし）" 0 "$ML20_EXIT2"
+
+ML20_EPIC_HEAD="$(ml_head_of "$ML_REPO20" "$ML20_DEFAULT_BRANCH")"
+if [ "$ML20_EPIC_HEAD" != "$ML20_BASE" ]; then
+  pass "ケース20: epicブランチ自身が両レーンの成果を含む（wave ブランチを経由していない）"
+else
+  fail "ケース20: epicブランチ自身が両レーンの成果を含む（wave ブランチを経由していない）" "epic HEAD が BASE から動いていません"
+fi
+
+# wave ブランチが一切作られていないことを確認する（単一ブランチ運用の本質）
+ML20_WAVE_BRANCH_COUNT="$(cd "$ML_REPO20" && git for-each-ref --format='%(refname)' 'refs/heads/wave/*' | wc -l | tr -d ' ')"
+assert_eq "ケース20: --single-branchではwaveブランチが1本も作られない" "0" "$ML20_WAVE_BRANCH_COUNT"
+
+# --- ケース21: --single-branchでも別ベースから分岐したレーンはexit 10で拒否される
+#     （検証ロジックはモードに関わらず同一であることの確認） ---
+ML_REPO21="$(make_temp_repo)"
+ML21_DEFAULT_BRANCH="$(cd "$ML_REPO21" && git rev-parse --abbrev-ref HEAD)"
+ML21_OLD_BASE="$(ml_head_of "$ML_REPO21" HEAD)"
+ml_commit_file "$ML_REPO21" "base.txt" "epic base\n" "epic base commit"
+ML21_EXPECTED_BASE="$(ml_head_of "$ML_REPO21" HEAD)"
+
+ml_branch_from "$ML_REPO21" "lane-sb-wrong" "$ML21_OLD_BASE"
+ml_commit_file "$ML_REPO21" "wrong.txt" "lane sb wrong\n" "lane sb wrong change"
+(cd "$ML_REPO21" && git checkout -q "$ML21_DEFAULT_BRANCH") >/dev/null 2>&1
+
+ML21_OUT="$(run_merge_lane "$ML_REPO21" --wave-branch "$ML21_DEFAULT_BRANCH" --expected-base "$ML21_EXPECTED_BASE" --lane-branch lane-sb-wrong --single-branch)"
+assert_exit_code "ケース21: --single-branchでも別ベース分岐のレーンはexit 10" 10 "$?"
+
+unset ML_REPO18 ML18_BASE ML_REPO19 ML19_BASE ML_REPO20 ML20_DEFAULT_BRANCH ML20_BASE \
+  ML20_OUT1 ML20_EXIT1 ML20_ACTUAL_BASE_2ND ML20_OUT2 ML20_EXIT2 ML20_EPIC_HEAD \
+  ML20_WAVE_BRANCH_COUNT ML_REPO21 ML21_DEFAULT_BRANCH ML21_OLD_BASE ML21_EXPECTED_BASE ML21_OUT
 
 # ---------------------------------------------------------------------------
 # adapters/codex/run-loop.sh: 統合ゲートが全テストを実行すること（回帰防止 #37）
@@ -5240,8 +5846,10 @@ else
   pass "notify-slack.sh: sink使用時にcurlが呼ばれない（実送信しない）"
 fi
 
-# --- Webhook未設定: 何もせずexit 0、標準出力・標準エラーも空、sinkにも書かれない ---
+# --- Webhook未設定: exit 0、標準出力・標準エラーは空、sinkには書かれない（既存挙動を維持）。
+#     run markerが無いためEpic番号も取れず、ghも呼ばずにローカルファイルへ退く（#280） ---
 NS_NOWEBHOOK_SINK="${NS_WORK}/nowebhook.json"
+NS_NOWEBHOOK_FALLBACK_LOG="${NS_REPO}/.claude/.dev-workflow-notify-fallback.log"
 NS_NOWEBHOOK_OUT="$(
   cd "$NS_REPO" || exit 1
   unset SLACK_WEBHOOK_URL
@@ -5258,6 +5866,327 @@ if [ -f "$NS_NOWEBHOOK_SINK" ]; then
 else
   pass "Webhook未設定: sinkファイルが作られない"
 fi
+
+# --- #280: Webhook未設定・run markerも無い（Epic番号が取れない）場合は、ghも呼ばず
+#     ローカルのフォールバックログへ記録する（runを止めない） ---
+if [ -f "$NS_NOWEBHOOK_FALLBACK_LOG" ] && grep -q '応答なし' "$NS_NOWEBHOOK_FALLBACK_LOG"; then
+  pass "#280: Webhook未設定・Epic番号不明でもローカルのフォールバックログに記録される"
+else
+  fail "#280: Webhook未設定・Epic番号不明でもローカルのフォールバックログに記録される" \
+    "$(cat "$NS_NOWEBHOOK_FALLBACK_LOG" 2>/dev/null)"
+fi
+
+if [ -s "$NS_CURL_LOG" ]; then
+  fail "#280: Epic番号が無い場合はghを呼ばずローカル記録のみに退く（ghの呼び出しがPATHに無いことも含めて確認）" \
+    "curlログに書き込みがありました: $(cat "$NS_CURL_LOG")"
+else
+  pass "#280: Epic番号が無い場合はghを呼ばずローカル記録のみに退く"
+fi
+
+# ---------------------------------------------------------------------------
+# notify-slack.sh: Epic issueフォールバック（Task #280）
+#
+# 「Epic #<N>」ラベルのrun markerを用意し、webhook未設定・または送信失敗時に
+# gh issue commentへ、ghが無ければローカルファイルへ、という優先順位を検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== notify-slack.sh: Epic issueフォールバック（Task #280） =="
+
+NS280_REPO="$(make_temp_repo)"
+NS280_MARKER="${NS280_REPO}/.claude/.dev-workflow-run"
+mkdir -p "${NS280_REPO}/.claude"
+
+# --- gh issue comment が使える場合、Epic番号を抽出してコメントする ---
+NS280_FAKE_GH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-ns280-gh.XXXXXX")"
+NS280_GH_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-ns280-ghcall.XXXXXX")"
+cat > "${NS280_FAKE_GH_DIR}/gh" <<SH
+#!/bin/bash
+echo "\$*" >> "${NS280_GH_CALL_LOG}"
+exit 0
+SH
+chmod +x "${NS280_FAKE_GH_DIR}/gh"
+
+printf '%s\n' "Epic #267" > "$NS280_MARKER"
+NS280_GH_OK_OUT="$(
+  cd "$NS280_REPO" || exit 1
+  unset SLACK_WEBHOOK_URL
+  PATH="${NS280_FAKE_GH_DIR}:${PATH}" \
+  bash "$NS_SCRIPT" stall "無活動920秒 / レーンA" < /dev/null 2>&1
+)"
+NS280_GH_OK_EXIT=$?
+
+assert_exit_code "#280: Epic番号が取れてghが使える場合もexit 0" 0 "$NS280_GH_OK_EXIT"
+assert_eq "#280: 標準出力・標準エラーが空（ghバックエンドでも静かに動く）" "" "$NS280_GH_OK_OUT"
+
+NS280_GH_CALL="$(cat "$NS280_GH_CALL_LOG")"
+case "$NS280_GH_CALL" in
+  *"issue comment 267"*) pass "#280: run markerのEpic番号(267)をgh issue commentへ渡す" ;;
+  *) fail "#280: run markerのEpic番号(267)をgh issue commentへ渡す" "call=[${NS280_GH_CALL}]" ;;
+esac
+case "$NS280_GH_CALL" in
+  *"無活動920秒 / レーンA"*) pass "#280: フォールバック本文にDETAILを含む" ;;
+  *) fail "#280: フォールバック本文にDETAILを含む" "call=[${NS280_GH_CALL}]" ;;
+esac
+
+if [ -f "${NS280_REPO}/.claude/.dev-workflow-notify-fallback.log" ]; then
+  fail "#280: gh issue commentが成功したときはローカルのフォールバックログを作らない" \
+    "作られてしまいました"
+else
+  pass "#280: gh issue commentが成功したときはローカルのフォールバックログを作らない"
+fi
+
+# --- gh issue comment が失敗する（または無い）場合、ローカルファイルへ記録する ---
+: > "$NS280_GH_CALL_LOG"
+NS280_FAKE_GH_FAIL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-ns280-ghfail.XXXXXX")"
+printf '#!/bin/bash\nexit 1\n' > "${NS280_FAKE_GH_FAIL_DIR}/gh"
+chmod +x "${NS280_FAKE_GH_FAIL_DIR}/gh"
+
+NS280_REPO2="$(make_temp_repo)"
+mkdir -p "${NS280_REPO2}/.claude"
+printf '%s\n' "Epic #99" > "${NS280_REPO2}/.claude/.dev-workflow-run"
+
+NS280_GHFAIL_OUT="$(
+  cd "$NS280_REPO2" || exit 1
+  unset SLACK_WEBHOOK_URL
+  PATH="${NS280_FAKE_GH_FAIL_DIR}:${PATH}" \
+  bash "$NS_SCRIPT" budget "ウェーブ2 / 経過98分 / 予算90分" < /dev/null 2>&1
+)"
+NS280_GHFAIL_EXIT=$?
+
+assert_exit_code "#280: ghが使えない（失敗する）場合もexit 0（runを止めない）" 0 "$NS280_GHFAIL_EXIT"
+assert_eq "#280: ghが使えない場合も標準出力・標準エラーが空" "" "$NS280_GHFAIL_OUT"
+
+NS280_GHFAIL_LOG="${NS280_REPO2}/.claude/.dev-workflow-notify-fallback.log"
+if [ -f "$NS280_GHFAIL_LOG" ] && grep -q '想定時間超過' "$NS280_GHFAIL_LOG"; then
+  pass "#280: gh issue commentが失敗したらローカルのフォールバックログに記録する"
+else
+  fail "#280: gh issue commentが失敗したらローカルのフォールバックログに記録する" \
+    "$(cat "$NS280_GHFAIL_LOG" 2>/dev/null)"
+fi
+
+# --- notification（アイドル・承認待ち通知）はフォールバック対象外（issueが埋まらないようにする） ---
+NS280_REPO3="$(make_temp_repo)"
+mkdir -p "${NS280_REPO3}/.claude"
+printf '%s\n' "Epic #42" > "${NS280_REPO3}/.claude/.dev-workflow-run"
+: > "$NS280_GH_CALL_LOG"
+
+NS280_NOTIF_OUT="$(
+  cd "$NS280_REPO3" || exit 1
+  unset SLACK_WEBHOOK_URL
+  PATH="${NS280_FAKE_GH_DIR}:${PATH}" \
+  DEV_WORKFLOW_NOTIFY_COOLDOWN=0 \
+  bash "$NS_SCRIPT" notification <<< '{"message":"Claude needs your permission to use Bash"}' 2>&1
+)"
+NS280_NOTIF_EXIT=$?
+
+assert_exit_code "#280: notification（承認待ち）もexit 0" 0 "$NS280_NOTIF_EXIT"
+assert_eq "#280: notificationは標準出力・標準エラーが空" "" "$NS280_NOTIF_OUT"
+
+if [ -s "$NS280_GH_CALL_LOG" ]; then
+  fail "#280: notificationはgh issue commentを呼ばない（issueが通知ログで埋まらないように）" \
+    "$(cat "$NS280_GH_CALL_LOG")"
+else
+  pass "#280: notificationはgh issue commentを呼ばない（issueが通知ログで埋まらないように）"
+fi
+
+if [ -f "${NS280_REPO3}/.claude/.dev-workflow-notify-fallback.log" ]; then
+  fail "#280: notificationはローカルのフォールバックログにも記録しない" "作られてしまいました"
+else
+  pass "#280: notificationはローカルのフォールバックログにも記録しない"
+fi
+
+# --- 回帰: Slackが生きている（送信成功）場合はフォールバックが一切発生しない（多重通知にしない） ---
+NS280_REPO4="$(make_temp_repo)"
+mkdir -p "${NS280_REPO4}/.claude"
+printf '%s\n' "Epic #267" > "${NS280_REPO4}/.claude/.dev-workflow-run"
+: > "$NS280_GH_CALL_LOG"
+NS280_SLACKOK_SINK="$(mktemp "${TMPDIR:-/tmp}/dw-test-ns280-slackok.XXXXXX")"
+
+NS280_SLACKOK_OUT="$(
+  cd "$NS280_REPO4" || exit 1
+  PATH="${NS280_FAKE_GH_DIR}:${PATH}" \
+  SLACK_WEBHOOK_URL="https://example.invalid/webhook" \
+  DEV_WORKFLOW_NOTIFY_SINK="$NS280_SLACKOK_SINK" \
+  bash "$NS_SCRIPT" stall "無活動920秒" < /dev/null 2>&1
+)"
+NS280_SLACKOK_EXIT=$?
+
+assert_exit_code "回帰(#280): Slack送信成功時はexit 0（従来どおり）" 0 "$NS280_SLACKOK_EXIT"
+assert_eq "回帰(#280): Slack送信成功時は標準出力・標準エラーが空（従来どおり）" "" "$NS280_SLACKOK_OUT"
+if [ -f "$NS280_SLACKOK_SINK" ]; then
+  pass "回帰(#280): Slack送信成功時はsinkへ書く（従来どおり）"
+else
+  fail "回帰(#280): Slack送信成功時はsinkへ書く（従来どおり）" "sinkファイルが無い"
+fi
+if [ -s "$NS280_GH_CALL_LOG" ]; then
+  fail "回帰(#280): Slack送信成功時はghを呼ばない（多重通知にしない）" "$(cat "$NS280_GH_CALL_LOG")"
+else
+  pass "回帰(#280): Slack送信成功時はghを呼ばない（多重通知にしない）"
+fi
+if [ -f "${NS280_REPO4}/.claude/.dev-workflow-notify-fallback.log" ]; then
+  fail "回帰(#280): Slack送信成功時はローカルのフォールバックログも作らない" "作られてしまいました"
+else
+  pass "回帰(#280): Slack送信成功時はローカルのフォールバックログも作らない"
+fi
+
+# --- Epic番号の抽出: 「Epic #<N>」以外の形式・マーカー無しでも落ちない ---
+NS280_REPO5="$(make_temp_repo)"
+mkdir -p "${NS280_REPO5}/.claude"
+printf '%s\n' "カスタムラベル（Epic番号なし）" > "${NS280_REPO5}/.claude/.dev-workflow-run"
+: > "$NS280_GH_CALL_LOG"
+
+NS280_NOEPIC_EXIT=0
+(
+  cd "$NS280_REPO5" || exit 1
+  unset SLACK_WEBHOOK_URL
+  PATH="${NS280_FAKE_GH_DIR}:${PATH}" \
+  bash "$NS_SCRIPT" stall "無活動920秒" < /dev/null >/dev/null 2>&1
+) || NS280_NOEPIC_EXIT=$?
+
+assert_exit_code "#280: run markerにEpic番号が無い形式でもexit 0（runを止めない）" 0 "$NS280_NOEPIC_EXIT"
+if [ -s "$NS280_GH_CALL_LOG" ]; then
+  fail "#280: Epic番号を抽出できない場合はghを呼ばない" "$(cat "$NS280_GH_CALL_LOG")"
+else
+  pass "#280: Epic番号を抽出できない場合はghを呼ばない"
+fi
+if [ -f "${NS280_REPO5}/.claude/.dev-workflow-notify-fallback.log" ]; then
+  pass "#280: Epic番号を抽出できない場合もローカルのフォールバックログに記録する"
+else
+  fail "#280: Epic番号を抽出できない場合もローカルのフォールバックログに記録する" "ログが作られていない"
+fi
+
+# --- 頻度を絞る: 既存の .dev-workflow-notify-last による抑止をフォールバックにも流用する ---
+NS280_REPO6="$(make_temp_repo)"
+mkdir -p "${NS280_REPO6}/.claude"
+NS280_DEDUP_GH_FAIL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-ns280-dedup-ghfail.XXXXXX")"
+printf '#!/bin/bash\nexit 1\n' > "${NS280_DEDUP_GH_FAIL_DIR}/gh"
+chmod +x "${NS280_DEDUP_GH_FAIL_DIR}/gh"
+NS280_DEDUP_LOG="${NS280_REPO6}/.claude/.dev-workflow-notify-fallback.log"
+
+(
+  cd "$NS280_REPO6" || exit 1
+  unset SLACK_WEBHOOK_URL
+  PATH="${NS280_DEDUP_GH_FAIL_DIR}:${PATH}" \
+  bash "$NS_SCRIPT" stall "無活動920秒" < /dev/null >/dev/null 2>&1
+  PATH="${NS280_DEDUP_GH_FAIL_DIR}:${PATH}" \
+  bash "$NS_SCRIPT" stall "無活動920秒" < /dev/null >/dev/null 2>&1
+)
+
+NS280_DEDUP_COUNT="$(grep -c '応答なし' "$NS280_DEDUP_LOG" 2>/dev/null || true)"
+assert_eq "#280: 同一内容の連続記録は既存のcooldownで1回に間引かれる" "1" "$NS280_DEDUP_COUNT"
+
+NS280_DEDUP_COOLDOWN0_COUNT="$(
+  cd "$NS280_REPO6" || exit 1
+  : > "$NS280_DEDUP_LOG"
+  unset SLACK_WEBHOOK_URL
+  PATH="${NS280_DEDUP_GH_FAIL_DIR}:${PATH}" DEV_WORKFLOW_NOTIFY_COOLDOWN=0 \
+    bash "$NS_SCRIPT" stall "無活動920秒" < /dev/null >/dev/null 2>&1
+  PATH="${NS280_DEDUP_GH_FAIL_DIR}:${PATH}" DEV_WORKFLOW_NOTIFY_COOLDOWN=0 \
+    bash "$NS_SCRIPT" stall "無活動920秒" < /dev/null >/dev/null 2>&1
+  grep -c '応答なし' "$NS280_DEDUP_LOG" 2>/dev/null || true
+)"
+assert_eq "#280: DEV_WORKFLOW_NOTIFY_COOLDOWN=0なら間引かずに毎回記録する" "2" "$NS280_DEDUP_COOLDOWN0_COUNT"
+
+# ---------------------------------------------------------------------------
+# notify-slack.sh: Epic issueフォールバックの本文からlast_assistant_messageを除外する
+# （wave-review指摘 #285。Slack本文には従来どおり含める。last_assistant_messageは
+# jqが無い環境では常に空になるため、本テストはjqが使える環境でのみ意味を持つ）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== notify-slack.sh: Epic issueフォールバックはlast_assistant_messageを含まない（#285） =="
+
+if command -v jq >/dev/null 2>&1; then
+  NS285_REPO="$(make_temp_repo)"
+  mkdir -p "${NS285_REPO}/.claude"
+  NS285_MARKER="${NS285_REPO}/.claude/.dev-workflow-run"
+  printf '%s\n' "Epic #267" > "$NS285_MARKER"
+
+  NS285_SECRET='機密扱いの直近応答マーカーNS285SECRET'
+  NS285_TRANSCRIPT="$(mktemp "${TMPDIR:-/tmp}/dw-test-ns285-transcript.XXXXXX")"
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n' \
+    "$NS285_SECRET" > "$NS285_TRANSCRIPT"
+
+  # --- Slack側（webhook成功）: last_assistant_messageを従来どおり本文に含む（挙動を変えない） ---
+  NS285_SLACK_SINK="$(mktemp "${TMPDIR:-/tmp}/dw-test-ns285-slack-sink.XXXXXX")"
+  NS285_SLACK_OUT="$(
+    cd "$NS285_REPO" || exit 1
+    SLACK_WEBHOOK_URL="https://example.invalid/webhook" \
+    DEV_WORKFLOW_NOTIFY_SINK="$NS285_SLACK_SINK" \
+    bash "$NS_SCRIPT" stop <<< "{\"transcript_path\":\"${NS285_TRANSCRIPT}\"}" 2>&1
+  )"
+  NS285_SLACK_EXIT=$?
+  NS285_SLACK_BODY="$(read_sink "$NS285_SLACK_SINK")"
+
+  assert_exit_code "#285: stop（Slack成功）はexit 0（既存挙動）" 0 "$NS285_SLACK_EXIT"
+  case "$NS285_SLACK_BODY" in
+    *"$NS285_SECRET"*) pass "#285: Slack本文はlast_assistant_messageを従来どおり含む（回帰確認）" ;;
+    *) fail "#285: Slack本文はlast_assistant_messageを従来どおり含む（回帰確認）" "$NS285_SLACK_BODY" ;;
+  esac
+
+  # stop（RUN_LABELあり）は成否に関わらずマーカーを消すため、fallback検証用に作り直す
+  printf '%s\n' "Epic #267" > "$NS285_MARKER"
+
+  # --- Epic issueフォールバック側（webhook未設定・ghを偽装): last_assistant_messageを含まない ---
+  NS285_FAKE_GH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-ns285-gh.XXXXXX")"
+  NS285_GH_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-ns285-ghcall.XXXXXX")"
+  cat > "${NS285_FAKE_GH_DIR}/gh" <<SH
+#!/bin/bash
+echo "\$*" >> "${NS285_GH_CALL_LOG}"
+exit 0
+SH
+  chmod +x "${NS285_FAKE_GH_DIR}/gh"
+
+  NS285_GH_OUT="$(
+    cd "$NS285_REPO" || exit 1
+    unset SLACK_WEBHOOK_URL
+    PATH="${NS285_FAKE_GH_DIR}:${PATH}" \
+    bash "$NS_SCRIPT" stop <<< "{\"transcript_path\":\"${NS285_TRANSCRIPT}\"}" 2>&1
+  )"
+  NS285_GH_EXIT=$?
+  NS285_GH_CALL="$(cat "$NS285_GH_CALL_LOG")"
+
+  assert_exit_code "#285: stop（フォールバック経路）はexit 0（既存の性質を維持）" 0 "$NS285_GH_EXIT"
+  case "$NS285_GH_CALL" in
+    *"自律実行が停止"*) pass "#285: フォールバック本文にステータス行を含む" ;;
+    *) fail "#285: フォールバック本文にステータス行を含む" "call=[${NS285_GH_CALL}]" ;;
+  esac
+  case "$NS285_GH_CALL" in
+    *"完了前に停止しました"*) pass "#285: フォールバック本文に固定の案内文を含む" ;;
+    *) fail "#285: フォールバック本文に固定の案内文を含む" "call=[${NS285_GH_CALL}]" ;;
+  esac
+  case "$NS285_GH_CALL" in
+    *"$NS285_SECRET"*) fail "#285: Epic issueフォールバック本文はlast_assistant_messageを含まない" "call=[${NS285_GH_CALL}]" ;;
+    *) pass "#285: Epic issueフォールバック本文はlast_assistant_messageを含まない" ;;
+  esac
+else
+  skip "#285: Epic issueフォールバックはlast_assistant_messageを含まない" "jq が見つからないためスキップ"
+fi
+
+# --- ドキュメント: README.md / skills/run/SKILL.md にフォールバックの記述がある ---
+NS280_README="${REPO_ROOT}/README.md"
+case "$(cat "$NS280_README")" in
+  *'Epic issueへのフォールバック'*)
+    pass "README.md: Epic issueへのフォールバック（#280）の記述がある" ;;
+  *)
+    fail "README.md: Epic issueへのフォールバック（#280）の記述がある" "記述が見つからない" ;;
+esac
+case "$(cat "$NS280_README")" in
+  *'notification'*'対象外'*)
+    pass "README.md: notification（アイドル通知）はフォールバック対象外である旨が明記されている（#280）" ;;
+  *)
+    fail "README.md: notification（アイドル通知）はフォールバック対象外である旨が明記されている（#280）" \
+      "記述が見つからない" ;;
+esac
+
+NS280_RUN_SKILL_BODY="$(cat "${REPO_ROOT}/skills/run/SKILL.md")"
+case "$NS280_RUN_SKILL_BODY" in
+  *'Epic issueフォールバック'*)
+    pass "skills/run/SKILL.md: Epic issueフォールバック（#280）への言及がある" ;;
+  *)
+    fail "skills/run/SKILL.md: Epic issueフォールバック（#280）への言及がある" "記述が見つからない" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # notify-slack.sh: 既存イベント（run-start / run-complete / stop / notification）の
@@ -6729,6 +7658,28 @@ DEV_WORKFLOW_MARKER_ROOT="$WB_ROOT_NOGH" DEV_WORKFLOW_WATCHDOG_NOW=1700700000 \
 WB_BUDGET_NOGH="$(grep '^budget_sec=' "${WB_ROOT_NOGH}/.claude/.dev-workflow-run-state" \
   | cut -d= -f2)"
 assert_eq "watchdog.sh --wave: ghが使えない場合は既定5400秒になる" "5400" "$WB_BUDGET_NOGH"
+
+# gh不可時の既定フォールバックは「仕様」であり、沈黙せず _watchdog_log に記録する（#275）
+WB_NOGH_LOG="${WB_ROOT_NOGH}/.claude/.dev-workflow-watchdog.log"
+if [ -f "$WB_NOGH_LOG" ] && grep -q 'budget-estimate-unavailable' "$WB_NOGH_LOG"; then
+  pass "watchdog.sh --wave: ghが使えない場合、想定時間が取れなかった旨をログに記録する（#275）"
+else
+  fail "watchdog.sh --wave: ghが使えない場合、想定時間が取れなかった旨をログに記録する（#275）" \
+    "log=[$(cat "$WB_NOGH_LOG" 2>/dev/null)]"
+fi
+
+# gh が使える（想定時間を取得できた）場合はこのログ行を出さない（回帰防止・#275）。
+# WB_ROOT_EST は204・205（想定時間が取れないケース）でも使い回しているため、累積の
+# ログには既に budget-estimate-unavailable 行が含まれている。新規に発行される行だけを
+# 見るため、専用の新しいマーカールートを使う（他タスクの履歴と混ざらないようにする）。
+WB_ROOT_EST_FOUND="$(wd_new_root)"
+WB_EST_FOUND_LOG="${WB_ROOT_EST_FOUND}/.claude/.dev-workflow-watchdog.log"
+DEV_WORKFLOW_MARKER_ROOT="$WB_ROOT_EST_FOUND" DEV_WORKFLOW_WATCHDOG_NOW=1700700001 \
+  WB_GH_BODY_DIR="$WB_GH_BODY_DIR" PATH="${WB_FAKE_GH_BIN}:${PATH}" \
+  bash "$WD_SCRIPT" --wave --epic 48 --wave-no 1 --tasks "201" > /dev/null 2>&1
+WB_EST_UNAVAIL_FOR_201="$(grep -c 'budget-estimate-unavailable' "$WB_EST_FOUND_LOG" 2>/dev/null || true)"
+assert_eq "watchdog.sh --wave: 想定時間が取得できたタスクではbudget-estimate-unavailableを記録しない（回帰防止・#275）" \
+  "0" "$WB_EST_UNAVAIL_FOR_201"
 
 # ---------------------------------------------------------------------------
 # scripts/watchdog.sh: スリープ抑止（Task #49、Epic #42）
@@ -13085,6 +14036,157 @@ assert_eq "規約パス: worktreeから呼んでもイメージタグ(hash含む
 # 対象になっているため、ここでの追加テストは不要。
 
 # ---------------------------------------------------------------------------
+# resolve-sandbox.sh: host モード（Docker 無しで走るクラウド環境向け、Task #269）
+#
+# scripts/lib/detect-env.sh（#268）の dev_workflow_is_remote /
+# dev_workflow_docker_available を使って判定する。実 docker には触れず、上書き
+# 環境変数と偽コマンド（PATH 先頭の docker スタブ）の両方で擬似再現する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== resolve-sandbox.sh: host モード（#269） =="
+
+# --- host判定が成立しない環境（is_remote偽）では、既存の解決結果が1ビットも
+#     変わらないことを固定する。あわせて docker を一切呼ばないことも確認する
+#     （呼んでいれば DEV_WORKFLOW_DOCKER_UNAVAILABLE 等の上書きなしに偽コマンドへ
+#     到達し、マーカーファイルが残るはず） ---
+RSH_NOCALL_REPO="$(make_temp_repo)"
+cat > "${RSH_NOCALL_REPO}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+(
+  cd "$RSH_NOCALL_REPO" || exit 1
+  git add Dockerfile.dev
+  git commit -q -m "add dockerfile"
+) >/dev/null 2>&1
+
+RSH_NOCALL_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-rsh-nocall-bin.XXXXXX")"
+RSH_NOCALL_MARKER="${RSH_NOCALL_BIN}/docker-called-marker"
+cat > "${RSH_NOCALL_BIN}/docker" <<FAKE_DOCKER_RSH_NOCALL
+#!/bin/bash
+echo "\$@" >> "${RSH_NOCALL_MARKER}"
+exit 1
+FAKE_DOCKER_RSH_NOCALL
+chmod +x "${RSH_NOCALL_BIN}/docker"
+
+RSH_NOCALL_OUTPUT="$(
+  cd "$RSH_NOCALL_REPO" || exit 1
+  unset CLAUDE_CODE_REMOTE DEV_WORKFLOW_FORCE_REMOTE DEV_WORKFLOW_SANDBOX_HOST
+  PATH="${RSH_NOCALL_BIN}:${PATH}" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "host判定不成立（is_remote偽）: mode=dockerfileのまま変わらない（#269）" \
+  "dockerfile" "$(plan_value DEV_WORKFLOW_SANDBOX_MODE "$RSH_NOCALL_OUTPUT")"
+
+if [ -f "$RSH_NOCALL_MARKER" ]; then
+  fail "host判定不成立（is_remote偽）: dockerを一切呼ばない（#269）" \
+    "docker が呼ばれました: $(cat "$RSH_NOCALL_MARKER")"
+else
+  pass "host判定不成立（is_remote偽）: dockerを一切呼ばない（#269）"
+fi
+
+# --- DEV_WORKFLOW_SANDBOX_HOST を明示指定すると、Dockerfile.dev が存在しても
+#     mode=host になり、IMAGE/DOCKERFILE/COMPOSE/CONTEXT はすべて空になる ---
+RSH_EXPLICIT_REPO="$(make_temp_repo)"
+cat > "${RSH_EXPLICIT_REPO}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+(
+  cd "$RSH_EXPLICIT_REPO" || exit 1
+  git add Dockerfile.dev
+  git commit -q -m "add dockerfile"
+) >/dev/null 2>&1
+
+RSH_EXPLICIT_OUTPUT="$(
+  cd "$RSH_EXPLICIT_REPO" || exit 1
+  unset CLAUDE_CODE_REMOTE DEV_WORKFLOW_FORCE_REMOTE
+  DEV_WORKFLOW_SANDBOX_HOST=1 bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "DEV_WORKFLOW_SANDBOX_HOST=1: Dockerfile.devが存在してもmode=host（#269）" \
+  "host" "$(plan_value DEV_WORKFLOW_SANDBOX_MODE "$RSH_EXPLICIT_OUTPUT")"
+assert_eq "DEV_WORKFLOW_SANDBOX_HOST=1: DEV_WORKFLOW_SANDBOX_DOCKERFILEは空（#269）" \
+  "''" "$(plan_value DEV_WORKFLOW_SANDBOX_DOCKERFILE "$RSH_EXPLICIT_OUTPUT")"
+assert_eq "DEV_WORKFLOW_SANDBOX_HOST=1: DEV_WORKFLOW_SANDBOX_IMAGEは空（#269）" \
+  "''" "$(plan_value DEV_WORKFLOW_SANDBOX_IMAGE "$RSH_EXPLICIT_OUTPUT")"
+assert_eq "DEV_WORKFLOW_SANDBOX_HOST=1: DEV_WORKFLOW_SANDBOX_COMPOSEは空（#269）" \
+  "''" "$(plan_value DEV_WORKFLOW_SANDBOX_COMPOSE "$RSH_EXPLICIT_OUTPUT")"
+assert_eq "DEV_WORKFLOW_SANDBOX_HOST=1: DEV_WORKFLOW_SANDBOX_CONTEXTは空（#269）" \
+  "''" "$(plan_value DEV_WORKFLOW_SANDBOX_CONTEXT "$RSH_EXPLICIT_OUTPUT")"
+
+# --- クラウド判定（上書き env で擬似再現）かつ Docker 利用不可 -> mode=host ---
+RSH_CLOUD_NODOCKER_REPO="$(make_temp_repo)"
+cat > "${RSH_CLOUD_NODOCKER_REPO}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+(
+  cd "$RSH_CLOUD_NODOCKER_REPO" || exit 1
+  git add Dockerfile.dev
+  git commit -q -m "add dockerfile"
+) >/dev/null 2>&1
+
+RSH_CLOUD_NODOCKER_OUTPUT="$(
+  cd "$RSH_CLOUD_NODOCKER_REPO" || exit 1
+  unset DEV_WORKFLOW_SANDBOX_HOST
+  DEV_WORKFLOW_FORCE_REMOTE=true DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "クラウド判定かつDocker利用不可: mode=host（#269）" \
+  "host" "$(plan_value DEV_WORKFLOW_SANDBOX_MODE "$RSH_CLOUD_NODOCKER_OUTPUT")"
+
+# --- クラウド判定（上書き env で擬似再現）かつ Docker 利用可 -> 従来どおり
+#     dockerfile に解決される（自前で Docker を立てたクラウド環境のため） ---
+RSH_CLOUD_DOCKEROK_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-rsh-cloud-dockerok-bin.XXXXXX")"
+cat > "${RSH_CLOUD_DOCKEROK_BIN}/docker" <<'FAKE_DOCKER_RSH_OK'
+#!/bin/bash
+if [ "$1" = "info" ]; then
+  exit 0
+fi
+exit 1
+FAKE_DOCKER_RSH_OK
+chmod +x "${RSH_CLOUD_DOCKEROK_BIN}/docker"
+
+RSH_CLOUD_DOCKEROK_REPO="$(make_temp_repo)"
+cat > "${RSH_CLOUD_DOCKEROK_REPO}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+(
+  cd "$RSH_CLOUD_DOCKEROK_REPO" || exit 1
+  git add Dockerfile.dev
+  git commit -q -m "add dockerfile"
+) >/dev/null 2>&1
+
+RSH_CLOUD_DOCKEROK_OUTPUT="$(
+  cd "$RSH_CLOUD_DOCKEROK_REPO" || exit 1
+  unset DEV_WORKFLOW_SANDBOX_HOST DEV_WORKFLOW_DOCKER_UNAVAILABLE
+  DEV_WORKFLOW_FORCE_REMOTE=true PATH="${RSH_CLOUD_DOCKEROK_BIN}:${PATH}" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "クラウド判定かつDocker利用可: 従来どおりmode=dockerfileに解決される（#269）" \
+  "dockerfile" "$(plan_value DEV_WORKFLOW_SANDBOX_MODE "$RSH_CLOUD_DOCKEROK_OUTPUT")"
+
+# --- --print は host になった理由（明示指定／クラウド判定）を併記する ---
+RSH_PRINT_EXPLICIT_OUT="$(
+  cd "$RSH_EXPLICIT_REPO" || exit 1
+  unset CLAUDE_CODE_REMOTE DEV_WORKFLOW_FORCE_REMOTE
+  DEV_WORKFLOW_SANDBOX_HOST=1 bash "$RESOLVE_SANDBOX_SCRIPT" --print
+)"
+case "$RSH_PRINT_EXPLICIT_OUT" in
+  *"host"*"明示指定"*) pass "--print: host(明示指定)の理由が併記される（#269）" ;;
+  *) fail "--print: host(明示指定)の理由が併記される（#269）" "$RSH_PRINT_EXPLICIT_OUT" ;;
+esac
+
+RSH_PRINT_CLOUD_OUT="$(
+  cd "$RSH_CLOUD_NODOCKER_REPO" || exit 1
+  unset DEV_WORKFLOW_SANDBOX_HOST
+  DEV_WORKFLOW_FORCE_REMOTE=true DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 bash "$RESOLVE_SANDBOX_SCRIPT" --print
+)"
+case "$RSH_PRINT_CLOUD_OUT" in
+  *"host"*"クラウド判定"*) pass "--print: host(クラウド判定)の理由が併記される（#269）" ;;
+  *) fail "--print: host(クラウド判定)の理由が併記される（#269）" "$RSH_PRINT_CLOUD_OUT" ;;
+esac
+
+# ---------------------------------------------------------------------------
 # sandbox-exec.sh --init: サンドボックス定義の雛形を規約パスに生成する（Task #220）
 # ---------------------------------------------------------------------------
 
@@ -15542,6 +16644,55 @@ case "$FL_PATH_OUT" in
     pass "path: 台帳のパスが駆動先リポジトリの外にある（ハーネス非注入原則）" ;;
 esac
 
+# --- gh-available（#268 の dev_workflow_gh_available をそのまま返す薄いラッパー、#275） ---
+
+DEV_WORKFLOW_GH_UNAVAILABLE=1 fl gh-available >/dev/null 2>&1
+assert_exit_code "gh-available: DEV_WORKFLOW_GH_UNAVAILABLE=1 なら exit 1（偽）" 1 "$?"
+
+FL_GHAVAIL_FAKE_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-fl-ghavail.XXXXXX")"
+cat > "${FL_GHAVAIL_FAKE_BIN}/gh" <<'FAKE_GH_EOF'
+#!/bin/bash
+exit 0
+FAKE_GH_EOF
+chmod +x "${FL_GHAVAIL_FAKE_BIN}/gh"
+PATH="${FL_GHAVAIL_FAKE_BIN}:${PATH}" fl gh-available >/dev/null 2>&1
+assert_exit_code "gh-available: gh auth status・gh api rate_limit が両方成功すれば exit 0（真）" 0 "$?"
+
+# --- unreflected-path（gh不可・未承認時に還流本文を保存する先。記録が失われない契約、#275） ---
+
+FL_UNREF_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-fl-unref.XXXXXX")"
+FL_UNREF_OUT="$(DEV_WORKFLOW_FEEDBACK_DIR="$FL_UNREF_DIR" bash "$FL_SCRIPT" unreflected-path --key gate-flaky)"
+assert_eq "unreflected-path: 台帳ディレクトリ配下の upstream/<key>.md を返す（#275）" \
+  "${FL_UNREF_DIR}/upstream/gate-flaky.md" "$FL_UNREF_OUT"
+
+if [ -d "${FL_UNREF_DIR}/upstream" ]; then
+  pass "unreflected-path: 保存先ディレクトリを事前に作る（#275）"
+else
+  fail "unreflected-path: 保存先ディレクトリを事前に作る（#275）" "${FL_UNREF_DIR}/upstream が存在しない"
+fi
+
+DEV_WORKFLOW_FEEDBACK_DIR="$FL_UNREF_DIR" bash "$FL_SCRIPT" unreflected-path >/dev/null 2>&1
+assert_exit_code "unreflected-path: --key が無ければ exit 2" 2 "$?"
+
+# --- 回帰: gh が使えても feedback-ledger.sh の既存コマンド（record/list/count/ready/
+#     render-upstream/upstream-repo/path/redact）の挙動は1ビットも変わらない（#275）。
+#     これらのコマンド自身が gh を一切呼ばないため、DEV_WORKFLOW_GH_UNAVAILABLE の
+#     有無で出力が変わらないことを確認する。 ---
+FL_REGRESSION_WITH_GH="$(DEV_WORKFLOW_FEEDBACK_DIR="$FL_DIR" bash "$FL_SCRIPT" count --key gate-flaky)"
+FL_REGRESSION_WITHOUT_GH="$(DEV_WORKFLOW_GH_UNAVAILABLE=1 DEV_WORKFLOW_FEEDBACK_DIR="$FL_DIR" \
+  bash "$FL_SCRIPT" count --key gate-flaky)"
+assert_eq "回帰(#275): count はgh可否に関わらず同じ結果を返す（gh非依存）" \
+  "$FL_REGRESSION_WITH_GH" "$FL_REGRESSION_WITHOUT_GH"
+
+# --- 静的確認: feedback-ledger.sh自身は gh を一切呼ばない（gh-available以外では
+#     文字列 "gh " がコマンド呼び出しとして出てこない。コメント中の言及は対象外にする） ---
+if grep -vE '^[[:space:]]*#' "$FL_SCRIPT" | grep -qE '(^|[^A-Za-z0-9_])gh[[:space:]]+(issue|api|auth|pr)\b'; then
+  fail "回帰(#275): feedback-ledger.sh は gh issue/api/auth/pr を直接呼ばない（還流投稿はSKILL側の責務）" \
+    "$(grep -vE '^[[:space:]]*#' "$FL_SCRIPT" | grep -nE '(^|[^A-Za-z0-9_])gh[[:space:]]+(issue|api|auth|pr)\b')"
+else
+  pass "回帰(#275): feedback-ledger.sh は gh issue/api/auth/pr を直接呼ばない（還流投稿はSKILL側の責務）"
+fi
+
 # ---------------------------------------------------------------------------
 # scripts/collect-feedback-signals.sh（実行ログの所在と一次集計）
 # ---------------------------------------------------------------------------
@@ -15660,6 +16811,30 @@ assert_eq "状態ファイルが無いことを available=0 で明示する（�
   "0" "$(plan_value runstate.available "$CFS_OUT_EMPTY")"
 assert_eq "transcript が無いことを available=0 で明示する" \
   "0" "$(plan_value transcripts.available "$CFS_OUT_EMPTY")"
+
+# --- 静的確認: collect-feedback-signals.sh自身は gh を一切呼ばない（Task #275） ---
+if grep -vE '^[[:space:]]*#' "$CFS_SCRIPT" | grep -qE '(^|[^A-Za-z0-9_])gh[[:space:]]+(issue|api|auth|pr)\b'; then
+  fail "回帰(#275): collect-feedback-signals.sh は gh を直接呼ばない（ネットワーク・レート制限に依存させない）" \
+    "$(grep -vE '^[[:space:]]*#' "$CFS_SCRIPT" | grep -nE '(^|[^A-Za-z0-9_])gh[[:space:]]+(issue|api|auth|pr)\b')"
+else
+  pass "回帰(#275): collect-feedback-signals.sh は gh を直接呼ばない（ネットワーク・レート制限に依存させない）"
+fi
+
+# --- 回帰: DEV_WORKFLOW_GH_UNAVAILABLE=1 でも出力が変わらない（gh非依存の確認）。
+#     collected_at / since_ts / heartbeat.age_sec は `date +%s` 現在時刻由来で
+#     呼び出すたびに変わる（gh可否とは無関係な既存の非決定性）ため、比較前に除く。 ---
+CFS_OUT_NOGH="$(
+  cd "$CFS_REPO" || exit 1
+  DEV_WORKFLOW_MARKER_ROOT="$CFS_REPO" \
+  CLAUDE_PROJECTS_DIR="$CFS_PROJECTS" \
+  DEV_WORKFLOW_FEEDBACK_DIR="${CFS_HOME}/ledger" \
+  DEV_WORKFLOW_GH_UNAVAILABLE=1 \
+  bash "$CFS_SCRIPT" --since 3650
+)"
+CFS_STABLE_FILTER='^(collected_at|since_ts|heartbeat\.age_sec)='
+assert_eq "回帰(#275): DEV_WORKFLOW_GH_UNAVAILABLE=1 でも出力が変わらない（現在時刻依存の行は除く）" \
+  "$(printf '%s\n' "$CFS_OUT" | grep -vE "$CFS_STABLE_FILTER")" \
+  "$(printf '%s\n' "$CFS_OUT_NOGH" | grep -vE "$CFS_STABLE_FILTER")"
 
 # ---------------------------------------------------------------------------
 # skills/feedback/SKILL.md（修正範囲と承認ゲートの回帰防止）
@@ -17645,7 +18820,7 @@ DOCTOR_MISSING_EXIT=0
     bash scripts/doctor.sh > "$DOCTOR_MISSING_OUT" 2>&1
 ) || DOCTOR_MISSING_EXIT=$?
 
-assert_exit_code "doctor.sh: gh/docker が両方無ければ exit 1（#218）" 1 "$DOCTOR_MISSING_EXIT"
+assert_exit_code "doctor.sh: gh/docker が両方無くても exit 0（警告のみ。#271/#273で変更）" 0 "$DOCTOR_MISSING_EXIT"
 
 for section in "必須依存" "任意依存" "サンドボックス" "リポジトリ衛生" "CRLF設定"; do
   if grep -qF "$section" "$DOCTOR_MISSING_OUT"; then
@@ -17676,7 +18851,7 @@ DOCTOR_UNAUTH_EXIT=0
     bash scripts/doctor.sh > "$DOCTOR_UNAUTH_OUT" 2>&1
 ) || DOCTOR_UNAUTH_EXIT=$?
 
-assert_exit_code "doctor.sh: gh未認証・docker未起動なら exit 1（#218）" 1 "$DOCTOR_UNAUTH_EXIT"
+assert_exit_code "doctor.sh: gh未認証・docker未起動でも exit 0（警告のみ。#271/#273で変更）" 0 "$DOCTOR_UNAUTH_EXIT"
 
 case "$(cat "$DOCTOR_UNAUTH_OUT")" in
   *"gh auth login"*) pass "doctor.sh: gh未認証時に 'gh auth login' の案内が出る（#218）" ;;
@@ -17843,6 +19018,320 @@ esac
 # ことを確認する（応答言語の不正値は REQUIRED_MISSING に影響させない契約。#254）。
 assert_exit_code "doctor.sh: DEV_WORKFLOW_LANG=fr（不正値）でも終了コードが変化しない（#254）" \
   0 "$DOCTOR_LANG_FR_EXIT"
+
+# ---------------------------------------------------------------------------
+# doctor.sh: クラウド診断・成立しない機能一覧（Task #273）
+# ---------------------------------------------------------------------------
+
+# --- ケース13: クラウド判定（上書き env で擬似再現）すると、クラウド向けの表示が出る ---
+DOCTOR_CLOUD_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  DEV_WORKFLOW_FORCE_REMOTE=true CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE=cloud_default \
+    HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_CLOUD_OUT" 2>&1
+)
+case "$(cat "$DOCTOR_CLOUD_OUT")" in
+  *"クラウド環境として判定されました"*) pass "doctor.sh: クラウド判定（擬似再現）でクラウド向けの表示が出る（#273）" ;;
+  *) fail "doctor.sh: クラウド判定（擬似再現）でクラウド向けの表示が出る（#273）" "$(cat "$DOCTOR_CLOUD_OUT")" ;;
+esac
+case "$(cat "$DOCTOR_CLOUD_OUT")" in
+  *"cloud_default"*) pass "doctor.sh: CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE の値が表示される（#273）" ;;
+  *) fail "doctor.sh: CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE の値が表示される（#273）" "$(cat "$DOCTOR_CLOUD_OUT")" ;;
+esac
+case "$(cat "$DOCTOR_CLOUD_OUT")" in
+  *"揮発します"*) pass "doctor.sh: クラウド判定時に \${HOME} 配下の永続物が毎セッション揮発する旨の注記が出る（#273）" ;;
+  *) fail "doctor.sh: クラウド判定時に \${HOME} 配下の永続物が毎セッション揮発する旨の注記が出る（#273）" "$(cat "$DOCTOR_CLOUD_OUT")" ;;
+esac
+
+# --- ケース14: ローカル判定時は揮発の注記が出ない（クラウド限定の注記であることの確認） ---
+case "$(cat "$DOCTOR_OK_OUT")" in
+  *"揮発します"*) fail "doctor.sh: ローカル判定時は揮発の注記が出ない（#273）" "$(cat "$DOCTOR_OK_OUT")" ;;
+  *) pass "doctor.sh: ローカル判定時は揮発の注記が出ない（#273）" ;;
+esac
+
+# --- ケース15: host になった理由（明示指定）が表示される ---
+DOCTOR_HOST_REASON_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_HOST_REASON_OUT" 2>&1
+)
+case "$(cat "$DOCTOR_HOST_REASON_OUT")" in
+  *"hostモード"*"明示指定"*) pass "doctor.sh: host になった理由（明示指定）が表示される（#273）" ;;
+  *) fail "doctor.sh: host になった理由（明示指定）が表示される（#273）" "$(cat "$DOCTOR_HOST_REASON_OUT")" ;;
+esac
+
+# --- ケース16: gh が認証済みだが api.github.com への疎通が失敗する場合、プロキシの可能性を明示する ---
+DOCTOR_PROXY_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-doctor-proxy-bin.XXXXXX")"
+cat > "${DOCTOR_PROXY_BIN}/gh" <<'SH'
+#!/bin/bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  exit 0
+fi
+if [ "$1" = "api" ]; then
+  exit 1
+fi
+exit 0
+SH
+chmod +x "${DOCTOR_PROXY_BIN}/gh"
+cat > "${DOCTOR_PROXY_BIN}/docker" <<'SH'
+#!/bin/bash
+exit 0
+SH
+chmod +x "${DOCTOR_PROXY_BIN}/docker"
+
+DOCTOR_PROXY_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+DOCTOR_PROXY_EXIT=0
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_PROXY_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_PROXY_OUT" 2>&1
+) || DOCTOR_PROXY_EXIT=$?
+
+assert_exit_code "doctor.sh: gh認証済みでもAPI疎通失敗なら警告のみでexit 0（#273）" 0 "$DOCTOR_PROXY_EXIT"
+
+case "$(cat "$DOCTOR_PROXY_OUT")" in
+  *"api.github.com"*"403"*) pass "doctor.sh: gh認証済み・API疎通失敗時にプロキシ(403)の可能性を明示する（#273）" ;;
+  *) fail "doctor.sh: gh認証済み・API疎通失敗時にプロキシ(403)の可能性を明示する（#273）" "$(cat "$DOCTOR_PROXY_OUT")" ;;
+esac
+
+case "$(cat "$DOCTOR_PROXY_OUT")" in
+  *"成立しない機能"*"ウェーブの自動計画"*"feedback 還流"*"jev shadow 検証"*) \
+    pass "doctor.sh: gh不可時に成立しない機能一覧（ウェーブ自動計画・feedback還流・jev shadow検証）が出る（#273）" ;;
+  *) fail "doctor.sh: gh不可時に成立しない機能一覧（ウェーブ自動計画・feedback還流・jev shadow検証）が出る（#273）" \
+    "$(cat "$DOCTOR_PROXY_OUT")" ;;
+esac
+
+case "$(cat "$DOCTOR_MISSING_OUT")" in
+  *"成立しない機能"*"ビルドキャッシュ"*"検証スタンプ"*"コンテナ隔離"*) \
+    pass "doctor.sh: docker不可時に成立しない機能一覧（ビルドキャッシュ・検証スタンプ・コンテナ隔離）が出る（#273）" ;;
+  *) fail "doctor.sh: docker不可時に成立しない機能一覧（ビルドキャッシュ・検証スタンプ・コンテナ隔離）が出る（#273）" \
+    "$(cat "$DOCTOR_MISSING_OUT")" ;;
+esac
+
+# --- ケース17: git リポジトリ外では exit 1 になる（唯一のブロック要因） ---
+DOCTOR_NONGIT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-doctor-nongit.XXXXXX")"
+mkdir -p "${DOCTOR_NONGIT_DIR}/scripts/lib"
+cp "${REPO_ROOT}/scripts/doctor.sh"              "${DOCTOR_NONGIT_DIR}/scripts/doctor.sh"
+cp "${REPO_ROOT}/scripts/check-prerequisites.sh" "${DOCTOR_NONGIT_DIR}/scripts/check-prerequisites.sh"
+cp "${REPO_ROOT}/scripts/check-repo-hygiene.sh"  "${DOCTOR_NONGIT_DIR}/scripts/check-repo-hygiene.sh"
+cp "${REPO_ROOT}/scripts/resolve-lang.sh"        "${DOCTOR_NONGIT_DIR}/scripts/resolve-lang.sh"
+cp "${REPO_ROOT}/scripts/sandbox-exec.sh"        "${DOCTOR_NONGIT_DIR}/scripts/sandbox-exec.sh"
+cp "${REPO_ROOT}/scripts/resolve-sandbox.sh"     "${DOCTOR_NONGIT_DIR}/scripts/resolve-sandbox.sh"
+cp "${REPO_ROOT}/scripts/jev-ask.sh"             "${DOCTOR_NONGIT_DIR}/scripts/jev-ask.sh"
+cp "${REPO_ROOT}/scripts/lib/mount-path.sh"           "${DOCTOR_NONGIT_DIR}/scripts/lib/mount-path.sh"
+cp "${REPO_ROOT}/scripts/lib/container-membership.sh" "${DOCTOR_NONGIT_DIR}/scripts/lib/container-membership.sh"
+cp "${REPO_ROOT}/scripts/lib/compose-conflicts.sh"    "${DOCTOR_NONGIT_DIR}/scripts/lib/compose-conflicts.sh"
+cp "${REPO_ROOT}/scripts/lib/detect-env.sh"           "${DOCTOR_NONGIT_DIR}/scripts/lib/detect-env.sh"
+
+DOCTOR_NONGIT_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+DOCTOR_NONGIT_EXIT=0
+(
+  cd "$DOCTOR_NONGIT_DIR" || exit 1
+  HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_NONGIT_OUT" 2>&1
+) || DOCTOR_NONGIT_EXIT=$?
+
+assert_exit_code "doctor.sh: git リポジトリ外では exit 1（唯一のブロック要因。#273）" 1 "$DOCTOR_NONGIT_EXIT"
+
+case "$(cat "$DOCTOR_NONGIT_OUT")" in
+  *"git リポジトリ外"*) pass "doctor.sh: git リポジトリ外である旨のメッセージが出る（#273）" ;;
+  *) fail "doctor.sh: git リポジトリ外である旨のメッセージが出る（#273）" "$(cat "$DOCTOR_NONGIT_OUT")" ;;
+esac
+
+# --- ケース18: mcpServers に Windows 絶対パスが含まれる .claude/settings.json を警告する（jq が利用可能な場合のみ） ---
+if command -v jq >/dev/null 2>&1; then
+  DOCTOR_WINPATH_REPO="$(make_temp_repo)"
+  copy_doctor_scripts "$DOCTOR_WINPATH_REPO"
+  mkdir -p "${DOCTOR_WINPATH_REPO}/.claude"
+  cat > "${DOCTOR_WINPATH_REPO}/.claude/settings.json" <<'JSON'
+{
+  "mcpServers": {
+    "example": {
+      "command": "C:\\Users\\example\\AppData\\Local\\node.exe",
+      "args": ["C:\\Users\\example\\server.js"]
+    }
+  }
+}
+JSON
+  (
+    cd "$DOCTOR_WINPATH_REPO" || exit 1
+    git add .claude/settings.json
+    git commit -q -m "add settings.json with windows path"
+  ) >/dev/null 2>&1
+
+  DOCTOR_WINPATH_OUT="$(
+    cd "$DOCTOR_WINPATH_REPO" || exit 1
+    HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" bash scripts/doctor.sh 2>&1
+  )"
+  case "$DOCTOR_WINPATH_OUT" in
+    *"settings.json"*"Windows 絶対パス"*) pass "doctor.sh: mcpServersのWindows絶対パスを警告する（#273）" ;;
+    *) fail "doctor.sh: mcpServersのWindows絶対パスを警告する（#273）" "$DOCTOR_WINPATH_OUT" ;;
+  esac
+
+  # --- ケース19: mcpServers に Windows 絶対パスが無ければ警告しない（誤検知しない） ---
+  DOCTOR_NOWINPATH_REPO="$(make_temp_repo)"
+  copy_doctor_scripts "$DOCTOR_NOWINPATH_REPO"
+  mkdir -p "${DOCTOR_NOWINPATH_REPO}/.claude"
+  cat > "${DOCTOR_NOWINPATH_REPO}/.claude/settings.json" <<'JSON'
+{
+  "mcpServers": {
+    "example": {
+      "command": "node",
+      "args": ["server.js"]
+    }
+  }
+}
+JSON
+  (
+    cd "$DOCTOR_NOWINPATH_REPO" || exit 1
+    git add .claude/settings.json
+    git commit -q -m "add settings.json without windows path"
+  ) >/dev/null 2>&1
+
+  DOCTOR_NOWINPATH_OUT="$(
+    cd "$DOCTOR_NOWINPATH_REPO" || exit 1
+    HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" bash scripts/doctor.sh 2>&1
+  )"
+  case "$DOCTOR_NOWINPATH_OUT" in
+    *"Windows 絶対パスは見つかりませんでした"*) pass "doctor.sh: mcpServersにWindows絶対パスが無ければ誤検知しない（#273）" ;;
+    *) fail "doctor.sh: mcpServersにWindows絶対パスが無ければ誤検知しない（#273）" "$DOCTOR_NOWINPATH_OUT" ;;
+  esac
+else
+  skip "doctor.sh: mcpServersのWindows絶対パス検出（#273）" "jq が見つからないためスキップ"
+fi
+
+# --- ケース20: 副作用が無い（何も作らない・インストールしない・書き換えない）ことを
+#     クラウド判定・host強制の各環境変数付きでも再確認する（完了条件の「副作用無し」を
+#     新規分岐（実行環境節・MCP設定節）にも適用する） ---
+DOCTOR_SIDEEFFECT2_STATUS_BEFORE="$(cd "$DOCTOR_SIDEEFFECT_REPO" && git status --porcelain --untracked-files=all)"
+(
+  cd "$DOCTOR_SIDEEFFECT_REPO" || exit 1
+  DEV_WORKFLOW_FORCE_REMOTE=true DEV_WORKFLOW_SANDBOX_HOST=1 \
+    HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" bash scripts/doctor.sh >/dev/null 2>&1
+)
+DOCTOR_SIDEEFFECT2_STATUS_AFTER="$(cd "$DOCTOR_SIDEEFFECT_REPO" && git status --porcelain --untracked-files=all)"
+assert_eq "doctor.sh: クラウド判定・host強制でも副作用が無い（#273）" \
+  "$DOCTOR_SIDEEFFECT2_STATUS_BEFORE" "$DOCTOR_SIDEEFFECT2_STATUS_AFTER"
+
+# --- ケース21: DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 時、必須依存セクションの Docker 診断が
+#     dev_workflow_docker_available に委譲され、サンドボックスセクション（hostモード・
+#     クラウド判定（Docker 利用不可））と矛盾しない（レビュー#291）。
+#     docker コマンド自体は（スタブ経由で）実在・起動済みだが、上書き変数で強制的に
+#     「利用不可」として扱われるシナリオであり、command -v docker / docker info を
+#     直接呼ぶ実装では [OK] のまま表示され続けて矛盾が再現する ---
+DOCTOR_DOCKER_UNAVAILABLE_OUT="$(mktemp "${TMPDIR:-/tmp}/dw-test-doctor-out.XXXXXX")"
+(
+  cd "$DOCTOR_OK_REPO" || exit 1
+  DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 DEV_WORKFLOW_FORCE_REMOTE=true \
+    HOME="$DOCTOR_OK_HOME" PATH="${DOCTOR_OK_BIN}:${PATH}" \
+    bash scripts/doctor.sh > "$DOCTOR_DOCKER_UNAVAILABLE_OUT" 2>&1
+)
+
+case "$(cat "$DOCTOR_DOCKER_UNAVAILABLE_OUT")" in
+  *"[OK] docker:"*) \
+    fail "doctor.sh: DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 時は必須依存セクションのdockerが[OK]にならない（#291）" \
+      "$(cat "$DOCTOR_DOCKER_UNAVAILABLE_OUT")" ;;
+  *"[警告] docker"*) \
+    pass "doctor.sh: DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 時は必須依存セクションのdockerが[警告]になる（#291）" ;;
+  *) fail "doctor.sh: DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 時は必須依存セクションのdockerが[警告]になる（#291）" \
+    "$(cat "$DOCTOR_DOCKER_UNAVAILABLE_OUT")" ;;
+esac
+
+case "$(cat "$DOCTOR_DOCKER_UNAVAILABLE_OUT")" in
+  *"hostモード"*"クラウド判定（Docker 利用不可）"*) \
+    pass "doctor.sh: サンドボックスセクションは hostモード（クラウド判定・Docker利用不可）を表示する（#291）" ;;
+  *) fail "doctor.sh: サンドボックスセクションは hostモード（クラウド判定・Docker利用不可）を表示する（#291）" \
+    "$(cat "$DOCTOR_DOCKER_UNAVAILABLE_OUT")" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# scripts/doctor.sh: docker / gh の判定ロジック直接再実装の再発防止（レビュー#291）
+#
+# Epic #267 でこのアンチパターン（command -v docker / docker info / gh auth status を
+# detect-env.sh を経由せず直接呼ぶ）が #283・#287・#291 と3回再発した（ADR-0013「教訓2」）。
+# 4度目を機械的に防ぐため、scripts/lib/detect-env.sh 以外のスクリプトがこれらを
+# 直接呼んでいないかを静的に検査する。許可リスト（AST_DIRECT_ENV_CALL_ALLOWLIST）に
+# 載っているファイルは、すでに正当な理由（原因特定の文言分岐）がコード側のコメントに
+# 残っている前提で許容する。scripts/doctor.sh を検知対象（走査対象のファイル集合）に
+# 含めることで、将来 doctor.sh に再び判定バイパスが混入してもファイル一覧の抜け漏れでは
+# 検知できなくなることを防ぐ（許可リストに載っていても最終判定の委譲自体は別途検証する）。
+# ---------------------------------------------------------------------------
+
+echo "== scripts/*: docker/gh 判定ロジックの直接再実装が無いことの静的検査（再発防止・レビュー#291） =="
+
+AST_DIRECT_ENV_CALL_PATTERN='command -v docker|docker info|gh auth status'
+
+# 許可リスト: 「原因特定の文言分岐」等、正当な理由があって直接呼んでいるファイル。
+# 新たにここへ追加する場合は、追加先のコード側にも理由をコメントで残すこと。
+#   - scripts/lib/detect-env.sh: 判定ロジックそのものの実装（正本）
+#   - scripts/check-prerequisites.sh: #283 で dev_workflow_docker_available /
+#     dev_workflow_gh_available への委譲に修正済み。直接呼び出しは原因特定のみ
+#     （docker_warning_message / gh_warning_message 内のコメント参照）
+#   - scripts/doctor.sh: #291 で同様に修正済み。直接呼び出しは原因特定のみ
+AST_DIRECT_ENV_CALL_ALLOWLIST='
+scripts/lib/detect-env.sh
+scripts/check-prerequisites.sh
+scripts/doctor.sh
+'
+
+check_no_direct_env_calls() {
+  # scripts/ 配下を走査し、docker/gh の判定を直接再実装している行が無いかを調べる。
+  # 許可リストに載っているファイルはスキップする（走査対象の一覧には含める。
+  # find の対象ディレクトリから単純に除外すると「検知対象に含める」という完了条件が
+  # 形骸化するため、ファイル単位で明示的に読んでから許可判定する）。
+  local hits=""
+  local f base
+  while IFS= read -r f; do
+    base="${f#"${REPO_ROOT}"/}"
+    case "$AST_DIRECT_ENV_CALL_ALLOWLIST" in
+      *$'\n'"${base}"$'\n'*) continue ;;
+    esac
+    # コメント専用行（grep -n 出力の "行番号:" 直後が # で始まる行）は、判定の
+    # 由来・経緯を説明する地の文であり実際の呼び出しではないため除外する
+    # （例: scripts/feedback-ledger.sh の `gh auth status` への言及はコメントのみ）。
+    local file_hits
+    file_hits="$(grep -nE "$AST_DIRECT_ENV_CALL_PATTERN" "$f" 2>/dev/null \
+      | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+    if [ -n "$file_hits" ]; then
+      hits="${hits}${base}:
+${file_hits}
+"
+    fi
+  done < <(find "${REPO_ROOT}/scripts" -type f -name '*.sh' | sort)
+
+  if [ -z "$hits" ]; then
+    pass "scripts/*: detect-env.sh / 許可リスト以外に docker/gh 判定の直接呼び出しが無い（レビュー#291）"
+  else
+    fail "scripts/*: detect-env.sh / 許可リスト以外に docker/gh 判定の直接呼び出しが無い（レビュー#291）" "$hits"
+  fi
+}
+
+check_no_direct_env_calls
+
+# 許可リストに載っているファイルが実際に走査対象のファイル集合に含まれていることを
+# 確認する（「検知対象に scripts/doctor.sh を含む」という完了条件そのものの検査）。
+AST_SCANNED_FILES="$(find "${REPO_ROOT}/scripts" -type f -name '*.sh' | sed "s#^${REPO_ROOT}/##" | sort)"
+for allowlisted_file in scripts/lib/detect-env.sh scripts/check-prerequisites.sh scripts/doctor.sh; do
+  case "$AST_SCANNED_FILES" in
+    *"$allowlisted_file"*) pass "scripts/*: 静的検査の走査対象に ${allowlisted_file} が含まれている（レビュー#291）" ;;
+    *) fail "scripts/*: 静的検査の走査対象に ${allowlisted_file} が含まれている（レビュー#291）" \
+      "$AST_SCANNED_FILES" ;;
+  esac
+done
+unset allowlisted_file
+
+# scripts/doctor.sh は許可リストに載っているが、そこに残る直接呼び出しは
+# 「判定が偽だった場合の原因特定の文言分岐」のみであり、最終判定自体は
+# dev_workflow_docker_available / dev_workflow_gh_available に委譲していることを確認する
+# （許可リストに載せたからといって判定ロジックの再実装が許されるわけではない）。
+if grep -qE 'if[[:space:]]+dev_workflow_docker_available[[:space:]]*;[[:space:]]*then' "$DOCTOR_SCRIPT_SRC"; then
+  pass "doctor.sh: Docker診断の最終判定を dev_workflow_docker_available に委譲している（レビュー#291）"
+else
+  fail "doctor.sh: Docker診断の最終判定を dev_workflow_docker_available に委譲している（レビュー#291）" \
+    "$(cat "$DOCTOR_SCRIPT_SRC")"
+fi
 
 # ---------------------------------------------------------------------------
 # scripts/install-optional-mcp.sh（任意MCPの導入。既定 dry-run。Task #219）
@@ -19343,6 +20832,94 @@ case "$JEV_EVAL_DRY_OUT" in
 esac
 
 # ---------------------------------------------------------------------------
+# jev-shadow-eval.sh: gh不可時のfail-soft（case1・case3のみ。Task #275）
+#
+# DEV_WORKFLOW_GH_UNAVAILABLE=1 で dev_workflow_gh_available を偽に強制し、
+# 実際の403環境やネットワークを要求せずに「gh issue list に依存する検証を実行せず、
+# 理由を表示してexit 0で退く」挙動を検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== jev-shadow-eval.sh: gh不可時のfail-soft（#275） =="
+
+JEV_NOGH_OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-jev-nogh.XXXXXX")"
+
+# --- case1（①指摘の重複排除）: gh不可ならexit 0でスキップし、データセットを作らない ---
+JEV_NOGH_CASE1_OUT="$(
+  DEV_WORKFLOW_GH_UNAVAILABLE=1 DEV_WORKFLOW_JEV_EVAL_DIR="${JEV_NOGH_OUT_DIR}/case1" \
+    bash "$JEV_EVAL_SH" build --case 1 2>&1
+)"
+JEV_NOGH_CASE1_EXIT=$?
+assert_exit_code "jev-shadow-eval.sh: gh不可時、case1のbuildはexit 0で退く（#275）" 0 "$JEV_NOGH_CASE1_EXIT"
+case "$JEV_NOGH_CASE1_OUT" in
+  *'gh が使えない'*'case1'*) pass "jev-shadow-eval.sh: gh不可時、case1で理由を表示する（#275）" ;;
+  *) fail "jev-shadow-eval.sh: gh不可時、case1で理由を表示する（#275）" "$JEV_NOGH_CASE1_OUT" ;;
+esac
+if [ -f "${JEV_NOGH_OUT_DIR}/case1/case1-dataset.tsv" ]; then
+  fail "jev-shadow-eval.sh: gh不可時、case1はデータセットを作らない（検証自体を実行しない・#275）" \
+    "case1-dataset.tsv が作られていた"
+else
+  pass "jev-shadow-eval.sh: gh不可時、case1はデータセットを作らない（検証自体を実行しない・#275）"
+fi
+
+# --- case3（③確度判定のトリアージ）: 同様にgh不可ならexit 0でスキップする ---
+JEV_NOGH_CASE3_OUT="$(
+  DEV_WORKFLOW_GH_UNAVAILABLE=1 DEV_WORKFLOW_JEV_EVAL_DIR="${JEV_NOGH_OUT_DIR}/case3" \
+    bash "$JEV_EVAL_SH" build --case 3 2>&1
+)"
+JEV_NOGH_CASE3_EXIT=$?
+assert_exit_code "jev-shadow-eval.sh: gh不可時、case3のbuildはexit 0で退く（#275）" 0 "$JEV_NOGH_CASE3_EXIT"
+case "$JEV_NOGH_CASE3_OUT" in
+  *'gh が使えない'*'case3'*) pass "jev-shadow-eval.sh: gh不可時、case3で理由を表示する（#275）" ;;
+  *) fail "jev-shadow-eval.sh: gh不可時、case3で理由を表示する（#275）" "$JEV_NOGH_CASE3_OUT" ;;
+esac
+
+# --- case2（②台帳の分類）: ghに依存しないため、gh不可でも通常どおり動く（影響範囲が
+#     case1/3に限定されていることの確認） ---
+JEV_NOGH_CASE2_FEEDBACK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-jev-nogh-feedback.XXXXXX")"
+JEV_NOGH_CASE2_EXIT=0
+DEV_WORKFLOW_GH_UNAVAILABLE=1 DEV_WORKFLOW_JEV_EVAL_DIR="${JEV_NOGH_OUT_DIR}/case2" \
+  DEV_WORKFLOW_FEEDBACK_DIR="$JEV_NOGH_CASE2_FEEDBACK_DIR" \
+  bash "$JEV_EVAL_SH" build --case 2 >/dev/null 2>&1 || JEV_NOGH_CASE2_EXIT=$?
+assert_exit_code "jev-shadow-eval.sh: gh不可でもcase2（台帳/scope.md、gh非依存）は通常どおり動く（#275）" \
+  0 "$JEV_NOGH_CASE2_EXIT"
+if [ -f "${JEV_NOGH_OUT_DIR}/case2/case2-dataset.tsv" ]; then
+  pass "jev-shadow-eval.sh: gh不可でもcase2はデータセットを作る（#275）"
+else
+  fail "jev-shadow-eval.sh: gh不可でもcase2はデータセットを作る（#275）" "case2-dataset.tsv が作られていない"
+fi
+
+# --- 回帰: ghが使える環境ではcase1のbuildが従来どおりgh issue listへ進む（スキップしない） ---
+JEV_FAKEGH_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-jev-fakegh.XXXXXX")"
+cat > "${JEV_FAKEGH_BIN}/gh" <<'FAKE_GH_EOF'
+#!/bin/bash
+case "$1 $2" in
+  "auth status") exit 0 ;;
+esac
+if [ "$1" = "api" ]; then exit 0; fi
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+  exit 0
+fi
+exit 1
+FAKE_GH_EOF
+chmod +x "${JEV_FAKEGH_BIN}/gh"
+
+JEV_WITHGH_CASE1_OUT="$(
+  PATH="${JEV_FAKEGH_BIN}:${PATH}" DEV_WORKFLOW_JEV_EVAL_DIR="${JEV_NOGH_OUT_DIR}/case1-withgh" \
+    bash "$JEV_EVAL_SH" build --case 1 2>&1
+)"
+case "$JEV_WITHGH_CASE1_OUT" in
+  *'gh が使えない'*)
+    fail "jev-shadow-eval.sh: ghが使える環境ではcase1をスキップしない（回帰防止・#275）" \
+      "$JEV_WITHGH_CASE1_OUT" ;;
+  *'review issue を取得中'*)
+    pass "jev-shadow-eval.sh: ghが使える環境ではcase1をスキップしない（回帰防止・#275）" ;;
+  *)
+    fail "jev-shadow-eval.sh: ghが使える環境ではcase1をスキップしない（回帰防止・#275）" \
+      "$JEV_WITHGH_CASE1_OUT" ;;
+esac
+
+# ---------------------------------------------------------------------------
 # #263: R1 のマージ前 findings を Epic issue に残す
 #
 # マージ後の結果（review issue）だけでは「同一 location の2件を統合した / しなかった」
@@ -19424,6 +21001,776 @@ if grep -Fq "マージ前の findings" "${REPO_ROOT}/skills-codex/dev-workflow-r
 else
   pass "skills-codex/dev-workflow-run/SKILL.md: マージ前 findings の手順を置いていない（#263）"
 fi
+
+# ---------------------------------------------------------------------------
+# ケース: dev_workflow_is_remote / dev_workflow_docker_available /
+#         dev_workflow_gh_available（クラウド・Docker・gh 判定の一元化、Task #268）
+#
+# 実際の docker / gh の有無に依存せずテストが通るよう、上書き環境変数と偽コマンド
+# （PATH 先頭に置く docker/gh スクリプト）の両方で擬似再現する。
+# キャッシュ（プロセス内グローバル変数）は複数の検証で跨いで使われるため、
+# 「実際の判定」を検証する直前では内部変数を明示的に空へ戻し、キャッシュ無しの
+# 状態から検証する（このファイル全体で1プロセスの中でまとめてテストするため）。
+# ---------------------------------------------------------------------------
+
+echo "== dev_workflow_is_remote / dev_workflow_docker_available / dev_workflow_gh_available（クラウド・Docker・gh 判定の一元化、Task #268） =="
+
+DETECT_ENV_LIB="${REPO_ROOT}/scripts/lib/detect-env.sh"
+
+# shellcheck source=../scripts/lib/detect-env.sh
+. "$DETECT_ENV_LIB"
+
+# --- dev_workflow_is_remote ---
+
+unset CLAUDE_CODE_REMOTE DEV_WORKFLOW_FORCE_REMOTE CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE \
+  DEV_WORKFLOW_DOCKER_UNAVAILABLE DEV_WORKFLOW_GH_UNAVAILABLE
+
+dev_workflow_is_remote
+DE_IS_REMOTE_UNSET=$?
+assert_exit_code "dev_workflow_is_remote: CLAUDE_CODE_REMOTE 未設定では偽" 1 "$DE_IS_REMOTE_UNSET"
+
+CLAUDE_CODE_REMOTE=true dev_workflow_is_remote
+DE_IS_REMOTE_TRUE=$?
+assert_exit_code "dev_workflow_is_remote: CLAUDE_CODE_REMOTE=true なら真" 0 "$DE_IS_REMOTE_TRUE"
+
+CLAUDE_CODE_REMOTE=false dev_workflow_is_remote
+DE_IS_REMOTE_FALSE=$?
+assert_exit_code "dev_workflow_is_remote: CLAUDE_CODE_REMOTE=false（trueでない値）では偽" 1 "$DE_IS_REMOTE_FALSE"
+
+DEV_WORKFLOW_FORCE_REMOTE=true dev_workflow_is_remote
+DE_IS_REMOTE_FORCE_TRUE=$?
+assert_exit_code "dev_workflow_is_remote: DEV_WORKFLOW_FORCE_REMOTE=true は CLAUDE_CODE_REMOTE 未設定でも真を強制する" \
+  0 "$DE_IS_REMOTE_FORCE_TRUE"
+
+DEV_WORKFLOW_FORCE_REMOTE=1 dev_workflow_is_remote
+DE_IS_REMOTE_FORCE_1=$?
+assert_exit_code "dev_workflow_is_remote: DEV_WORKFLOW_FORCE_REMOTE=1 も真として扱う" 0 "$DE_IS_REMOTE_FORCE_1"
+
+CLAUDE_CODE_REMOTE=true DEV_WORKFLOW_FORCE_REMOTE=false dev_workflow_is_remote
+DE_IS_REMOTE_FORCE_FALSE=$?
+assert_exit_code "dev_workflow_is_remote: DEV_WORKFLOW_FORCE_REMOTE=false は CLAUDE_CODE_REMOTE=true でも偽を強制する" \
+  1 "$DE_IS_REMOTE_FORCE_FALSE"
+
+# --- dev_workflow_remote_environment_type（判定には使わない。診断表示専用） ---
+
+unset CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE
+assert_eq "dev_workflow_remote_environment_type: 未設定では空文字を返す" \
+  "" "$(dev_workflow_remote_environment_type)"
+
+CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE=cloud_default
+assert_eq "dev_workflow_remote_environment_type: 設定値をそのまま返す（実測値 cloud_default）" \
+  "cloud_default" "$(dev_workflow_remote_environment_type)"
+unset CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE
+
+# --- dev_workflow_docker_available ---
+
+# 上書き DEV_WORKFLOW_DOCKER_UNAVAILABLE はキャッシュより先に判定するため、
+# キャッシュの状態に関わらず常に偽を強制する。
+_DEV_WORKFLOW_DOCKER_AVAILABLE_CACHE=""
+DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 dev_workflow_docker_available
+DE_DOCKER_FORCE_UNAVAILABLE=$?
+assert_exit_code "dev_workflow_docker_available: DEV_WORKFLOW_DOCKER_UNAVAILABLE を設定すると実際の docker を見ずに偽を強制する" \
+  1 "$DE_DOCKER_FORCE_UNAVAILABLE"
+unset DEV_WORKFLOW_DOCKER_UNAVAILABLE
+
+# docker コマンド自体が見つからない場合は偽（command -v docker が失敗する分岐）。
+DE_EMPTY_BIN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-detect-env-emptybin.XXXXXX")"
+_DEV_WORKFLOW_DOCKER_AVAILABLE_CACHE=""
+PATH="$DE_EMPTY_BIN_DIR" dev_workflow_docker_available
+DE_DOCKER_NOT_FOUND=$?
+assert_exit_code "dev_workflow_docker_available: docker コマンドが見つからなければ偽" 1 "$DE_DOCKER_NOT_FOUND"
+
+# docker はあるが `docker info` が失敗する（デーモン未起動を模す）場合は偽。
+DE_FAKE_BIN_DOWN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-detect-env-docker-down.XXXXXX")"
+cat > "${DE_FAKE_BIN_DOWN}/docker" <<'FAKE_DOCKER_DOWN'
+#!/bin/bash
+exit 1
+FAKE_DOCKER_DOWN
+chmod +x "${DE_FAKE_BIN_DOWN}/docker"
+
+_DEV_WORKFLOW_DOCKER_AVAILABLE_CACHE=""
+PATH="${DE_FAKE_BIN_DOWN}:${PATH}" dev_workflow_docker_available
+DE_DOCKER_INFO_FAIL=$?
+assert_exit_code "dev_workflow_docker_available: docker info が失敗すれば偽（デーモン未起動）" 1 "$DE_DOCKER_INFO_FAIL"
+
+# docker があり `docker info` も成功すれば真。かつ2回目以降は docker info を
+# 再実行しない（プロセス内キャッシュ、呼ぶたびにデーモンへ出ない）ことを検証する。
+DE_FAKE_BIN_UP="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-detect-env-docker-up.XXXXXX")"
+DE_DOCKER_INFO_CALLS="${DE_FAKE_BIN_UP}/docker-info-calls"
+export DE_DOCKER_INFO_CALLS
+cat > "${DE_FAKE_BIN_UP}/docker" <<'FAKE_DOCKER_UP'
+#!/bin/bash
+if [ "$1" = "info" ]; then
+  echo x >> "$DE_DOCKER_INFO_CALLS"
+  exit 0
+fi
+exit 1
+FAKE_DOCKER_UP
+chmod +x "${DE_FAKE_BIN_UP}/docker"
+
+_DEV_WORKFLOW_DOCKER_AVAILABLE_CACHE=""
+PATH="${DE_FAKE_BIN_UP}:${PATH}" dev_workflow_docker_available
+DE_DOCKER_OK_1=$?
+assert_exit_code "dev_workflow_docker_available: command -v docker かつ docker info 成功なら真" 0 "$DE_DOCKER_OK_1"
+
+PATH="${DE_FAKE_BIN_UP}:${PATH}" dev_workflow_docker_available
+DE_DOCKER_OK_2=$?
+assert_exit_code "dev_workflow_docker_available: 2回目もキャッシュから真を返す" 0 "$DE_DOCKER_OK_2"
+
+if [ -f "$DE_DOCKER_INFO_CALLS" ]; then
+  DE_DOCKER_INFO_CALL_COUNT="$(wc -l < "$DE_DOCKER_INFO_CALLS" | tr -d '[:space:]')"
+else
+  DE_DOCKER_INFO_CALL_COUNT=0
+fi
+assert_eq "dev_workflow_docker_available: 2回呼んでも docker info はプロセス内キャッシュにより1回しか呼ばれない" \
+  "1" "$DE_DOCKER_INFO_CALL_COUNT"
+unset DE_DOCKER_INFO_CALLS
+
+# --- dev_workflow_gh_available ---
+
+_DEV_WORKFLOW_GH_AVAILABLE_CACHE=""
+DEV_WORKFLOW_GH_UNAVAILABLE=1 dev_workflow_gh_available
+DE_GH_FORCE_UNAVAILABLE=$?
+assert_exit_code "dev_workflow_gh_available: DEV_WORKFLOW_GH_UNAVAILABLE を設定すると実際の gh を見ずに偽を強制する" \
+  1 "$DE_GH_FORCE_UNAVAILABLE"
+unset DEV_WORKFLOW_GH_UNAVAILABLE
+
+# gh コマンド自体が見つからない場合は偽（gh auth status が command not found で失敗する）。
+_DEV_WORKFLOW_GH_AVAILABLE_CACHE=""
+PATH="$DE_EMPTY_BIN_DIR" dev_workflow_gh_available
+DE_GH_NOT_FOUND=$?
+assert_exit_code "dev_workflow_gh_available: gh コマンドが見つからなければ偽" 1 "$DE_GH_NOT_FOUND"
+
+# gh はあるが未ログイン（gh auth status が失敗する）場合は偽。
+DE_FAKE_BIN_GH_UNAUTH="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-detect-env-gh-unauth.XXXXXX")"
+cat > "${DE_FAKE_BIN_GH_UNAUTH}/gh" <<'FAKE_GH_UNAUTH'
+#!/bin/bash
+exit 1
+FAKE_GH_UNAUTH
+chmod +x "${DE_FAKE_BIN_GH_UNAUTH}/gh"
+
+_DEV_WORKFLOW_GH_AVAILABLE_CACHE=""
+PATH="${DE_FAKE_BIN_GH_UNAUTH}:${PATH}" dev_workflow_gh_available
+DE_GH_UNAUTH=$?
+assert_exit_code "dev_workflow_gh_available: gh auth status が失敗すれば偽（未ログイン）" 1 "$DE_GH_UNAUTH"
+
+# gh auth status は成功するが API 疎通（gh api rate_limit）が失敗する場合も偽。
+DE_FAKE_BIN_GH_NOAPI="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-detect-env-gh-noapi.XXXXXX")"
+cat > "${DE_FAKE_BIN_GH_NOAPI}/gh" <<'FAKE_GH_NOAPI'
+#!/bin/bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  exit 0
+fi
+exit 1
+FAKE_GH_NOAPI
+chmod +x "${DE_FAKE_BIN_GH_NOAPI}/gh"
+
+_DEV_WORKFLOW_GH_AVAILABLE_CACHE=""
+PATH="${DE_FAKE_BIN_GH_NOAPI}:${PATH}" dev_workflow_gh_available
+DE_GH_NOAPI=$?
+assert_exit_code "dev_workflow_gh_available: gh auth status は成功するが API 疎通が失敗すれば偽" 1 "$DE_GH_NOAPI"
+
+# gh auth status も API 疎通も成功すれば真。かつ2回目以降は gh api rate_limit を
+# 再実行しない（プロセス内キャッシュ、呼ぶたびにネットワークへ出ない）ことを検証する。
+DE_FAKE_BIN_GH_OK="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-detect-env-gh-ok.XXXXXX")"
+DE_GH_API_CALLS="${DE_FAKE_BIN_GH_OK}/gh-api-calls"
+export DE_GH_API_CALLS
+cat > "${DE_FAKE_BIN_GH_OK}/gh" <<'FAKE_GH_OK'
+#!/bin/bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "rate_limit" ]; then
+  echo x >> "$DE_GH_API_CALLS"
+  exit 0
+fi
+exit 1
+FAKE_GH_OK
+chmod +x "${DE_FAKE_BIN_GH_OK}/gh"
+
+_DEV_WORKFLOW_GH_AVAILABLE_CACHE=""
+PATH="${DE_FAKE_BIN_GH_OK}:${PATH}" dev_workflow_gh_available
+DE_GH_OK_1=$?
+assert_exit_code "dev_workflow_gh_available: gh auth status と API 疎通が両方成功すれば真" 0 "$DE_GH_OK_1"
+
+PATH="${DE_FAKE_BIN_GH_OK}:${PATH}" dev_workflow_gh_available
+DE_GH_OK_2=$?
+assert_exit_code "dev_workflow_gh_available: 2回目もキャッシュから真を返す" 0 "$DE_GH_OK_2"
+
+if [ -f "$DE_GH_API_CALLS" ]; then
+  DE_GH_API_CALL_COUNT="$(wc -l < "$DE_GH_API_CALLS" | tr -d '[:space:]')"
+else
+  DE_GH_API_CALL_COUNT=0
+fi
+assert_eq "dev_workflow_gh_available: 2回呼んでも gh api rate_limit はプロセス内キャッシュにより1回しか呼ばれない" \
+  "1" "$DE_GH_API_CALL_COUNT"
+unset DE_GH_API_CALLS
+
+# ---------------------------------------------------------------------------
+# スキル本文のGitHub操作がgithub-access.md経由であること（Task #276）
+#
+# 素の `gh issue` / `gh pr` / `gh api` 直書きが残っていても、ghバックエンド限定で
+# あることが明示されていれば許容する（完了条件の「または」側）。判定は
+# 「ファイルがgh issue/pr/apiを含むなら、同じファイル内にgithub-access.mdへの参照も
+# 含むこと」という最低条件にする（個々の呼び出し直前に毎回書く必要はない。
+# core/instructions.md「応答言語」節と同じ『正本を再掲しない』方針）。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== スキル本文のGitHub操作がgithub-access.md経由であること（#276） =="
+
+GHSKILL_BACKEND_MARKER='core/references/github-access.md'
+GHSKILL_CALL_PATTERN='gh (issue|pr|api)([[:space:]]|$)'
+
+for GHSKILL_FILE in \
+  skills/run/SKILL.md \
+  skills/run/references/review.md \
+  skills/run/references/wave-review.md \
+  skills/epic/SKILL.md \
+  skills/plan/SKILL.md \
+  skills/feedback/SKILL.md \
+  skills/feedback/references/upstream.md \
+  core/roles/planner.md \
+; do
+  GHSKILL_PATH="${REPO_ROOT}/${GHSKILL_FILE}"
+  if [ ! -f "$GHSKILL_PATH" ]; then
+    fail "#276: ${GHSKILL_FILE} が存在する" "ファイルが見つかりません"
+    continue
+  fi
+
+  GHSKILL_HAS_CALL=0
+  grep -E "$GHSKILL_CALL_PATTERN" "$GHSKILL_PATH" >/dev/null 2>&1 && GHSKILL_HAS_CALL=1
+
+  if [ "$GHSKILL_HAS_CALL" -eq 0 ]; then
+    pass "#276: ${GHSKILL_FILE} に素の gh issue/pr/api 呼び出しは無い"
+    continue
+  fi
+
+  if grep -qF "$GHSKILL_BACKEND_MARKER" "$GHSKILL_PATH"; then
+    pass "#276: ${GHSKILL_FILE}: gh呼び出しが残る場合はghバックエンド限定である旨が明示されている"
+  else
+    fail "#276: ${GHSKILL_FILE}: gh呼び出しが残る場合はghバックエンド限定である旨が明示されている" \
+      "gh issue/pr/apiを含むが ${GHSKILL_BACKEND_MARKER} への参照が見つからない"
+  fi
+done
+unset GHSKILL_FILE GHSKILL_PATH GHSKILL_HAS_CALL GHSKILL_BACKEND_MARKER GHSKILL_CALL_PATTERN
+
+# --- core/references/github-access.md 自身が存在し、選択規則を1つだけ定めている ---
+GHSKILL_DOC="${REPO_ROOT}/core/references/github-access.md"
+if [ -f "$GHSKILL_DOC" ]; then
+  pass "#276: core/references/github-access.md が存在する（正本）"
+else
+  fail "#276: core/references/github-access.md が存在する（正本）" "ファイルが見つかりません"
+fi
+
+case "$(cat "$GHSKILL_DOC" 2>/dev/null)" in
+  *'dev_workflow_gh_available'*)
+    pass "#276: github-access.md が dev_workflow_gh_available（#268）を選択規則として参照している" ;;
+  *)
+    fail "#276: github-access.md が dev_workflow_gh_available（#268）を選択規則として参照している" \
+      "参照が見つからない" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# ウェーブ計画の入力ファイル受け渡しをrunに実装する（#277）
+#
+# plan-waves.sh は --epic 時に gh を直接呼ぶため、gh が使えない環境（クラウド等）では
+# run自身がMCPでTask issue群を取得し --from-file 用の入力ファイルを書き出す必要がある。
+# MCP呼び出し自体はシェルスクリプトからテストできないため、ここでは
+# 1) skills/run/SKILL.md が dev_workflow_gh_available に基づいて --epic / --from-file を
+#    切り替える旨を明記していること、2) 書き出し失敗時に黙ってフォールバックせず停止する旨が
+#    明記されていること、3) plan-waves.sh 側のドキュメントが誰がファイルを作るかを
+#    説明していること、を静的に検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== ウェーブ計画の入力ファイル受け渡し（#277） =="
+
+NS277_RUN_SKILL_BODY="$(cat "${REPO_ROOT}/skills/run/SKILL.md")"
+NS277_PLAN_WAVES_BODY="$(cat "${REPO_ROOT}/scripts/plan-waves.sh")"
+
+# --- skills/run/SKILL.md: dev_workflow_gh_available に基づいて --epic / --from-file を切り替える ---
+case "$NS277_RUN_SKILL_BODY" in
+  *'dev_workflow_gh_available'*'--epic "$EPIC_ISSUE_NUM"'*'--from-file'*)
+    pass "skills/run/SKILL.md: dev_workflow_gh_availableに基づき--epic/--from-fileを切り替える（#277）" ;;
+  *)
+    fail "skills/run/SKILL.md: dev_workflow_gh_availableに基づき--epic/--from-fileを切り替える（#277）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: gh不可時にMCPでTask issueを取得して書き出す手順がある ---
+case "$NS277_RUN_SKILL_BODY" in
+  *'mcp__github__'*'--from-file'*)
+    pass "skills/run/SKILL.md: gh不可時にMCPでTask issueを取得し--from-file用ファイルを書き出す手順がある（#277）" ;;
+  *)
+    fail "skills/run/SKILL.md: gh不可時にMCPでTask issueを取得し--from-file用ファイルを書き出す手順がある（#277）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: 書き出し失敗時は黙ってフォールバックせず停止する旨が明記されている ---
+case "$NS277_RUN_SKILL_BODY" in
+  *'書き出しに失敗した場合'*'停止'*)
+    pass "skills/run/SKILL.md: 入力ファイル書き出し失敗時は停止する旨が明記されている（#277）" ;;
+  *)
+    fail "skills/run/SKILL.md: 入力ファイル書き出し失敗時は停止する旨が明記されている（#277）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: 列定義・区切り文字は既存load_from_fileの仕様をそのまま使う旨が明記されている ---
+case "$NS277_RUN_SKILL_BODY" in
+  *'新しいフォーマットは'*'増やさない'*)
+    pass "skills/run/SKILL.md: load_from_fileの既存フォーマットをそのまま使い増やさない旨が明記されている（#277）" ;;
+  *)
+    fail "skills/run/SKILL.md: load_from_fileの既存フォーマットをそのまま使い増やさない旨が明記されている（#277）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: 書き出し先ファイル名が check-repo-hygiene.sh の既存除外パターンに一致する ---
+#     （/.claude/.dev-workflow-* 。新規.gitignore追記が不要であることの根拠）
+if grep -qF '/.claude/.dev-workflow-*' "${REPO_ROOT}/scripts/check-repo-hygiene.sh"; then
+  case "$NS277_RUN_SKILL_BODY" in
+    *'.claude/.dev-workflow-wave-tasks.tsv'*)
+      pass "skills/run/SKILL.md: 書き出し先がcheck-repo-hygiene.shの既存除外パターンに一致する命名である（#277）" ;;
+    *)
+      fail "skills/run/SKILL.md: 書き出し先がcheck-repo-hygiene.shの既存除外パターンに一致する命名である（#277）" \
+        "記述が見つからない" ;;
+  esac
+else
+  fail "skills/run/SKILL.md: 書き出し先がcheck-repo-hygiene.shの既存除外パターンに一致する命名である（#277）" \
+    "check-repo-hygiene.sh に /.claude/.dev-workflow-* パターンが見つからない（前提が崩れている）"
+fi
+
+# --- scripts/plan-waves.sh: --from-file のコメントがファイルの作成者（runがMCPで書き出す）を説明している ---
+case "$NS277_PLAN_WAVES_BODY" in
+  *'このファイルは誰が作るか'*'MCP'*)
+    pass "scripts/plan-waves.sh: --from-fileの入力ファイルを誰が作るかがコメントで説明されている（#277）" ;;
+  *)
+    fail "scripts/plan-waves.sh: --from-fileの入力ファイルを誰が作るかがコメントで説明されている（#277）" \
+      "記述が見つからない" ;;
+esac
+
+# --- gh が使える環境では従来どおり load_from_gh（--epic経路）を通ることの回帰確認 ---
+#     （dev_workflow_gh_available=true 相当。既存のEpic #3実データ相当のPLAN_ARGS組み立てが
+#      --from-fileに置き換わっていないことを、SKILL.md側の分岐記述で確認する。
+#      plan-waves.sh自体の--epic/--from-file排他動作は既存テストで検証済み）
+case "$NS277_RUN_SKILL_BODY" in
+  *'if dev_workflow_gh_available; then'*'PLAN_ARGS+=(--epic "$EPIC_ISSUE_NUM")'*)
+    pass "skills/run/SKILL.md: gh利用可能時は従来どおり--epic経路のPLAN_ARGSを組み立てる（#277）" ;;
+  *)
+    fail "skills/run/SKILL.md: gh利用可能時は従来どおり--epic経路のPLAN_ARGSを組み立てる（#277）" \
+      "記述が見つからない" ;;
+esac
+
+unset NS277_RUN_SKILL_BODY NS277_PLAN_WAVES_BODY
+
+# ---------------------------------------------------------------------------
+# クラウドでの単一ブランチ運用への縮退（Task #278）
+#
+# merge-lane.sh --single-branch 自体の動作は上記「merge-lane.sh --single-branch」節で
+# 実地検証済み。ここでは skills/run/SKILL.md・README.md がブランチ運用モードの切り替え・
+# 単一ブランチ運用時の挙動（wave ブランチ未作成・push対象の検証・PR作成のMCPフォールバック）を
+# 明記していることを静的に検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== クラウドでの単一ブランチ運用への縮退（#278） =="
+
+NS278_RUN_SKILL_BODY="$(cat "${REPO_ROOT}/skills/run/SKILL.md")"
+NS278_README_BODY="$(cat "${REPO_ROOT}/README.md")"
+
+# --- skills/run/SKILL.md: dev_workflow_is_remoteに基づきSINGLE_BRANCH_MODEを決定する ---
+case "$NS278_RUN_SKILL_BODY" in
+  *'dev_workflow_is_remote'*'SINGLE_BRANCH_MODE=1'*)
+    pass "skills/run/SKILL.md: dev_workflow_is_remoteに基づきSINGLE_BRANCH_MODEを決定する（#278）" ;;
+  *)
+    fail "skills/run/SKILL.md: dev_workflow_is_remoteに基づきSINGLE_BRANCH_MODEを決定する（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: DEV_WORKFLOW_SINGLE_BRANCHによる明示上書きがある ---
+case "$NS278_RUN_SKILL_BODY" in
+  *'DEV_WORKFLOW_SINGLE_BRANCH'*)
+    pass "skills/run/SKILL.md: DEV_WORKFLOW_SINGLE_BRANCHによる明示上書きが用意されている（#278）" ;;
+  *)
+    fail "skills/run/SKILL.md: DEV_WORKFLOW_SINGLE_BRANCHによる明示上書きが用意されている（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: 単一ブランチ運用ではセッションのチェックアウト済みブランチを
+#     epicブランチとして扱う（新規worktreeを作らずEPIC_WT="."にする） ---
+case "$NS278_RUN_SKILL_BODY" in
+  *'EPIC_BRANCH="$SESSION_BRANCH"'*'EPIC_WT="."'*)
+    pass "skills/run/SKILL.md: 単一ブランチ運用でセッション指定ブランチをepicブランチとして扱う（#278）" ;;
+  *)
+    fail "skills/run/SKILL.md: 単一ブランチ運用でセッション指定ブランチをepicブランチとして扱う（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: Step5でmerge-lane.shに--single-branchを渡し、--createを使わない ---
+case "$NS278_RUN_SKILL_BODY" in
+  *'--single-branch'*)
+    pass "skills/run/SKILL.md: レーン取り込みで--single-branchを使う分岐がある（#278）" ;;
+  *)
+    fail "skills/run/SKILL.md: レーン取り込みで--single-branchを使う分岐がある（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: push対象がセッション指定ブランチと異なる場合は理由を明示して停止する ---
+case "$NS278_RUN_SKILL_BODY" in
+  *'push対象'*'SESSION_BRANCH'*'停止'*)
+    pass "skills/run/SKILL.md: push対象がセッション指定ブランチと異なる場合は停止する旨が明記されている（#278）" ;;
+  *)
+    fail "skills/run/SKILL.md: push対象がセッション指定ブランチと異なる場合は停止する旨が明記されている（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: PR作成がMCPでも失敗した場合、コミット・push済み・PR未作成を
+#     Epic issueに残して停止する旨が明記されている ---
+case "$NS278_RUN_SKILL_BODY" in
+  *'MCPでも作成できない'*'PR未作成であること'*'停止する'*)
+    pass "skills/run/SKILL.md: PR作成がMCPでも失敗した場合は状態を記録して停止する旨が明記されている（#278）" ;;
+  *)
+    fail "skills/run/SKILL.md: PR作成がMCPでも失敗した場合は状態を記録して停止する旨が明記されている（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- README.md: 「ブランチ戦略」節が単一ブランチ運用に言及している ---
+case "$NS278_README_BODY" in
+  *'## ブランチ戦略'*'単一ブランチ運用'*)
+    pass "README.md: 「ブランチ戦略」節が単一ブランチ運用に言及している（#278）" ;;
+  *)
+    fail "README.md: 「ブランチ戦略」節が単一ブランチ運用に言及している（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- README.md: 「ウェーブと wave ブランチ」節の直後に単一ブランチ運用の専用節がある ---
+case "$NS278_README_BODY" in
+  *'### ウェーブと wave ブランチ'*'### 単一ブランチ運用（クラウド等。Task #278）'*)
+    pass "README.md: 「ウェーブと wave ブランチ」節のあとに単一ブランチ運用の専用節がある（#278）" ;;
+  *)
+    fail "README.md: 「ウェーブと wave ブランチ」節のあとに単一ブランチ運用の専用節がある（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- README.md: 単一ブランチ運用節がdev_workflow_is_remote・DEV_WORKFLOW_SINGLE_BRANCHに言及している ---
+case "$NS278_README_BODY" in
+  *'dev_workflow_is_remote'*'DEV_WORKFLOW_SINGLE_BRANCH'*)
+    pass "README.md: 単一ブランチ運用の切り替え条件（dev_workflow_is_remote・明示上書き）が明記されている（#278）" ;;
+  *)
+    fail "README.md: 単一ブランチ運用の切り替え条件（dev_workflow_is_remote・明示上書き）が明記されている（#278）" \
+      "記述が見つからない" ;;
+esac
+
+# --- scripts/merge-lane.sh: --single-branchフラグが実装されている（静的検査） ---
+if grep -qF -- '--single-branch' "${REPO_ROOT}/scripts/merge-lane.sh"; then
+  pass "scripts/merge-lane.sh: --single-branchフラグが実装されている（#278）"
+else
+  fail "scripts/merge-lane.sh: --single-branchフラグが実装されている（#278）"
+fi
+
+unset NS278_RUN_SKILL_BODY NS278_README_BODY
+
+# ---------------------------------------------------------------------------
+# プラグイン供給手順とクラウド節をREADME/setupに追加する（Task #279）
+#
+# クラウドセッションはユーザーレベル設定を引き継がず、マーケットプレイスのsource.pathも
+# ローカル絶対パスのため解決できない。README「クラウドマシンから使う」節・
+# skills/setup/SKILL.mdのクラウド案内が、この背景・テンプレート・secret非コミット・
+# DEV_WORKFLOW_SANDBOX_HOST=1の2通りの渡し方を明記していることを静的に検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== プラグイン供給手順とクラウド節（#279） =="
+
+NS279_README_BODY="$(cat "${REPO_ROOT}/README.md")"
+NS279_SETUP_BODY="$(cat "${REPO_ROOT}/skills/setup/SKILL.md")"
+
+# --- README.md: 「クラウドマシンから使う」節が新設されている ---
+if grep -qF '## クラウドマシンから使う' "${REPO_ROOT}/README.md"; then
+  pass "README.md: 「クラウドマシンから使う」節が新設されている（#279）"
+else
+  fail "README.md: 「クラウドマシンから使う」節が新設されている（#279）"
+fi
+
+# --- README.md: extraKnownMarketplacesのテンプレートがあり、source.pathを含まない ---
+NS279_CLOUD_SECTION="$(awk '/^## クラウドマシンから使う$/{f=1; next} /^## /{f=0} f' "${REPO_ROOT}/README.md")"
+case "$NS279_CLOUD_SECTION" in
+  *'extraKnownMarketplaces'*)
+    pass "README.md: クラウド節にextraKnownMarketplacesのテンプレートがある（#279）" ;;
+  *)
+    fail "README.md: クラウド節にextraKnownMarketplacesのテンプレートがある（#279）" \
+      "記述が見つからない" ;;
+esac
+
+if printf '%s' "$NS279_CLOUD_SECTION" | grep -qF '"path"'; then
+  fail "README.md: クラウド節のテンプレートがローカル絶対パス（source.path）を含まない（#279）" \
+    "\"path\" キーが見つかった"
+else
+  pass "README.md: クラウド節のテンプレートがローカル絶対パス（source.path）を含まない（#279）"
+fi
+
+case "$NS279_CLOUD_SECTION" in
+  *'ローカル絶対パス'*'書いてはならない'*)
+    pass "README.md: extraKnownMarketplacesはgit URLのみでローカル絶対パスを書かない旨が明記されている（#279）" ;;
+  *)
+    fail "README.md: extraKnownMarketplacesはgit URLのみでローカル絶対パスを書かない旨が明記されている（#279）" \
+      "記述が見つからない" ;;
+esac
+
+# --- README.md: enabledPlugins / permissions.allow のテンプレートがある ---
+case "$NS279_CLOUD_SECTION" in
+  *'enabledPlugins'*'dev-workflow@dev-workflow-marketplace'*)
+    pass "README.md: クラウド節にenabledPluginsのテンプレートがある（#279）" ;;
+  *)
+    fail "README.md: クラウド節にenabledPluginsのテンプレートがある（#279）" \
+      "記述が見つからない" ;;
+esac
+
+case "$NS279_CLOUD_SECTION" in
+  *'permissions.allow'*'git'*'gh'*)
+    pass "README.md: クラウド節にpermissions.allow（git/gh/ビルド系最小セット）の案内がある（#279）" ;;
+  *)
+    fail "README.md: クラウド節にpermissions.allow（git/gh/ビルド系最小セット）の案内がある（#279）" \
+      "記述が見つからない" ;;
+esac
+
+# --- README.md: secretをコミットしてはならないことが明示されている ---
+case "$NS279_CLOUD_SECTION" in
+  *'secret は書かない'*'settings.local.json'*)
+    pass "README.md: secretをコミットせずsettings.local.jsonに残す旨が明示されている（#279）" ;;
+  *)
+    fail "README.md: secretをコミットせずsettings.local.jsonに残す旨が明示されている（#279）" \
+      "記述が見つからない" ;;
+esac
+
+# --- README.md: CLAUDE_CODE_SYNC_PLUGINSを当てにしない旨と実測根拠が書かれている ---
+case "$NS279_CLOUD_SECTION" in
+  *'CLAUDE_CODE_SYNC_PLUGINS'*'同期先のフォルダが空だった'*)
+    pass "README.md: CLAUDE_CODE_SYNC_PLUGINSを当てにしない旨と実測根拠が明記されている（#279）" ;;
+  *)
+    fail "README.md: CLAUDE_CODE_SYNC_PLUGINSを当てにしない旨と実測根拠が明記されている（#279）" \
+      "記述が見つからない" ;;
+esac
+
+# --- README.md: DEV_WORKFLOW_SANDBOX_HOST=1の渡し方が2通り併記され、副作用（ローカルにも
+#     影響する）が明記されている ---
+case "$NS279_CLOUD_SECTION" in
+  *'クラウドセッション側の環境変数として渡す'*'.claude/settings.json'*'env'*'ローカルでも host モードになる'*)
+    pass "README.md: DEV_WORKFLOW_SANDBOX_HOST=1の2通りの渡し方と副作用が明記されている（#279）" ;;
+  *)
+    fail "README.md: DEV_WORKFLOW_SANDBOX_HOST=1の2通りの渡し方と副作用が明記されている（#279）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/setup/SKILL.md: クラウド環境向けの案内があり、README「クラウドマシンから使う」
+#     節へ導線がある ---
+case "$NS279_SETUP_BODY" in
+  *'クラウド'*'クラウドマシンから使う'*)
+    pass "skills/setup/SKILL.md: クラウド環境向けにREADMEのクラウド節への導線がある（#279）" ;;
+  *)
+    fail "skills/setup/SKILL.md: クラウド環境向けにREADMEのクラウド節への導線がある（#279）" \
+      "記述が見つからない" ;;
+esac
+
+unset NS279_README_BODY NS279_SETUP_BODY NS279_CLOUD_SECTION
+
+# ---------------------------------------------------------------------------
+# #272の3分岐契約（host警告継続 / dockerfile・compose停止 / none停止）の検証（#288）
+#
+# #272が追加したmode別の3分岐契約（mode=host→警告継続＋Epic issueコメント /
+# mode=dockerfile・compose→Docker不在・デーモン未起動なら停止 / mode=none→従来どおり停止）に
+# テストが一切無かった。#277/#278/#279と同じ作法（静的grepによるSKILL.md契約文言の確認）で、
+# 契約文言を削除すると当該テストが失敗する（＝検知力がある）形で検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== #272の3分岐契約（host警告継続 / dockerfile・compose停止 / none停止）の検証（#288） =="
+
+NS288_RUN_SKILL_BODY="$(cat "${REPO_ROOT}/skills/run/SKILL.md")"
+
+# --- skills/run/SKILL.md: mode=host で警告を出し継続し、Epic issueへコメントを残す ---
+case "$NS288_RUN_SKILL_BODY" in
+  *'mode=host'*'WARNING'*'gh issue comment "$ARGUMENTS"'*'host モード（Dockerコンテナ分離なし）で実行されました'*)
+    pass "skills/run/SKILL.md: mode=hostで警告を出して継続し、Epic issueへコメントを残す（#272, #288）" ;;
+  *)
+    fail "skills/run/SKILL.md: mode=hostで警告を出して継続し、Epic issueへコメントを残す（#272, #288）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: mode=dockerfile/compose でDocker不在・デーモン未起動なら停止する ---
+case "$NS288_RUN_SKILL_BODY" in
+  *'mode=(dockerfile|compose)'*'dev_workflow_docker_available'*'exit 1'*)
+    pass "skills/run/SKILL.md: mode=dockerfile/composeでDocker不在・デーモン未起動なら停止する（#272, #288）" ;;
+  *)
+    fail "skills/run/SKILL.md: mode=dockerfile/composeでDocker不在・デーモン未起動なら停止する（#272, #288）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills/run/SKILL.md: mode=none は従来どおりエラーで停止する ---
+case "$NS288_RUN_SKILL_BODY" in
+  *'mode=none'*'ERROR'*'サンドボックス定義が見つかりません'*'exit 1'*)
+    pass "skills/run/SKILL.md: mode=noneは従来どおりエラーで停止する（#272, #288）" ;;
+  *)
+    fail "skills/run/SKILL.md: mode=noneは従来どおりエラーで停止する（#272, #288）" \
+      "記述が見つからない" ;;
+esac
+
+unset NS288_RUN_SKILL_BODY
+
+# ---------------------------------------------------------------------------
+# Codex版（skills-codex/）へのクラウド対応の反映（Task #281）
+#
+# host モードの受け入れ（#272相当）・Docker必須判定のdetect-env.sh委譲（#287相当）・
+# 単一ブランチ運用（#278相当）をCodex版に反映した。GitHub操作の抽象化（#276相当）だけは
+# Codexで`mcp__github__*`が未検証のため、フォールバックではなく明示停止にした（意図的な
+# divergenceとして`docs/dev-workflow-multi-vendor-guide.md`に明記）。#277/#278/#279と同じ
+# 作法（静的grepによるSKILL.md契約文言の確認）で検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== Codex版へのクラウド対応の反映（#281） =="
+
+NS281_CODEX_RUN_BODY="$(cat "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md")"
+NS281_CODEX_GOAL_BODY="$(cat "${REPO_ROOT}/skills-codex/dev-workflow-goal/SKILL.md")"
+NS281_GUIDE_BODY="$(cat "${REPO_ROOT}/docs/dev-workflow-multi-vendor-guide.md")"
+
+# --- skills-codex/dev-workflow-run/SKILL.md: gh不可時はMCPフォールバック無しで明示停止する ---
+case "$NS281_CODEX_RUN_BODY" in
+  *'dev_workflow_gh_available'*'mcp__github__'*'未実装'*'exit 1'*)
+    pass "skills-codex/dev-workflow-run/SKILL.md: gh不可時にMCPフォールバック無しで明示停止する（#276相当, #281）" ;;
+  *)
+    fail "skills-codex/dev-workflow-run/SKILL.md: gh不可時にMCPフォールバック無しで明示停止する（#276相当, #281）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills-codex/dev-workflow-run/SKILL.md: mode=hostで警告を出して継続し、Epic issueへコメントを残す ---
+case "$NS281_CODEX_RUN_BODY" in
+  *'mode=host'*'WARNING'*'gh issue comment'*'host モード'*)
+    pass "skills-codex/dev-workflow-run/SKILL.md: mode=hostで警告を出して継続し、Epic issueへコメントを残す（#272相当, #281）" ;;
+  *)
+    fail "skills-codex/dev-workflow-run/SKILL.md: mode=hostで警告を出して継続し、Epic issueへコメントを残す（#272相当, #281）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills-codex/dev-workflow-run/SKILL.md: mode=dockerfile/composeのDocker必須判定をdetect-env.shに委譲している ---
+case "$NS281_CODEX_RUN_BODY" in
+  *'mode=(dockerfile|compose)'*'dev_workflow_docker_available'*'exit 1'*)
+    pass "skills-codex/dev-workflow-run/SKILL.md: mode=dockerfile/composeのDocker必須判定をdev_workflow_docker_availableに委譲している（#287相当, #281）" ;;
+  *)
+    fail "skills-codex/dev-workflow-run/SKILL.md: mode=dockerfile/composeのDocker必須判定をdev_workflow_docker_availableに委譲している（#287相当, #281）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills-codex/dev-workflow-run/SKILL.md: dev_workflow_is_remoteに基づきSINGLE_BRANCH_MODEを決定する ---
+case "$NS281_CODEX_RUN_BODY" in
+  *'dev_workflow_is_remote'*'SINGLE_BRANCH_MODE=1'*)
+    pass "skills-codex/dev-workflow-run/SKILL.md: dev_workflow_is_remoteに基づきSINGLE_BRANCH_MODEを決定する（#278相当, #281）" ;;
+  *)
+    fail "skills-codex/dev-workflow-run/SKILL.md: dev_workflow_is_remoteに基づきSINGLE_BRANCH_MODEを決定する（#278相当, #281）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills-codex/dev-workflow-run/SKILL.md: 単一ブランチ運用でセッション指定ブランチをepicブランチとして扱う ---
+case "$NS281_CODEX_RUN_BODY" in
+  *'EPIC_BRANCH="$SESSION_BRANCH"'*'EPIC_WT="."'*)
+    pass "skills-codex/dev-workflow-run/SKILL.md: 単一ブランチ運用でセッション指定ブランチをepicブランチとして扱う（#278相当, #281）" ;;
+  *)
+    fail "skills-codex/dev-workflow-run/SKILL.md: 単一ブランチ運用でセッション指定ブランチをepicブランチとして扱う（#278相当, #281）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills-codex/dev-workflow-run/SKILL.md: レーン取り込みで--single-branchを使う分岐がある ---
+if grep -qF -- '--single-branch' "${REPO_ROOT}/skills-codex/dev-workflow-run/SKILL.md"; then
+  pass "skills-codex/dev-workflow-run/SKILL.md: レーン取り込みで--single-branchを使う分岐がある（#278相当, #281）"
+else
+  fail "skills-codex/dev-workflow-run/SKILL.md: レーン取り込みで--single-branchを使う分岐がある（#278相当, #281）"
+fi
+
+# --- skills-codex/dev-workflow-run/SKILL.md: push対象がセッション指定ブランチと異なる場合は理由を明示して停止する ---
+case "$NS281_CODEX_RUN_BODY" in
+  *'push対象'*'SESSION_BRANCH'*'停止'*)
+    pass "skills-codex/dev-workflow-run/SKILL.md: push対象がセッション指定ブランチと異なる場合は停止する旨が明記されている（#278相当, #281）" ;;
+  *)
+    fail "skills-codex/dev-workflow-run/SKILL.md: push対象がセッション指定ブランチと異なる場合は停止する旨が明記されている（#278相当, #281）" \
+      "記述が見つからない" ;;
+esac
+
+# --- skills-codex/dev-workflow-goal/SKILL.md: host モードへの言及がある ---
+case "$NS281_CODEX_GOAL_BODY" in
+  *'host モード'*)
+    pass "skills-codex/dev-workflow-goal/SKILL.md: host モードへの言及がある（#272相当, #281）" ;;
+  *)
+    fail "skills-codex/dev-workflow-goal/SKILL.md: host モードへの言及がある（#272相当, #281）" \
+      "記述が見つからない" ;;
+esac
+
+# --- docs/dev-workflow-multi-vendor-guide.md: GitHub操作の抽象化の意図的なdivergenceが
+#     理由とともに明記されている（完了条件: 一致させられない点は理由とともに明記） ---
+case "$NS281_GUIDE_BODY" in
+  *'GitHub操作の抽象化'*'未検証'*)
+    pass "docs/dev-workflow-multi-vendor-guide.md: GitHub操作の抽象化のdivergenceが理由とともに明記されている（#281）" ;;
+  *)
+    fail "docs/dev-workflow-multi-vendor-guide.md: GitHub操作の抽象化のdivergenceが理由とともに明記されている（#281）" \
+      "記述が見つからない" ;;
+esac
+
+unset NS281_CODEX_RUN_BODY NS281_CODEX_GOAL_BODY NS281_GUIDE_BODY
+
+# ---------------------------------------------------------------------------
+# README.md: 環境変数一覧に Epic #267 新設5変数が掲載されている（レビュー#293）
+#
+# DEV_WORKFLOW_SANDBOX_HOST / DEV_WORKFLOW_FORCE_REMOTE / DEV_WORKFLOW_GH_UNAVAILABLE /
+# DEV_WORKFLOW_DOCKER_UNAVAILABLE / DEV_WORKFLOW_SINGLE_BRANCH の5変数が「クラウドマシンから
+# 使う」節等の説明文にのみ散らばっていて、環境変数一覧（正本リスト）から発見できなかった
+# （DEV_WORKFLOW_LANGに対する#246・#251の先例と同じ作法で検査する）。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== README.md: 環境変数一覧に新設5変数が掲載されている（レビュー#293） =="
+
+NS293_README_ENVVARS="$(awk '
+  $0 == "### 環境変数一覧" { flag = 1; next }
+  flag && /^## / { exit }
+  flag { print }
+' "${REPO_ROOT}/README.md")"
+
+for NS293_VAR in DEV_WORKFLOW_SANDBOX_HOST DEV_WORKFLOW_FORCE_REMOTE DEV_WORKFLOW_GH_UNAVAILABLE \
+  DEV_WORKFLOW_DOCKER_UNAVAILABLE DEV_WORKFLOW_SINGLE_BRANCH; do
+  if printf '%s' "$NS293_README_ENVVARS" | grep -Fq -- "$NS293_VAR"; then
+    pass "README.md: 環境変数一覧に ${NS293_VAR} が載っている（レビュー#293）"
+  else
+    fail "README.md: 環境変数一覧に ${NS293_VAR} が載っている（レビュー#293）" \
+      "見つかりません: ${NS293_VAR}"
+  fi
+done
+unset NS293_VAR
+
+# --- DEV_WORKFLOW_SANDBOX_HOST（入力）と DEV_WORKFLOW_SANDBOX_MODE（resolve-sandbox.sh の
+#     出力）の違いが一覧上の説明文から伝わること ---
+if printf '%s' "$NS293_README_ENVVARS" | grep -Fq 'DEV_WORKFLOW_SANDBOX_MODE'; then
+  pass "README.md: 環境変数一覧の DEV_WORKFLOW_SANDBOX_HOST の説明が、出力の DEV_WORKFLOW_SANDBOX_MODE との違いに言及している（レビュー#293）"
+else
+  fail "README.md: 環境変数一覧の DEV_WORKFLOW_SANDBOX_HOST の説明が、出力の DEV_WORKFLOW_SANDBOX_MODE との違いに言及している（レビュー#293）" \
+    "$NS293_README_ENVVARS"
+fi
+
+# --- DEV_WORKFLOW_FORCE_REMOTE がテスト専用ではなく、判定が外れた環境での逃げ道でもあることが
+#     明記されていること（over-engineering観点の指摘: 死んだフラグに見えるリスクへの対処） ---
+case "$NS293_README_ENVVARS" in
+  *'DEV_WORKFLOW_FORCE_REMOTE'*)
+    if printf '%s' "$NS293_README_ENVVARS" | grep -A2 -F 'DEV_WORKFLOW_FORCE_REMOTE' | grep -Fq '逃げ道'; then
+      pass "README.md: DEV_WORKFLOW_FORCE_REMOTEが『判定が外れた環境での逃げ道』として明記されテスト専用ではないと分かる（レビュー#293）"
+    else
+      fail "README.md: DEV_WORKFLOW_FORCE_REMOTEが『判定が外れた環境での逃げ道』として明記されテスト専用ではないと分かる（レビュー#293）" \
+        "$NS293_README_ENVVARS"
+    fi
+    ;;
+  *)
+    fail "README.md: DEV_WORKFLOW_FORCE_REMOTEが『判定が外れた環境での逃げ道』として明記されテスト専用ではないと分かる（レビュー#293）" \
+      "DEV_WORKFLOW_FORCE_REMOTE自体が見つからない" ;;
+esac
+
+unset NS293_README_ENVVARS
 
 # ---------------------------------------------------------------------------
 # 結果集計
