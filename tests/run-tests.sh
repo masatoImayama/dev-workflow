@@ -21717,6 +21717,62 @@ esac
 unset NS281_CODEX_RUN_BODY NS281_CODEX_GOAL_BODY NS281_GUIDE_BODY
 
 # ---------------------------------------------------------------------------
+# README.md: 環境変数一覧に Epic #267 新設5変数が掲載されている（レビュー#293）
+#
+# DEV_WORKFLOW_SANDBOX_HOST / DEV_WORKFLOW_FORCE_REMOTE / DEV_WORKFLOW_GH_UNAVAILABLE /
+# DEV_WORKFLOW_DOCKER_UNAVAILABLE / DEV_WORKFLOW_SINGLE_BRANCH の5変数が「クラウドマシンから
+# 使う」節等の説明文にのみ散らばっていて、環境変数一覧（正本リスト）から発見できなかった
+# （DEV_WORKFLOW_LANGに対する#246・#251の先例と同じ作法で検査する）。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== README.md: 環境変数一覧に新設5変数が掲載されている（レビュー#293） =="
+
+NS293_README_ENVVARS="$(awk '
+  $0 == "### 環境変数一覧" { flag = 1; next }
+  flag && /^## / { exit }
+  flag { print }
+' "${REPO_ROOT}/README.md")"
+
+for NS293_VAR in DEV_WORKFLOW_SANDBOX_HOST DEV_WORKFLOW_FORCE_REMOTE DEV_WORKFLOW_GH_UNAVAILABLE \
+  DEV_WORKFLOW_DOCKER_UNAVAILABLE DEV_WORKFLOW_SINGLE_BRANCH; do
+  if printf '%s' "$NS293_README_ENVVARS" | grep -Fq -- "$NS293_VAR"; then
+    pass "README.md: 環境変数一覧に ${NS293_VAR} が載っている（レビュー#293）"
+  else
+    fail "README.md: 環境変数一覧に ${NS293_VAR} が載っている（レビュー#293）" \
+      "見つかりません: ${NS293_VAR}"
+  fi
+done
+unset NS293_VAR
+
+# --- DEV_WORKFLOW_SANDBOX_HOST（入力）と DEV_WORKFLOW_SANDBOX_MODE（resolve-sandbox.sh の
+#     出力）の違いが一覧上の説明文から伝わること ---
+if printf '%s' "$NS293_README_ENVVARS" | grep -Fq 'DEV_WORKFLOW_SANDBOX_MODE'; then
+  pass "README.md: 環境変数一覧の DEV_WORKFLOW_SANDBOX_HOST の説明が、出力の DEV_WORKFLOW_SANDBOX_MODE との違いに言及している（レビュー#293）"
+else
+  fail "README.md: 環境変数一覧の DEV_WORKFLOW_SANDBOX_HOST の説明が、出力の DEV_WORKFLOW_SANDBOX_MODE との違いに言及している（レビュー#293）" \
+    "$NS293_README_ENVVARS"
+fi
+
+# --- DEV_WORKFLOW_FORCE_REMOTE がテスト専用ではなく、判定が外れた環境での逃げ道でもあることが
+#     明記されていること（over-engineering観点の指摘: 死んだフラグに見えるリスクへの対処） ---
+case "$NS293_README_ENVVARS" in
+  *'DEV_WORKFLOW_FORCE_REMOTE'*)
+    if printf '%s' "$NS293_README_ENVVARS" | grep -A2 -F 'DEV_WORKFLOW_FORCE_REMOTE' | grep -Fq '逃げ道'; then
+      pass "README.md: DEV_WORKFLOW_FORCE_REMOTEが『判定が外れた環境での逃げ道』として明記されテスト専用ではないと分かる（レビュー#293）"
+    else
+      fail "README.md: DEV_WORKFLOW_FORCE_REMOTEが『判定が外れた環境での逃げ道』として明記されテスト専用ではないと分かる（レビュー#293）" \
+        "$NS293_README_ENVVARS"
+    fi
+    ;;
+  *)
+    fail "README.md: DEV_WORKFLOW_FORCE_REMOTEが『判定が外れた環境での逃げ道』として明記されテスト専用ではないと分かる（レビュー#293）" \
+      "DEV_WORKFLOW_FORCE_REMOTE自体が見つからない" ;;
+esac
+
+unset NS293_README_ENVVARS
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 

@@ -1442,6 +1442,18 @@ DEV_WORKFLOW_FEEDBACK_DIR=path               # 台帳ディレクトリを直接
 DEV_WORKFLOW_FEEDBACK_THRESHOLD=3            # 反映・還流を提案するまでの再現回数（昇格閾値）
 DEV_WORKFLOW_UPSTREAM_REPO=owner/repo        # 還流先（既定: プラグインのマニフェストの repository）
 DEV_WORKFLOW_LANG=ja                         # 人間向け出力の言語（ja|en。未設定・空・不正値なら ja）
+DEV_WORKFLOW_SANDBOX_HOST=1                  # host モードの明示オプトイン（入力。#269）。resolve-sandbox.shの
+                                              # 出力 DEV_WORKFLOW_SANDBOX_MODE とは別名（eval済み環境で再解決した
+                                              # ときに前回の出力を入力として読んでしまう事故を避けるため）
+DEV_WORKFLOW_FORCE_REMOTE=true               # dev_workflow_is_remote の判定を上書きする（true|1で真、他は偽。#268）。
+                                              # テスト専用ではなく、クラウド判定（CLAUDE_CODE_REMOTE）が外れた
+                                              # 環境で人間が手動設定する逃げ道としても使う
+DEV_WORKFLOW_GH_UNAVAILABLE=1                # dev_workflow_gh_available を強制的に偽にする（値の内容は問わない。
+                                              # 実際の gh は呼ばない。#268）
+DEV_WORKFLOW_DOCKER_UNAVAILABLE=1            # dev_workflow_docker_available を強制的に偽にする（値の内容は問わない。
+                                              # 実際の docker は呼ばない。#268）
+DEV_WORKFLOW_SINGLE_BRANCH=1                 # 単一ブランチ運用（wave ブランチを作らない）への切り替えを明示上書き
+                                              # する（=0で無効化。既定はdev_workflow_is_remoteに従う。#278）
 ```
 
 ## Slack通知
