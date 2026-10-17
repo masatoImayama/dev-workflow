@@ -6064,6 +6064,82 @@ NS280_DEDUP_COOLDOWN0_COUNT="$(
 )"
 assert_eq "#280: DEV_WORKFLOW_NOTIFY_COOLDOWN=0なら間引かずに毎回記録する" "2" "$NS280_DEDUP_COOLDOWN0_COUNT"
 
+# ---------------------------------------------------------------------------
+# notify-slack.sh: Epic issueフォールバックの本文からlast_assistant_messageを除外する
+# （wave-review指摘 #285。Slack本文には従来どおり含める。last_assistant_messageは
+# jqが無い環境では常に空になるため、本テストはjqが使える環境でのみ意味を持つ）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== notify-slack.sh: Epic issueフォールバックはlast_assistant_messageを含まない（#285） =="
+
+if command -v jq >/dev/null 2>&1; then
+  NS285_REPO="$(make_temp_repo)"
+  mkdir -p "${NS285_REPO}/.claude"
+  NS285_MARKER="${NS285_REPO}/.claude/.dev-workflow-run"
+  printf '%s\n' "Epic #267" > "$NS285_MARKER"
+
+  NS285_SECRET='機密扱いの直近応答マーカーNS285SECRET'
+  NS285_TRANSCRIPT="$(mktemp "${TMPDIR:-/tmp}/dw-test-ns285-transcript.XXXXXX")"
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n' \
+    "$NS285_SECRET" > "$NS285_TRANSCRIPT"
+
+  # --- Slack側（webhook成功）: last_assistant_messageを従来どおり本文に含む（挙動を変えない） ---
+  NS285_SLACK_SINK="$(mktemp "${TMPDIR:-/tmp}/dw-test-ns285-slack-sink.XXXXXX")"
+  NS285_SLACK_OUT="$(
+    cd "$NS285_REPO" || exit 1
+    SLACK_WEBHOOK_URL="https://example.invalid/webhook" \
+    DEV_WORKFLOW_NOTIFY_SINK="$NS285_SLACK_SINK" \
+    bash "$NS_SCRIPT" stop <<< "{\"transcript_path\":\"${NS285_TRANSCRIPT}\"}" 2>&1
+  )"
+  NS285_SLACK_EXIT=$?
+  NS285_SLACK_BODY="$(read_sink "$NS285_SLACK_SINK")"
+
+  assert_exit_code "#285: stop（Slack成功）はexit 0（既存挙動）" 0 "$NS285_SLACK_EXIT"
+  case "$NS285_SLACK_BODY" in
+    *"$NS285_SECRET"*) pass "#285: Slack本文はlast_assistant_messageを従来どおり含む（回帰確認）" ;;
+    *) fail "#285: Slack本文はlast_assistant_messageを従来どおり含む（回帰確認）" "$NS285_SLACK_BODY" ;;
+  esac
+
+  # stop（RUN_LABELあり）は成否に関わらずマーカーを消すため、fallback検証用に作り直す
+  printf '%s\n' "Epic #267" > "$NS285_MARKER"
+
+  # --- Epic issueフォールバック側（webhook未設定・ghを偽装): last_assistant_messageを含まない ---
+  NS285_FAKE_GH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-ns285-gh.XXXXXX")"
+  NS285_GH_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-ns285-ghcall.XXXXXX")"
+  cat > "${NS285_FAKE_GH_DIR}/gh" <<SH
+#!/bin/bash
+echo "\$*" >> "${NS285_GH_CALL_LOG}"
+exit 0
+SH
+  chmod +x "${NS285_FAKE_GH_DIR}/gh"
+
+  NS285_GH_OUT="$(
+    cd "$NS285_REPO" || exit 1
+    unset SLACK_WEBHOOK_URL
+    PATH="${NS285_FAKE_GH_DIR}:${PATH}" \
+    bash "$NS_SCRIPT" stop <<< "{\"transcript_path\":\"${NS285_TRANSCRIPT}\"}" 2>&1
+  )"
+  NS285_GH_EXIT=$?
+  NS285_GH_CALL="$(cat "$NS285_GH_CALL_LOG")"
+
+  assert_exit_code "#285: stop（フォールバック経路）はexit 0（既存の性質を維持）" 0 "$NS285_GH_EXIT"
+  case "$NS285_GH_CALL" in
+    *"自律実行が停止"*) pass "#285: フォールバック本文にステータス行を含む" ;;
+    *) fail "#285: フォールバック本文にステータス行を含む" "call=[${NS285_GH_CALL}]" ;;
+  esac
+  case "$NS285_GH_CALL" in
+    *"完了前に停止しました"*) pass "#285: フォールバック本文に固定の案内文を含む" ;;
+    *) fail "#285: フォールバック本文に固定の案内文を含む" "call=[${NS285_GH_CALL}]" ;;
+  esac
+  case "$NS285_GH_CALL" in
+    *"$NS285_SECRET"*) fail "#285: Epic issueフォールバック本文はlast_assistant_messageを含まない" "call=[${NS285_GH_CALL}]" ;;
+    *) pass "#285: Epic issueフォールバック本文はlast_assistant_messageを含まない" ;;
+  esac
+else
+  skip "#285: Epic issueフォールバックはlast_assistant_messageを含まない" "jq が見つからないためスキップ"
+fi
+
 # --- ドキュメント: README.md / skills/run/SKILL.md にフォールバックの記述がある ---
 NS280_README="${REPO_ROOT}/README.md"
 case "$(cat "$NS280_README")" in

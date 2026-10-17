@@ -45,6 +45,11 @@
 #   （多重通知にしない。Slack設定済み環境での既存挙動は1ビットも変わらない）。
 #   `core/references/github-access.md` の原則どおり、MCP（mcp__github__*）はシェルから
 #   呼べないため、ここでは「gh を使えるならgh、使えないならローカル記録」の二択にする。
+#   **本文に last_assistant_message（直近応答の末尾最大800文字・無加工）は含めない（#285）。**
+#   stopイベントのSlack本文にはlast_assistant_messageを含めるが、Epic issueフォールバックの
+#   本文はステータス行＋$ARG相当（FALLBACK_DETAIL）のみにする。Slackはユーザーが能動的に
+#   設定した秘匿チャネルだが、Epic issueはリポジトリの共有issueであり、閲覧者の範囲・
+#   永続性が異なるため。
 #
 # 環境変数:
 #   DEV_WORKFLOW_NOTIFY_STOP     — "1" のときのみStop完了通知を送る（既定: 送らない）
@@ -247,6 +252,13 @@ CONTEXT="$CWD"
 [ -n "$BRANCH" ] && CONTEXT="branch: $BRANCH ・ $CWD"
 
 DETAIL=""
+# FALLBACK_DETAIL: Epic issueフォールバック（notify_fallback）にだけ渡す本文（#285）。
+# last_assistant_message（直近応答の末尾最大800文字・無加工）はSlack（DETAIL）専用とし、
+# 共有issueであるEpic issueへは含めない。Slackはユーザーが能動的に設定した秘匿チャネル、
+# Epic issueはリポジトリの共有issueという非対称性が根拠（#280のwave-review指摘）。
+# $ARG（watchdog.sh等の呼び出し側が組み立てた固定文言）は会話内容ではないため、
+# 従来どおりそのままフォールバックにも渡す。
+FALLBACK_DETAIL=""
 case "$EVENT" in
   notification)
     MESSAGE="$(json_field message)"
@@ -264,17 +276,21 @@ case "$EVENT" in
         exit 0 ;;
     esac
     DETAIL="$MESSAGE"
+    # notificationはEpic issueフォールバックへ進まない（下記ガードで除外済み）ため
+    # FALLBACK_DETAILは使われないが、空のままにしておく（会話内容を混ぜない）。
     ;;
   run-complete)
     # 自律実行が最後まで到達した唯一の地点。常に通知する
     HEADLINE=":white_check_mark: 完了${RUN_LABEL:+ — $RUN_LABEL}"
     DETAIL="$ARG"
+    FALLBACK_DETAIL="$ARG"
     ;;
   stop)
     if [ -n "$RUN_LABEL" ]; then
       # マーカーが残ったままのStop = run-completeに到達せず止まった
       HEADLINE=":octagonal_sign: 自律実行が停止 — $RUN_LABEL"
-      DETAIL="完了前に停止しました。エラー・承認待ち・コンテキスト切れの可能性があります。
+      FALLBACK_DETAIL="完了前に停止しました。エラー・承認待ち・コンテキスト切れの可能性があります。"
+      DETAIL="$FALLBACK_DETAIL
 $(last_assistant_message 2>/dev/null || true)"
       # 停止通知は1回だけ。以降のターンで鳴り続けないようマーカーを消す
       rm -f "$RUN_MARKER"
@@ -285,6 +301,9 @@ $(last_assistant_message 2>/dev/null || true)"
       fi
       HEADLINE=":white_check_mark: 応答完了"
       DETAIL="$(last_assistant_message 2>/dev/null || true)"
+      # last_assistant_message以外に載せる固定文言が無いため、フォールバック本文は
+      # ステータス行（$HEADLINE）のみになる（#285）
+      FALLBACK_DETAIL=""
     fi
     ;;
   stall)
@@ -292,20 +311,24 @@ $(last_assistant_message 2>/dev/null || true)"
     # 「モデルの応答待ちで停止」のどちらかを詳細文字列に含めて渡す
     HEADLINE=":rotating_light: 応答なし"
     DETAIL="$ARG"
+    FALLBACK_DETAIL="$ARG"
     ;;
   stall-recovered)
     HEADLINE=":arrow_forward: 応答が再開"
     DETAIL="$ARG"
+    FALLBACK_DETAIL="$ARG"
     ;;
   sleep-gap)
     # スリープ復帰の痕跡。stallとは別イベントなので、通知を見ればストールとの誤報と
     # 区別できる
     HEADLINE=":zzz: スリープ痕跡"
     DETAIL="$ARG"
+    FALLBACK_DETAIL="$ARG"
     ;;
   budget)
     HEADLINE=":hourglass_flowing_sand: 想定時間超過"
     DETAIL="$ARG"
+    FALLBACK_DETAIL="$ARG"
     ;;
   sleep-inhibit-warn)
     # スリープ抑止に失敗した、または対応する手段が無い場合の警告。同じ警告を毎tick
@@ -313,6 +336,7 @@ $(last_assistant_message 2>/dev/null || true)"
     # 見て制御している。ここでは受け取った通知をそのまま送るだけ）
     HEADLINE=":warning: スリープ抑止に失敗"
     DETAIL="$ARG"
+    FALLBACK_DETAIL="$ARG"
     ;;
   *)
     HEADLINE=":information_source: $EVENT"
@@ -378,7 +402,9 @@ else
 fi
 
 if [ "$SLACK_SEND_RC" -ne 0 ] && [ "$EVENT" != "notification" ]; then
-  notify_fallback "$HEADLINE" "$DETAIL"
+  # DETAILではなくFALLBACK_DETAILを渡す。last_assistant_message（会話内容の無加工な抜粋）を
+  # 共有issueであるEpic issueへ持ち込まないため（#285）
+  notify_fallback "$HEADLINE" "$FALLBACK_DETAIL"
 fi
 
 exit 0
