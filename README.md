@@ -52,7 +52,9 @@ claude --plugin-dir /path/to/dev-workflow
   セッション開始時にブロックされます
 - [GitHub CLI (`gh`)](https://cli.github.com/) のインストール・認証は**推奨であり必須ではありません**。
   クラウド（Docker 無しで走る環境）では `gh auth status` が通らないことが多いため、Task #271
-  で非ブロッキング警告に格下げしました。GitHub 操作には MCP バックエンドという代替があります
+  で非ブロッキング警告に格下げしました。GitHub 操作には MCP バックエンドという代替があります。
+  `gh` / MCP の選択規則と操作の対応表は
+  [`core/references/github-access.md`](core/references/github-access.md) が正本です
 - [Docker](https://docs.docker.com/get-docker/) のインストール・起動も**推奨であり必須ではありません**。
   `run` / `goal` でサンドボックス実行を使う場合にのみ必要です。クラウド等で Docker を使わない場合は
   `DEV_WORKFLOW_SANDBOX_HOST=1` で host モードが使えます

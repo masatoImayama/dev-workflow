@@ -667,6 +667,13 @@ run が Epic 開始時に `## 準備コマンド` 節を読み1回だけ実行�
 を1行1マッピング）で受け取る。**節が無ければ何もしない**（既存 Epic の挙動を変えない）。
 差し戻し契約は `check-readability.sh` と同じ（`DEV_WORKFLOW_HOOK_VENDOR` で出し分け）。
 
+## GitHub アクセス（`gh` と MCP の2バックエンド）
+
+GitHub 操作（issue / PR）は `gh`（ローカル既定）と MCP（`mcp__github__*`、クラウド）の
+2バックエンドを持つ。選択規則・操作の対応表・スクリプト層の fail-soft 方針は
+`${CLAUDE_PLUGIN_ROOT}/core/references/github-access.md` が正本である。
+**スキル本文・スクリプトで GitHub 操作が必要になったときに読む。**
+
 ## ハーネス非注入原則
 
 **dev-workflow ハーネス都合のファイル・設定を、駆動先の業務リポジトリに注入しない。**
