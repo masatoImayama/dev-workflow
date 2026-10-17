@@ -656,6 +656,30 @@ else
   pass "host: --detach/--wait も docker を起動しない"
 fi
 
+# --- レーン別キャッシュ env（issue #145 / review #286）: dockerfile モードには
+#     -e 付与・mkdirのend-to-endテストがあるが、host モードは `export` した環境変数が
+#     実行コマンドに実際に継承されることが未検証だった。agent worktree
+#     （LANE_SCOPE=agent-x）で実行し、実行コマンド側から値を読めることを確認する ---
+HOST_LANE_ENV_TMP="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-hostlanecache.XXXXXX")"
+HOST_LANE_ENV_BASE="${HOST_LANE_ENV_TMP}/cargo-registry"
+HOST_LANE_ENV_OUT_FILE="$(mktemp "${TMPDIR:-/tmp}/dw-test-hostlaneenv-out.XXXXXX")"
+
+(
+  cd "$AGENT_WORKTREE_DIR" || exit 1
+  DEV_WORKFLOW_SANDBOX_HOST=1 PATH="${FAKE_BIN_DIR}:${PATH}" \
+    DEV_WORKFLOW_LANE_SCOPED_CACHE_ENV="CARGO_HOME=${HOST_LANE_ENV_BASE}" \
+    bash scripts/sandbox-exec.sh 'printf "%s" "$CARGO_HOME"' > "$HOST_LANE_ENV_OUT_FILE" 2>/dev/null
+)
+
+assert_eq "host: レーン別キャッシュenvが実行コマンドに継承される（<path>/lanes/<scope>、#286）" \
+  "${HOST_LANE_ENV_BASE}/lanes/agent-x" "$(cat "$HOST_LANE_ENV_OUT_FILE")"
+
+if [ -s "$DOCKER_CALLED_MARKER" ]; then
+  fail "host: レーン別キャッシュenv実行時もdockerを起動しない" "docker が呼ばれました: $(cat "$DOCKER_CALLED_MARKER")"
+else
+  pass "host: レーン別キャッシュenv実行時もdockerを起動しない"
+fi
+
 # ---------------------------------------------------------------------------
 # ケース7a: normalize_mount_source（Docker 非依存の純粋関数、issue #25）
 #
