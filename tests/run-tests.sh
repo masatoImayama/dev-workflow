@@ -170,6 +170,7 @@ copy_sandbox_scripts() {
   cp "${REPO_ROOT}/scripts/lib/mount-path.sh"           "${dest}/scripts/lib/mount-path.sh"
   cp "${REPO_ROOT}/scripts/lib/container-membership.sh" "${dest}/scripts/lib/container-membership.sh"
   cp "${REPO_ROOT}/scripts/lib/compose-conflicts.sh"    "${dest}/scripts/lib/compose-conflicts.sh"
+  cp "${REPO_ROOT}/scripts/lib/detect-env.sh"           "${dest}/scripts/lib/detect-env.sh"
   cp "${REPO_ROOT}/Dockerfile.dev"             "${dest}/Dockerfile.dev"
   (
     cd "$dest" || exit 1
@@ -189,6 +190,7 @@ copy_sandbox_scripts_no_dockerfile() {
   cp "${REPO_ROOT}/scripts/lib/mount-path.sh"           "${dest}/scripts/lib/mount-path.sh"
   cp "${REPO_ROOT}/scripts/lib/container-membership.sh" "${dest}/scripts/lib/container-membership.sh"
   cp "${REPO_ROOT}/scripts/lib/compose-conflicts.sh"    "${dest}/scripts/lib/compose-conflicts.sh"
+  cp "${REPO_ROOT}/scripts/lib/detect-env.sh"           "${dest}/scripts/lib/detect-env.sh"
   (
     cd "$dest" || exit 1
     git add scripts
@@ -13083,6 +13085,157 @@ assert_eq "規約パス: worktreeから呼んでもイメージタグ(hash含む
 
 # 受け入れ条件9（shellcheck / bash -n）は冒頭の全 scripts/*.sh 走査で resolve-sandbox.sh も
 # 対象になっているため、ここでの追加テストは不要。
+
+# ---------------------------------------------------------------------------
+# resolve-sandbox.sh: host モード（Docker 無しで走るクラウド環境向け、Task #269）
+#
+# scripts/lib/detect-env.sh（#268）の dev_workflow_is_remote /
+# dev_workflow_docker_available を使って判定する。実 docker には触れず、上書き
+# 環境変数と偽コマンド（PATH 先頭の docker スタブ）の両方で擬似再現する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== resolve-sandbox.sh: host モード（#269） =="
+
+# --- host判定が成立しない環境（is_remote偽）では、既存の解決結果が1ビットも
+#     変わらないことを固定する。あわせて docker を一切呼ばないことも確認する
+#     （呼んでいれば DEV_WORKFLOW_DOCKER_UNAVAILABLE 等の上書きなしに偽コマンドへ
+#     到達し、マーカーファイルが残るはず） ---
+RSH_NOCALL_REPO="$(make_temp_repo)"
+cat > "${RSH_NOCALL_REPO}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+(
+  cd "$RSH_NOCALL_REPO" || exit 1
+  git add Dockerfile.dev
+  git commit -q -m "add dockerfile"
+) >/dev/null 2>&1
+
+RSH_NOCALL_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-rsh-nocall-bin.XXXXXX")"
+RSH_NOCALL_MARKER="${RSH_NOCALL_BIN}/docker-called-marker"
+cat > "${RSH_NOCALL_BIN}/docker" <<FAKE_DOCKER_RSH_NOCALL
+#!/bin/bash
+echo "\$@" >> "${RSH_NOCALL_MARKER}"
+exit 1
+FAKE_DOCKER_RSH_NOCALL
+chmod +x "${RSH_NOCALL_BIN}/docker"
+
+RSH_NOCALL_OUTPUT="$(
+  cd "$RSH_NOCALL_REPO" || exit 1
+  unset CLAUDE_CODE_REMOTE DEV_WORKFLOW_FORCE_REMOTE DEV_WORKFLOW_SANDBOX_HOST
+  PATH="${RSH_NOCALL_BIN}:${PATH}" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "host判定不成立（is_remote偽）: mode=dockerfileのまま変わらない（#269）" \
+  "dockerfile" "$(plan_value DEV_WORKFLOW_SANDBOX_MODE "$RSH_NOCALL_OUTPUT")"
+
+if [ -f "$RSH_NOCALL_MARKER" ]; then
+  fail "host判定不成立（is_remote偽）: dockerを一切呼ばない（#269）" \
+    "docker が呼ばれました: $(cat "$RSH_NOCALL_MARKER")"
+else
+  pass "host判定不成立（is_remote偽）: dockerを一切呼ばない（#269）"
+fi
+
+# --- DEV_WORKFLOW_SANDBOX_HOST を明示指定すると、Dockerfile.dev が存在しても
+#     mode=host になり、IMAGE/DOCKERFILE/COMPOSE/CONTEXT はすべて空になる ---
+RSH_EXPLICIT_REPO="$(make_temp_repo)"
+cat > "${RSH_EXPLICIT_REPO}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+(
+  cd "$RSH_EXPLICIT_REPO" || exit 1
+  git add Dockerfile.dev
+  git commit -q -m "add dockerfile"
+) >/dev/null 2>&1
+
+RSH_EXPLICIT_OUTPUT="$(
+  cd "$RSH_EXPLICIT_REPO" || exit 1
+  unset CLAUDE_CODE_REMOTE DEV_WORKFLOW_FORCE_REMOTE
+  DEV_WORKFLOW_SANDBOX_HOST=1 bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "DEV_WORKFLOW_SANDBOX_HOST=1: Dockerfile.devが存在してもmode=host（#269）" \
+  "host" "$(plan_value DEV_WORKFLOW_SANDBOX_MODE "$RSH_EXPLICIT_OUTPUT")"
+assert_eq "DEV_WORKFLOW_SANDBOX_HOST=1: DEV_WORKFLOW_SANDBOX_DOCKERFILEは空（#269）" \
+  "''" "$(plan_value DEV_WORKFLOW_SANDBOX_DOCKERFILE "$RSH_EXPLICIT_OUTPUT")"
+assert_eq "DEV_WORKFLOW_SANDBOX_HOST=1: DEV_WORKFLOW_SANDBOX_IMAGEは空（#269）" \
+  "''" "$(plan_value DEV_WORKFLOW_SANDBOX_IMAGE "$RSH_EXPLICIT_OUTPUT")"
+assert_eq "DEV_WORKFLOW_SANDBOX_HOST=1: DEV_WORKFLOW_SANDBOX_COMPOSEは空（#269）" \
+  "''" "$(plan_value DEV_WORKFLOW_SANDBOX_COMPOSE "$RSH_EXPLICIT_OUTPUT")"
+assert_eq "DEV_WORKFLOW_SANDBOX_HOST=1: DEV_WORKFLOW_SANDBOX_CONTEXTは空（#269）" \
+  "''" "$(plan_value DEV_WORKFLOW_SANDBOX_CONTEXT "$RSH_EXPLICIT_OUTPUT")"
+
+# --- クラウド判定（上書き env で擬似再現）かつ Docker 利用不可 -> mode=host ---
+RSH_CLOUD_NODOCKER_REPO="$(make_temp_repo)"
+cat > "${RSH_CLOUD_NODOCKER_REPO}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+(
+  cd "$RSH_CLOUD_NODOCKER_REPO" || exit 1
+  git add Dockerfile.dev
+  git commit -q -m "add dockerfile"
+) >/dev/null 2>&1
+
+RSH_CLOUD_NODOCKER_OUTPUT="$(
+  cd "$RSH_CLOUD_NODOCKER_REPO" || exit 1
+  unset DEV_WORKFLOW_SANDBOX_HOST
+  DEV_WORKFLOW_FORCE_REMOTE=true DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "クラウド判定かつDocker利用不可: mode=host（#269）" \
+  "host" "$(plan_value DEV_WORKFLOW_SANDBOX_MODE "$RSH_CLOUD_NODOCKER_OUTPUT")"
+
+# --- クラウド判定（上書き env で擬似再現）かつ Docker 利用可 -> 従来どおり
+#     dockerfile に解決される（自前で Docker を立てたクラウド環境のため） ---
+RSH_CLOUD_DOCKEROK_BIN="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-rsh-cloud-dockerok-bin.XXXXXX")"
+cat > "${RSH_CLOUD_DOCKEROK_BIN}/docker" <<'FAKE_DOCKER_RSH_OK'
+#!/bin/bash
+if [ "$1" = "info" ]; then
+  exit 0
+fi
+exit 1
+FAKE_DOCKER_RSH_OK
+chmod +x "${RSH_CLOUD_DOCKEROK_BIN}/docker"
+
+RSH_CLOUD_DOCKEROK_REPO="$(make_temp_repo)"
+cat > "${RSH_CLOUD_DOCKEROK_REPO}/Dockerfile.dev" <<'EOF'
+FROM alpine
+EOF
+(
+  cd "$RSH_CLOUD_DOCKEROK_REPO" || exit 1
+  git add Dockerfile.dev
+  git commit -q -m "add dockerfile"
+) >/dev/null 2>&1
+
+RSH_CLOUD_DOCKEROK_OUTPUT="$(
+  cd "$RSH_CLOUD_DOCKEROK_REPO" || exit 1
+  unset DEV_WORKFLOW_SANDBOX_HOST DEV_WORKFLOW_DOCKER_UNAVAILABLE
+  DEV_WORKFLOW_FORCE_REMOTE=true PATH="${RSH_CLOUD_DOCKEROK_BIN}:${PATH}" bash "$RESOLVE_SANDBOX_SCRIPT"
+)"
+
+assert_eq "クラウド判定かつDocker利用可: 従来どおりmode=dockerfileに解決される（#269）" \
+  "dockerfile" "$(plan_value DEV_WORKFLOW_SANDBOX_MODE "$RSH_CLOUD_DOCKEROK_OUTPUT")"
+
+# --- --print は host になった理由（明示指定／クラウド判定）を併記する ---
+RSH_PRINT_EXPLICIT_OUT="$(
+  cd "$RSH_EXPLICIT_REPO" || exit 1
+  unset CLAUDE_CODE_REMOTE DEV_WORKFLOW_FORCE_REMOTE
+  DEV_WORKFLOW_SANDBOX_HOST=1 bash "$RESOLVE_SANDBOX_SCRIPT" --print
+)"
+case "$RSH_PRINT_EXPLICIT_OUT" in
+  *"host"*"明示指定"*) pass "--print: host(明示指定)の理由が併記される（#269）" ;;
+  *) fail "--print: host(明示指定)の理由が併記される（#269）" "$RSH_PRINT_EXPLICIT_OUT" ;;
+esac
+
+RSH_PRINT_CLOUD_OUT="$(
+  cd "$RSH_CLOUD_NODOCKER_REPO" || exit 1
+  unset DEV_WORKFLOW_SANDBOX_HOST
+  DEV_WORKFLOW_FORCE_REMOTE=true DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 bash "$RESOLVE_SANDBOX_SCRIPT" --print
+)"
+case "$RSH_PRINT_CLOUD_OUT" in
+  *"host"*"クラウド判定"*) pass "--print: host(クラウド判定)の理由が併記される（#269）" ;;
+  *) fail "--print: host(クラウド判定)の理由が併記される（#269）" "$RSH_PRINT_CLOUD_OUT" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # sandbox-exec.sh --init: サンドボックス定義の雛形を規約パスに生成する（Task #220）

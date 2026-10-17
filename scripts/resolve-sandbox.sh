@@ -10,14 +10,18 @@
 #   bash scripts/resolve-sandbox.sh --print            # 人間向けに表示する
 #
 # 出力する変数:
-#   DEV_WORKFLOW_SANDBOX_MODE       dockerfile | compose | none
-#   DEV_WORKFLOW_SANDBOX_IMAGE      docker run に渡すイメージ名（compose時は空）
-#   DEV_WORKFLOW_SANDBOX_COMPOSE    使用する compose ファイル（dockerfile時は空）
-#   DEV_WORKFLOW_SANDBOX_DOCKERFILE 使用する Dockerfile（compose時・DEV_WORKFLOW_DOCKER_IMAGE指定時は空）
-#   DEV_WORKFLOW_SANDBOX_CONTEXT    docker build のビルドコンテキスト（compose時・
+#   DEV_WORKFLOW_SANDBOX_MODE       host | dockerfile | compose | none
+#   DEV_WORKFLOW_SANDBOX_IMAGE      docker run に渡すイメージ名（host時・compose時は空）
+#   DEV_WORKFLOW_SANDBOX_COMPOSE    使用する compose ファイル（host時・dockerfile時は空）
+#   DEV_WORKFLOW_SANDBOX_DOCKERFILE 使用する Dockerfile（host時・compose時・DEV_WORKFLOW_DOCKER_IMAGE指定時は空）
+#   DEV_WORKFLOW_SANDBOX_CONTEXT    docker build のビルドコンテキスト（host時・compose時・
 #                                   DEV_WORKFLOW_DOCKER_IMAGE指定時は空）
 #
 # 参照する環境変数（いずれも任意。未設定なら既定の探索に従う）:
+#   DEV_WORKFLOW_SANDBOX_HOST          非空を指定すると Docker を使わず mode=host を強制する
+#                                     （出力の DEV_WORKFLOW_SANDBOX_MODE とは別名にしている。
+#                                     同名だと eval 済みの環境で再度 resolve すると
+#                                     前回の出力を入力として読んでしまう二重の意味を持つため）
 #   DEV_WORKFLOW_DOCKER_IMAGE          既存イメージを使う（ビルドしない。タグに hash は付けない）
 #   DEV_WORKFLOW_DOCKER_COMPOSE_FILE   使用する compose ファイルのパス
 #   DEV_WORKFLOW_DOCKERFILE            使用する Dockerfile のパス（既定: Dockerfile.dev）
@@ -25,14 +29,20 @@
 #   DEV_WORKFLOW_SANDBOX_HOME          規約パスのベースディレクトリ
 #                                     （既定: ${HOME}/.claude/dev-workflow/sandbox）
 #
-# 解決順（issue #120。上から順に、最初に成立したものを採用する）:
-#   1. DEV_WORKFLOW_DOCKER_IMAGE が非空                                    -> mode=dockerfile（既存イメージ）
-#   2. ${DEV_WORKFLOW_DOCKERFILE:-Dockerfile.dev} が存在                   -> mode=dockerfile
-#   3. ${DEV_WORKFLOW_DOCKER_COMPOSE_FILE:-docker-compose.dev.yml} が存在  -> mode=compose
-#   4. <SANDBOX_HOME>/<repo>/Dockerfile.dev が存在                         -> mode=dockerfile（規約パス・新規）
-#   5. <SANDBOX_HOME>/<repo>/docker-compose.dev.yml が存在                 -> mode=compose（規約パス・新規）
-#   6. 上記いずれも不成立                                                  -> mode=none
+# 解決順（issue #120, #269。上から順に、最初に成立したものを採用する）:
+#   0.  DEV_WORKFLOW_SANDBOX_HOST が非空                                   -> mode=host（明示指定・新規）
+#   0'. クラウド判定（dev_workflow_is_remote）かつ Docker 利用不可          -> mode=host（クラウド判定・新規）
+#   1.  DEV_WORKFLOW_DOCKER_IMAGE が非空                                   -> mode=dockerfile（既存イメージ）
+#   2.  ${DEV_WORKFLOW_DOCKERFILE:-Dockerfile.dev} が存在                  -> mode=dockerfile
+#   3.  ${DEV_WORKFLOW_DOCKER_COMPOSE_FILE:-docker-compose.dev.yml} が存在 -> mode=compose
+#   4.  <SANDBOX_HOME>/<repo>/Dockerfile.dev が存在                        -> mode=dockerfile（規約パス・新規）
+#   5.  <SANDBOX_HOME>/<repo>/docker-compose.dev.yml が存在                -> mode=compose（規約パス・新規）
+#   6.  上記いずれも不成立                                                 -> mode=none
 #
+# 0/0' はクラウド環境（Docker 無しで走る Claude Desktop 等）のための新規フォールバックで、
+# 「クラウド判定かつ Docker 利用可」（自前で Docker を立てたクラウド環境）では評価されず
+# 1以降へ進む。is_remote でない環境（通常のローカル・CI）では 0' の docker 可否チェック
+# 自体を呼ばないため、host 判定が成立しない環境では解決結果が1ビットも変わらない。
 # 1〜3 が成立する限り既存挙動は変わらない（完全後方互換）。4/5 は 2 と 3 がともに
 # 外れた場合にのみ評価される、リポジトリを汚さない供給経路のフォールバックである。
 # <repo> はイメージタグに使う REPO と同一の解決方法（git-common-dir 由来。worktree の
@@ -53,6 +63,10 @@
 #   その場合は sandbox-exec.sh の --rebuild で明示的に再ビルドする。
 
 set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/detect-env.sh
+. "${SCRIPT_DIR}/lib/detect-env.sh"
 
 PRINT=0
 [ "${1:-}" = "--print" ] && PRINT=1
@@ -148,24 +162,39 @@ resolve_build_context() {
   printf '%s' "$dockerfile_dir"
 }
 
+# host 判定（#269）。明示指定、またはクラウド判定かつ Docker 利用不可の場合のみ
+# mode=host にする。is_remote が偽の通常環境（ローカル・CI）では
+# dev_workflow_docker_available を呼ばない（docker プロセスを起動しない）ため、
+# host 判定が成立しない環境では以降の解決結果が1ビットも変わらない。
+HOST_REASON=""
+if [ -n "${DEV_WORKFLOW_SANDBOX_HOST:-}" ]; then
+  MODE="host"
+  HOST_REASON="明示指定（DEV_WORKFLOW_SANDBOX_HOST）"
+elif dev_workflow_is_remote && ! dev_workflow_docker_available; then
+  MODE="host"
+  HOST_REASON="クラウド判定（Docker 利用不可）"
+fi
+
 # 明示指定されたイメージが最優先（ビルドを省略できる。hash は付けない）
-if [ -n "${DEV_WORKFLOW_DOCKER_IMAGE:-}" ]; then
-  MODE="dockerfile"
-  IMAGE="$DEV_WORKFLOW_DOCKER_IMAGE"
-elif [ -f "$DOCKERFILE" ]; then
-  MODE="dockerfile"
-  USE_DOCKERFILE="$DOCKERFILE"
-elif [ -f "$COMPOSE_FILE" ]; then
-  MODE="compose"
-  USE_COMPOSE="$COMPOSE_FILE"
-elif [ -n "$CONVENTION_DOCKERFILE" ] && [ -f "$CONVENTION_DOCKERFILE" ]; then
-  MODE="dockerfile"
-  USE_DOCKERFILE="$CONVENTION_DOCKERFILE"
-  CONVENTION_USED="$CONVENTION_DOCKERFILE"
-elif [ -n "$CONVENTION_COMPOSE" ] && [ -f "$CONVENTION_COMPOSE" ]; then
-  MODE="compose"
-  USE_COMPOSE="$CONVENTION_COMPOSE"
-  CONVENTION_USED="$CONVENTION_COMPOSE"
+if [ "$MODE" != "host" ]; then
+  if [ -n "${DEV_WORKFLOW_DOCKER_IMAGE:-}" ]; then
+    MODE="dockerfile"
+    IMAGE="$DEV_WORKFLOW_DOCKER_IMAGE"
+  elif [ -f "$DOCKERFILE" ]; then
+    MODE="dockerfile"
+    USE_DOCKERFILE="$DOCKERFILE"
+  elif [ -f "$COMPOSE_FILE" ]; then
+    MODE="compose"
+    USE_COMPOSE="$COMPOSE_FILE"
+  elif [ -n "$CONVENTION_DOCKERFILE" ] && [ -f "$CONVENTION_DOCKERFILE" ]; then
+    MODE="dockerfile"
+    USE_DOCKERFILE="$CONVENTION_DOCKERFILE"
+    CONVENTION_USED="$CONVENTION_DOCKERFILE"
+  elif [ -n "$CONVENTION_COMPOSE" ] && [ -f "$CONVENTION_COMPOSE" ]; then
+    MODE="compose"
+    USE_COMPOSE="$CONVENTION_COMPOSE"
+    CONVENTION_USED="$CONVENTION_COMPOSE"
+  fi
 fi
 
 if [ "$MODE" = "dockerfile" ] && [ -n "$USE_DOCKERFILE" ]; then
@@ -184,6 +213,9 @@ fi
 
 if [ "$PRINT" -eq 1 ]; then
   case "$MODE" in
+    host)
+      echo "サンドボックス: hostモード（${HOST_REASON}）"
+      ;;
     dockerfile)
       if [ -n "$USE_DOCKERFILE" ]; then
         if [ -n "$CONVENTION_USED" ]; then
