@@ -290,14 +290,14 @@ fi
 
 # mode=dockerfile / mode=compose: 実際に Docker が必要になるのはここ。SessionStart
 # （check-prerequisites.sh）は非ブロッキング警告止まりなので（#271）、必須判定はここで
-# 行い、不足していれば停止する（従来 SessionStart が担っていたブロック責務の移設）
+# 行い、不足していれば停止する（従来 SessionStart が担っていたブロック責務の移設）。
+# 判定は scripts/lib/detect-env.sh の dev_workflow_docker_available に委譲する（独自の
+# command -v docker / docker info 再実装はしない。#283 と同じアンチパターンの再発防止。#287）
+# shellcheck disable=SC1091
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/detect-env.sh"
 if printf '%s\n' "$PLAN" | grep -qE '^mode=(dockerfile|compose)$'; then
-  if ! command -v docker >/dev/null 2>&1; then
-    echo "ERROR: docker コマンドが見つかりません。https://docs.docker.com/get-docker/ からインストールしてください。"
-    exit 1
-  fi
-  if ! docker info >/dev/null 2>&1; then
-    echo "ERROR: Docker デーモンが起動していません。Docker Desktop を起動してください。"
+  if ! dev_workflow_docker_available; then
+    echo "ERROR: Docker が使用できません（docker コマンド未検出、またはデーモン未起動）。https://docs.docker.com/get-docker/ からインストールするか、Docker Desktop を起動してください。"
     exit 1
   fi
 fi
