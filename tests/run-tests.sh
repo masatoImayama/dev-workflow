@@ -2972,6 +2972,110 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# check-prerequisites.sh が detect-env.sh の判定関数を再利用し、上書き環境変数が
+# 一貫して効くこと（レビュー指摘 #283）
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== check-prerequisites.sh: detect-env.sh への委譲・上書き変数の一貫性（#283） =="
+
+# --- check-prerequisites.sh が scripts/lib/detect-env.sh を source している（静的検査） ---
+if grep -qF 'source "$(dirname "${BASH_SOURCE[0]}")/lib/detect-env.sh"' "$CHECK_PREREQS_SCRIPT"; then
+  pass "check-prerequisites.sh: scripts/lib/detect-env.sh をsourceしている（#283）"
+else
+  fail "check-prerequisites.sh: scripts/lib/detect-env.sh をsourceしている（#283）"
+fi
+
+docker_warning_message_with_env() {
+  # docker_warning_message_with_env <PATH> <DEV_WORKFLOW_DOCKER_UNAVAILABLE値>
+  # DEV_WORKFLOW_DOCKER_UNAVAILABLE を指定して docker_warning_message を呼び出し、
+  # 標準出力を返す（stderr は捨てる）。空文字を渡せば未設定として扱われる。
+  local fake_path="$1" override="$2"
+  (
+    # shellcheck source=../scripts/check-prerequisites.sh
+    source "$CHECK_PREREQS_SCRIPT"
+    PATH="$fake_path" DEV_WORKFLOW_DOCKER_UNAVAILABLE="$override" docker_warning_message
+  ) 2>/dev/null
+}
+
+gh_warning_message_with_env() {
+  # gh_warning_message_with_env <PATH> <DEV_WORKFLOW_GH_UNAVAILABLE値>
+  local fake_path="$1" override="$2"
+  (
+    # shellcheck source=../scripts/check-prerequisites.sh
+    source "$CHECK_PREREQS_SCRIPT"
+    PATH="$fake_path" DEV_WORKFLOW_GH_UNAVAILABLE="$override" gh_warning_message
+  ) 2>/dev/null
+}
+
+# --- 実際には docker が使える（fake docker は常に成功）のに、
+#     DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 を指定すると警告が出る（上書きが効く、#283） ---
+PREREQ283_DOCKER_OVERRIDE="$(docker_warning_message_with_env "${PREREQ271_DOCKER_OK_BIN}:${PATH}" "1")"
+case "$PREREQ283_DOCKER_OVERRIDE" in
+  *"インストールされていません"*|*"デーモンが起動していません"*)
+    pass "docker_warning_message: DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 を指定すると実際のdocker状態に関わらず警告が出る（#283）" ;;
+  *)
+    fail "docker_warning_message: DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 を指定すると実際のdocker状態に関わらず警告が出る（#283）" \
+      "message=[${PREREQ283_DOCKER_OVERRIDE}]" ;;
+esac
+
+# --- 上書きを指定しない（空文字）場合は、docker が使えるときと同じく警告が出ない（既存挙動の回帰確認） ---
+PREREQ283_DOCKER_NO_OVERRIDE="$(docker_warning_message_with_env "${PREREQ271_DOCKER_OK_BIN}:${PATH}" "")"
+assert_eq "docker_warning_message: DEV_WORKFLOW_DOCKER_UNAVAILABLEが空ならdockerが使えるとき何も出力しない（#283）" \
+  "" "$PREREQ283_DOCKER_NO_OVERRIDE"
+
+# --- 実際には gh が使える（fake gh は常に成功）のに、
+#     DEV_WORKFLOW_GH_UNAVAILABLE=1 を指定すると警告が出る（上書きが効く、#283） ---
+PREREQ283_GH_OVERRIDE="$(gh_warning_message_with_env "${PREREQ271_GH_OK_BIN}:${PATH}" "1")"
+case "$PREREQ283_GH_OVERRIDE" in
+  *"インストールされていません"*|*"未認証です"*|*"到達できません"*)
+    pass "gh_warning_message: DEV_WORKFLOW_GH_UNAVAILABLE=1 を指定すると実際のgh状態に関わらず警告が出る（#283）" ;;
+  *)
+    fail "gh_warning_message: DEV_WORKFLOW_GH_UNAVAILABLE=1 を指定すると実際のgh状態に関わらず警告が出る（#283）" \
+      "message=[${PREREQ283_GH_OVERRIDE}]" ;;
+esac
+
+# --- 上書きを指定しない（空文字）場合は、ghが使えるときと同じく警告が出ない（既存挙動の回帰確認） ---
+PREREQ283_GH_NO_OVERRIDE="$(gh_warning_message_with_env "${PREREQ271_GH_OK_BIN}:${PATH}" "")"
+assert_eq "gh_warning_message: DEV_WORKFLOW_GH_UNAVAILABLEが空ならghが使えるとき何も出力しない（#283）" \
+  "" "$PREREQ283_GH_NO_OVERRIDE"
+
+# --- check-prerequisites.sh 本体を上書き変数つきで実行しても exit 0 のまま（ブロックしない） ---
+#     実際の docker/gh は fake（常に成功）に差し替え、上書き変数だけで警告へ倒す
+PREREQ283_FULL_REPO="$(make_temp_repo)"
+PREREQ283_FULL_STDERR="$(mktemp "${TMPDIR:-/tmp}/dw-test-prereq283-full-stderr.XXXXXX")"
+PREREQ283_FULL_EXIT=0
+(
+  cd "$PREREQ283_FULL_REPO" || exit 1
+  PATH="${PREREQ271_DOCKER_OK_BIN}:${PREREQ271_GH_OK_BIN}:${PATH}" \
+    DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 DEV_WORKFLOW_GH_UNAVAILABLE=1 \
+    bash "$CHECK_PREREQS_SCRIPT" 1>/dev/null 2>"$PREREQ283_FULL_STDERR"
+) || PREREQ283_FULL_EXIT=$?
+
+assert_exit_code "check-prerequisites.sh: 上書き変数指定時もexit 0のまま（ブロックしない、#283）" \
+  0 "$PREREQ283_FULL_EXIT"
+
+if grep -q "警告" "$PREREQ283_FULL_STDERR"; then
+  pass "check-prerequisites.sh: 上書き変数指定時に本体からも警告がstderrに出る（#283）"
+else
+  fail "check-prerequisites.sh: 上書き変数指定時に本体からも警告がstderrに出る（#283）" \
+    "stderr=[$(cat "$PREREQ283_FULL_STDERR")]"
+fi
+
+# --- gitリポジトリ外のブロック（exit 2）は上書き変数の有無に関わらず従来どおり維持されている ---
+PREREQ283_NONGIT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-prereq283-nongit.XXXXXX")"
+PREREQ283_NONGIT_EXIT=0
+(
+  cd "$PREREQ283_NONGIT_DIR" || exit 1
+  PATH="${PREREQ271_DOCKER_OK_BIN}:${PREREQ271_GH_OK_BIN}:${PATH}" \
+    DEV_WORKFLOW_DOCKER_UNAVAILABLE=1 DEV_WORKFLOW_GH_UNAVAILABLE=1 \
+    bash "$CHECK_PREREQS_SCRIPT" 1>/dev/null 2>/dev/null
+) || PREREQ283_NONGIT_EXIT=$?
+
+assert_exit_code "check-prerequisites.sh: gitリポジトリ外のブロック（exit 2）は上書き変数指定時も維持される（#283）" \
+  2 "$PREREQ283_NONGIT_EXIT"
+
+# ---------------------------------------------------------------------------
 # 検出時の警告から dev-workflow:setup への導線（Task #222）
 # ---------------------------------------------------------------------------
 
