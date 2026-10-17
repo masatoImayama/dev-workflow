@@ -196,6 +196,7 @@ Codex が非対応なのは 3.3.3 の worktree 隔離の粒度による制約（
 Epic #267 でClaude版（`skills/run/SKILL.md`）に入れたクラウド対応（host モードの受け入れ・
 GitHub操作の抽象化・単一ブランチ運用）を、Codex版（`skills-codex/dev-workflow-run/SKILL.md`）
 にも反映した（当初 Codex 版は未追随のままだった。#287のレビュー指摘と同種の取りこぼし）。
+設計判断の背景・却下した代案は `docs/adr/0013-cloud-session-host-mode.md` を参照。
 
 | 項目 | Claude Code | Codex | 一致／divergence |
 | --- | --- | --- | --- |

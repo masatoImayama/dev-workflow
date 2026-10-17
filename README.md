@@ -48,6 +48,9 @@ claude --plugin-dir /path/to/dev-workflow
 
 ## クラウドマシンから使う
 
+**クラウドマシン自体を Docker sandbox の代替隔離と認め、Docker が使えない環境向けに
+host モードを正式化している（設計判断の詳細は `docs/adr/0013-cloud-session-host-mode.md`）。**
+
 上記「インストール」はユーザーレベル設定（`~/.claude/settings.json`）にプラグインの有効化が
 閉じる方法である。**Claude Code のクラウドセッション（使い捨てコンテナ）はこのユーザー設定を
 引き継がない。** さらに `/plugin marketplace add` で追加したマーケットプレイスの
@@ -591,7 +594,8 @@ main（保護: 人間のみマージ可）
 
 ### 単一ブランチ運用（クラウド等。Task #278）
 
-クラウドセッションでは**指定された1本のブランチ以外へのpushが想定されていない**（Epic #267 D6）。
+クラウドセッションでは**指定された1本のブランチ以外へのpushが想定されていない**（Epic #267 D6。
+`docs/adr/0013-cloud-session-host-mode.md`）。
 上記のウェーブ・waveブランチ運用（Epicブランチと、ウェーブごとの一時wave ブランチの2段構成）は、
 この制約の下では成立しない。そのため、次の条件でwave ブランチを作らない**単一ブランチ運用**に
 切り替わる。
@@ -1529,6 +1533,11 @@ https://hooks.slack.com/services/XXX/YYY/ZZZ
   `api.github.com` が403等）、または Epic 番号が取れない場合は、
   `.claude/.dev-workflow-notify-fallback.log` にローカル記録するだけに退く
   （**いずれの場合も run は止めない**）
+- **Epic issueコメントの本文には、直近応答の抜粋（`last_assistant_message`）を含めない。**
+  Slack webhook はユーザーが能動的に設定する秘匿チャネルだが、Epic issueはリポジトリの
+  共有・永続記録であり、閲覧者の範囲・永続性が異なる。本文はステータス行＋`$ARG`相当に
+  限定する（issue #285。経緯は `docs/adr/0013-cloud-session-host-mode.md`「教訓1」参照）。
+  Slack本文には従来どおり含める（Slack経路の挙動は変えない）
 - 連続する同一内容は、既存の `.claude/.dev-workflow-notify-last` による抑止
   （`DEV_WORKFLOW_NOTIFY_COOLDOWN` 秒）で間引く
 - **Slack が生きている（送信に成功する）場合はこのフォールバックは一切発生しない**
