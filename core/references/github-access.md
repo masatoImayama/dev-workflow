@@ -44,6 +44,21 @@ GitHub 操作は `mcp__github__*`（MCP バックエンド）前提になる。
 | issue 一覧（ラベル検索） | `gh issue list --label` | `mcp__github__*` の該当ツール（issue 検索） |
 | PR 作成 | `gh pr create` | `mcp__github__*` の該当ツール（PR 作成） |
 
+### ブランチ操作は対応表の外にある（#296）
+
+**ブランチの作成・push は `gh` でも MCP でもなく `git` が行う。** そのため上の選択規則は
+適用されない。クラウドで効く制約は 403 ではなく**push 先の制約**である。
+
+- クラウドセッションは**指定されたブランチ以外への push が想定されていない**（Epic #267 の実測）
+- したがって `epic/epicNN/...` のような**新規ブランチの push は通らない**
+- 対応: **クラウドでは planner 側でブランチを作らない**（`core/roles/planner.md` Phase 3 /
+  `skills/epic/SKILL.md`「Epicブランチの作成」）。`run` が単一ブランチ運用モードで
+  セッション指定ブランチを Epic ブランチとして扱う（`EPIC_BRANCH="$SESSION_BRANCH"`）
+- `run` の push も対象がセッション指定ブランチと異なれば**停止する**（#278 で実装済み）
+
+判定に使うのは `dev_workflow_gh_available` ではなく `dev_workflow_is_remote` である
+（GitHub API の到達性とは別の制約であるため）。
+
 MCP 側の具体的なツール名は、MCP サーバーの実装（接続した `github` MCP サーバーの
 提供ツール）に依存するため、この表では固定しない。`dev_workflow_gh_available` が偽と
 判定された時点で、エージェントは接続済みの `mcp__github__*` ツール一覧から該当する

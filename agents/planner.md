@@ -60,8 +60,10 @@ GitHub操作（issue作成・コメント等）は `gh` が使えなければ MC
 共通ルールの「ラベル」「タスクの粒度」に従ってラベルを用意したうえで、以下の順に作成する。
 
 1. Epic issue を作成する（`epic` ラベル、仕様書・計画書を `<details>` タグで本文に埋め込む）
-2. Epic issue番号を使って `epic/epic[番号]/[機能名]` ブランチを作成・push する
-3. Epic issue本文にブランチ名を反映する
+2. Epic issue番号を使って `epic/epic[番号]/[機能名]` ブランチを作成・push する。
+   **クラウドセッション（`dev_workflow_is_remote`）では作らない**（指定ブランチ以外への
+   push が通らないため。ブランチ作成は `run` に委ねる。#296）
+3. Epic issue本文にブランチ名を反映する（クラウドで作らなかった場合は未確定である旨を書く）
 4. 各タスクの Task issue を作成する（`task` ラベル、ブランチ名を記載）。作成時は次の2点を必ず満たす
 5. Epic issue の本文に Task issue のチェックリストを追記する
 
@@ -263,11 +265,23 @@ Task issue は、それ単体を読むだけで実装に着手できるように
 - 前提となる背景（なぜこの変更が必要か）
 
 ```bash
-# Epic issue作成後にブランチ作成
-git checkout main && git pull
-git checkout -b "epic/epic[番号]/[機能名]"
-git push -u origin "epic/epic[番号]/[機能名]"
+# Epic issue作成後にブランチ作成（クラウドでは作らない。#296）
+# shellcheck disable=SC1091
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/detect-env.sh"
+
+if dev_workflow_is_remote; then
+  echo "NOTE: クラウドセッションのためEpicブランチを作成しません（runがセッション指定ブランチを使います）"
+else
+  git checkout main && git pull
+  git checkout -b "epic/epic[番号]/[機能名]"
+  git push -u origin "epic/epic[番号]/[機能名]"
+fi
 ```
+
+**クラウドでブランチを作らない理由**: クラウドセッションは指定されたブランチ以外への push が
+想定されていない（Epic #267 の実測）。`run` は単一ブランチ運用モードでセッション指定ブランチを
+Epic ブランチとして扱うため（`EPIC_BRANCH="$SESSION_BRANCH"`）、planner 側で作る必要が無い。
+**運用上は、クラウドで `run` を回す前に人間が対象ブランチを決めてセッションを開始する。**
 
 ### Phase 4: 確認依頼
 

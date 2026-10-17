@@ -8169,13 +8169,15 @@ DOC55_README="${REPO_ROOT}/README.md"
 DOC55_AGENT_GENERATOR="${REPO_ROOT}/agents/generator.md"
 DOC55_CODEX_AGENT_GENERATOR="${REPO_ROOT}/codex-agents/generator.toml"
 
-# --- 両 plugin.json のバージョンが 0.20.0 で一致している（#244 #263 の機能追加のためマイナー更新） ---
+# --- 両 plugin.json のバージョンが 0.21.0 で一致している（#267 の機能追加のためマイナー更新） ---
+# この固定値はリリースごとに更新する。v0.21.0 のリリース（PR #295）では更新を漏らし、
+# master で2件失敗する状態になっていた（この修正で解消）。
 
 DOC55_CLAUDE_VERSION="$(grep -m1 '"version"' "$DOC55_CLAUDE_PLUGIN_JSON" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
 DOC55_CODEX_VERSION="$(grep -m1 '"version"' "$DOC55_CODEX_PLUGIN_JSON" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
 
-assert_eq ".claude-plugin/plugin.json のバージョンが0.20.0である" "0.20.0" "$DOC55_CLAUDE_VERSION"
-assert_eq ".codex-plugin/plugin.json のバージョンが0.20.0である" "0.20.0" "$DOC55_CODEX_VERSION"
+assert_eq ".claude-plugin/plugin.json のバージョンが0.21.0である" "0.21.0" "$DOC55_CLAUDE_VERSION"
+assert_eq ".codex-plugin/plugin.json のバージョンが0.21.0である" "0.21.0" "$DOC55_CODEX_VERSION"
 assert_eq "両plugin.jsonのバージョンが一致している" "$DOC55_CLAUDE_VERSION" "$DOC55_CODEX_VERSION"
 
 # --- core/instructions.md に watchdog の3点の記述がある ---
@@ -21771,6 +21773,94 @@ case "$NS293_README_ENVVARS" in
 esac
 
 unset NS293_README_ENVVARS
+
+# ---------------------------------------------------------------------------
+# #296: plan / epic のクラウド対応（Epic ブランチを作らず run に委ねる）
+# #297: README「クラウドマシンから使う」節の誤記2件
+#
+# いずれも配信済み v0.21.0 に存在した欠陥であり、記述が消えたら検知できる形で固定する。
+# 契約文言の静的検査は #277 / #278 / #279 / #288 と同じ作法に倣う。
+# ---------------------------------------------------------------------------
+
+NS296_EPIC_SKILL="${REPO_ROOT}/skills/epic/SKILL.md"
+NS296_PLANNER="${REPO_ROOT}/core/roles/planner.md"
+NS296_GOAL_SKILL="${REPO_ROOT}/skills/goal/SKILL.md"
+NS296_RUN_SKILL="${REPO_ROOT}/skills/run/SKILL.md"
+NS296_GH_ACCESS="${REPO_ROOT}/core/references/github-access.md"
+NS296_README="${REPO_ROOT}/README.md"
+
+# --- epic スキル: クラウドではブランチを作らない分岐がある ---
+NS296_EPIC_BODY="$(cat "$NS296_EPIC_SKILL")"
+case "$NS296_EPIC_BODY" in
+  *'dev_workflow_is_remote'*'Epicブランチを作成しません'*'git checkout -b'*)
+    pass "skills/epic/SKILL.md: クラウドではEpicブランチを作らず、ローカルでは従来どおり作る分岐がある（#296）" ;;
+  *)
+    fail "skills/epic/SKILL.md: クラウドではEpicブランチを作らず、ローカルでは従来どおり作る分岐がある（#296）"       "dev_workflow_is_remote による分岐・作成を見送る旨・ローカル側の git checkout -b が揃っていること" ;;
+esac
+
+# --- epic スキル: Epic 本文の「未確定」形式が示されている ---
+if grep -qF "未確定（クラウド実行のため作成していない" "$NS296_EPIC_SKILL"; then
+  pass "skills/epic/SKILL.md: クラウド時のEpic本文「ブランチ」節の書式が示されている（#296）"
+else
+  fail "skills/epic/SKILL.md: クラウド時のEpic本文「ブランチ」節の書式が示されている（#296）"     "ブランチを作らなかった場合に本文へ何を書くかが不明だと、runに渡る情報が欠ける"
+fi
+
+# --- planner 正本: 同じ規定がある（スキル側だけに書くと食い違う） ---
+NS296_PLANNER_BODY="$(cat "$NS296_PLANNER")"
+case "$NS296_PLANNER_BODY" in
+  *'dev_workflow_is_remote'*'Epicブランチを作成しません'*)
+    pass "core/roles/planner.md: クラウドではEpicブランチを作らない規定がある（#296）" ;;
+  *)
+    fail "core/roles/planner.md: クラウドではEpicブランチを作らない規定がある（#296）"       "正本（planner.md）に無くスキル本文だけにあると、他ベンダー・他経路で食い違う" ;;
+esac
+
+# --- goal スキル: 同じ規定に言及している ---
+if grep -qF "クラウドセッションでは作らない" "$NS296_GOAL_SKILL"; then
+  pass "skills/goal/SKILL.md: クラウドではEpicブランチを作らない旨に言及している（#296）"
+else
+  fail "skills/goal/SKILL.md: クラウドではEpicブランチを作らない旨に言及している（#296）"     "goal は plan→run を通しで実行するため、同じ経路を通る"
+fi
+
+# --- github-access.md: ブランチ操作が対応表の外にあることを明記している ---
+NS296_GH_BODY="$(cat "$NS296_GH_ACCESS")"
+case "$NS296_GH_BODY" in
+  *'ブランチ操作は対応表の外にある'*'dev_workflow_is_remote'*)
+    pass "core/references/github-access.md: ブランチ操作がghでもMCPでもなくgitであることを明記している（#296）" ;;
+  *)
+    fail "core/references/github-access.md: ブランチ操作がghでもMCPでもなくgitであることを明記している（#296）"       "選択規則（dev_workflow_gh_available）が適用されない操作であることが書かれていないと、MCPで代替できると誤読される" ;;
+esac
+
+# --- run スキル: 単一ブランチ運用でEpic番号を引数から解決する ---
+NS296_RUN_BODY="$(cat "$NS296_RUN_SKILL")"
+case "$NS296_RUN_BODY" in
+  *'EPIC_ISSUE_NUM="$(printf '"'"'%s'"'"' "$ARGUMENTS" | grep -oE '"'"'[0-9]+'"'"' | head -1)"'*)
+    pass "skills/run/SKILL.md: 単一ブランチ運用でEpic番号を引数から解決する（ブランチ名命名に依存しない。#296）" ;;
+  *)
+    fail "skills/run/SKILL.md: 単一ブランチ運用でEpic番号を引数から解決する（ブランチ名命名に依存しない。#296）"       "クラウドのセッション指定ブランチは epic/epicNN/... 命名とは限らず、ブランチ名からの抽出だけではEPIC_ISSUE_NUMが空になる" ;;
+esac
+
+# --- README #297-1: extraKnownMarketplaces の git ソースのキーは url ---
+if grep -qF '"url": "https://github.com/masatoImayama/claude-dev-workflow-marketplace.git"' "$NS296_README"; then
+  pass "README.md: extraKnownMarketplaces の git ソースが url キーを使っている（#297）"
+else
+  fail "README.md: extraKnownMarketplaces の git ソースが url キーを使っている（#297）"     "source: git のキーは url である（repo は source: github 用で値は owner/name）。混ぜると解決できない"
+fi
+
+if grep -qF '"repo": "https://github.com/masatoImayama/claude-dev-workflow-marketplace.git"' "$NS296_README"; then
+  fail "README.md: git ソースに repo キー（URL値）を書いていない（#297）"     "repo キーに URL を与える形は git/github どちらの形式としても解決できない"
+else
+  pass "README.md: git ソースに repo キー（URL値）を書いていない（#297）"
+fi
+
+# --- README #297-2: host モードが自動判定であることが書かれている ---
+if grep -qF "通常この環境変数は不要" "$NS296_README"; then
+  pass "README.md: host モードが自動判定であり環境変数が通常不要と書かれている（#297）"
+else
+  fail "README.md: host モードが自動判定であり環境変数が通常不要と書かれている（#297）"     "resolve-sandbox.sh は is_remote かつ Docker 利用不可で自動的に host へ倒すため、環境変数を促すのは誤案内"
+fi
+
+unset NS296_EPIC_SKILL NS296_PLANNER NS296_GOAL_SKILL NS296_RUN_SKILL NS296_GH_ACCESS NS296_README
+unset NS296_EPIC_BODY NS296_PLANNER_BODY NS296_GH_BODY NS296_RUN_BODY
 
 # ---------------------------------------------------------------------------
 # 結果集計
