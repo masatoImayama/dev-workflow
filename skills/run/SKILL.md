@@ -172,6 +172,12 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/notify-slack.sh" run-start "Epic #$ARGUMENTS
 
 worktree内から実行してもマーカーはメインリポのルートに置かれるため、実行場所は問わない。
 
+**このマーカーの1行目（`Epic #$ARGUMENTS`）は、Slackが使えない環境（クラウド等）での
+Epic issueフォールバック（Task #280）がEpic番号を取り出す際にも使われる。** ラベルの書式を
+変える場合は `scripts/notify-slack.sh` のフォールバック実装（`EPIC_NUM` の抽出）も合わせて
+確認すること。詳細は `scripts/notify-slack.sh` のヘッダコメントを参照（正本はスクリプト側、
+ここでは再掲しない）。
+
 run マーカーが置かれた直後に、ハング・スリープを検知する watchdog を起動する（`--start`
 自体は自己デタッチして**即座に返る**。監視ループはプロセス外で動く常駐プロセスに移る）。
 watchdog は run マーカー（`.claude/.dev-workflow-run`）の消失を自己終了条件の1つにしているため、

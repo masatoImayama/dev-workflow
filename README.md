@@ -1391,6 +1391,26 @@ https://hooks.slack.com/services/XXX/YYY/ZZZ
 
 それでも不要な通知が届く場合は `DEV_WORKFLOW_NOTIFY_DEBUG=1` を設定すると、受け取った payload が `.claude/.dev-workflow-notify.log` に記録され、どの文言で発火しているか確認できる。
 
+### Epic issueへのフォールバック（クラウド等でSlackが使えない場合、Task #280）
+
+`.claude/slack-webhook` は `.gitignore` 対象であり、クラウド（使い捨てコンテナ）には存在しない。
+加えてプロキシで egress が制限され送信自体も通りにくいため、**webhook が未解決、または実送信が
+失敗した場合は Epic issue へのコメントにフォールバックする。**
+
+- 対象は**節目イベントのみ**（`stop` / `run-complete` / `stall` / `stall-recovered` /
+  `sleep-gap` / `budget` / `sleep-inhibit-warn`）。**`notification`（アイドル・承認待ち通知）は
+  対象外**（issue が通知ログで埋まるため）
+- Epic 番号は run marker（`.claude/.dev-workflow-run`。1行目が `Epic #<N>` 形式）から取り出す
+- GitHub操作は `gh issue comment` で行う（MCPはシェルから呼べないため。
+  `core/references/github-access.md` 参照）。`gh` が使えない（未インストール・未認証・
+  `api.github.com` が403等）、または Epic 番号が取れない場合は、
+  `.claude/.dev-workflow-notify-fallback.log` にローカル記録するだけに退く
+  （**いずれの場合も run は止めない**）
+- 連続する同一内容は、既存の `.claude/.dev-workflow-notify-last` による抑止
+  （`DEV_WORKFLOW_NOTIFY_COOLDOWN` 秒）で間引く
+- **Slack が生きている（送信に成功する）場合はこのフォールバックは一切発生しない**
+  （Slack設定済み環境での挙動は変わらない。多重通知にしない）
+
 ### 「完全な完了」と「途中停止」の区別
 
 `Stop` フックは毎ターン発火するだけで、自律実行がやり切ったのか途中で止まったのかを区別できない。そこでマーカーファイルで判別する:

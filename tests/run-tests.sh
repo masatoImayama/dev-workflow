@@ -5614,8 +5614,10 @@ else
   pass "notify-slack.sh: sink使用時にcurlが呼ばれない（実送信しない）"
 fi
 
-# --- Webhook未設定: 何もせずexit 0、標準出力・標準エラーも空、sinkにも書かれない ---
+# --- Webhook未設定: exit 0、標準出力・標準エラーは空、sinkには書かれない（既存挙動を維持）。
+#     run markerが無いためEpic番号も取れず、ghも呼ばずにローカルファイルへ退く（#280） ---
 NS_NOWEBHOOK_SINK="${NS_WORK}/nowebhook.json"
+NS_NOWEBHOOK_FALLBACK_LOG="${NS_REPO}/.claude/.dev-workflow-notify-fallback.log"
 NS_NOWEBHOOK_OUT="$(
   cd "$NS_REPO" || exit 1
   unset SLACK_WEBHOOK_URL
@@ -5632,6 +5634,251 @@ if [ -f "$NS_NOWEBHOOK_SINK" ]; then
 else
   pass "Webhook未設定: sinkファイルが作られない"
 fi
+
+# --- #280: Webhook未設定・run markerも無い（Epic番号が取れない）場合は、ghも呼ばず
+#     ローカルのフォールバックログへ記録する（runを止めない） ---
+if [ -f "$NS_NOWEBHOOK_FALLBACK_LOG" ] && grep -q '応答なし' "$NS_NOWEBHOOK_FALLBACK_LOG"; then
+  pass "#280: Webhook未設定・Epic番号不明でもローカルのフォールバックログに記録される"
+else
+  fail "#280: Webhook未設定・Epic番号不明でもローカルのフォールバックログに記録される" \
+    "$(cat "$NS_NOWEBHOOK_FALLBACK_LOG" 2>/dev/null)"
+fi
+
+if [ -s "$NS_CURL_LOG" ]; then
+  fail "#280: Epic番号が無い場合はghを呼ばずローカル記録のみに退く（ghの呼び出しがPATHに無いことも含めて確認）" \
+    "curlログに書き込みがありました: $(cat "$NS_CURL_LOG")"
+else
+  pass "#280: Epic番号が無い場合はghを呼ばずローカル記録のみに退く"
+fi
+
+# ---------------------------------------------------------------------------
+# notify-slack.sh: Epic issueフォールバック（Task #280）
+#
+# 「Epic #<N>」ラベルのrun markerを用意し、webhook未設定・または送信失敗時に
+# gh issue commentへ、ghが無ければローカルファイルへ、という優先順位を検証する。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== notify-slack.sh: Epic issueフォールバック（Task #280） =="
+
+NS280_REPO="$(make_temp_repo)"
+NS280_MARKER="${NS280_REPO}/.claude/.dev-workflow-run"
+mkdir -p "${NS280_REPO}/.claude"
+
+# --- gh issue comment が使える場合、Epic番号を抽出してコメントする ---
+NS280_FAKE_GH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-ns280-gh.XXXXXX")"
+NS280_GH_CALL_LOG="$(mktemp "${TMPDIR:-/tmp}/dw-test-ns280-ghcall.XXXXXX")"
+cat > "${NS280_FAKE_GH_DIR}/gh" <<SH
+#!/bin/bash
+echo "\$*" >> "${NS280_GH_CALL_LOG}"
+exit 0
+SH
+chmod +x "${NS280_FAKE_GH_DIR}/gh"
+
+printf '%s\n' "Epic #267" > "$NS280_MARKER"
+NS280_GH_OK_OUT="$(
+  cd "$NS280_REPO" || exit 1
+  unset SLACK_WEBHOOK_URL
+  PATH="${NS280_FAKE_GH_DIR}:${PATH}" \
+  bash "$NS_SCRIPT" stall "無活動920秒 / レーンA" < /dev/null 2>&1
+)"
+NS280_GH_OK_EXIT=$?
+
+assert_exit_code "#280: Epic番号が取れてghが使える場合もexit 0" 0 "$NS280_GH_OK_EXIT"
+assert_eq "#280: 標準出力・標準エラーが空（ghバックエンドでも静かに動く）" "" "$NS280_GH_OK_OUT"
+
+NS280_GH_CALL="$(cat "$NS280_GH_CALL_LOG")"
+case "$NS280_GH_CALL" in
+  *"issue comment 267"*) pass "#280: run markerのEpic番号(267)をgh issue commentへ渡す" ;;
+  *) fail "#280: run markerのEpic番号(267)をgh issue commentへ渡す" "call=[${NS280_GH_CALL}]" ;;
+esac
+case "$NS280_GH_CALL" in
+  *"無活動920秒 / レーンA"*) pass "#280: フォールバック本文にDETAILを含む" ;;
+  *) fail "#280: フォールバック本文にDETAILを含む" "call=[${NS280_GH_CALL}]" ;;
+esac
+
+if [ -f "${NS280_REPO}/.claude/.dev-workflow-notify-fallback.log" ]; then
+  fail "#280: gh issue commentが成功したときはローカルのフォールバックログを作らない" \
+    "作られてしまいました"
+else
+  pass "#280: gh issue commentが成功したときはローカルのフォールバックログを作らない"
+fi
+
+# --- gh issue comment が失敗する（または無い）場合、ローカルファイルへ記録する ---
+: > "$NS280_GH_CALL_LOG"
+NS280_FAKE_GH_FAIL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-ns280-ghfail.XXXXXX")"
+printf '#!/bin/bash\nexit 1\n' > "${NS280_FAKE_GH_FAIL_DIR}/gh"
+chmod +x "${NS280_FAKE_GH_FAIL_DIR}/gh"
+
+NS280_REPO2="$(make_temp_repo)"
+mkdir -p "${NS280_REPO2}/.claude"
+printf '%s\n' "Epic #99" > "${NS280_REPO2}/.claude/.dev-workflow-run"
+
+NS280_GHFAIL_OUT="$(
+  cd "$NS280_REPO2" || exit 1
+  unset SLACK_WEBHOOK_URL
+  PATH="${NS280_FAKE_GH_FAIL_DIR}:${PATH}" \
+  bash "$NS_SCRIPT" budget "ウェーブ2 / 経過98分 / 予算90分" < /dev/null 2>&1
+)"
+NS280_GHFAIL_EXIT=$?
+
+assert_exit_code "#280: ghが使えない（失敗する）場合もexit 0（runを止めない）" 0 "$NS280_GHFAIL_EXIT"
+assert_eq "#280: ghが使えない場合も標準出力・標準エラーが空" "" "$NS280_GHFAIL_OUT"
+
+NS280_GHFAIL_LOG="${NS280_REPO2}/.claude/.dev-workflow-notify-fallback.log"
+if [ -f "$NS280_GHFAIL_LOG" ] && grep -q '想定時間超過' "$NS280_GHFAIL_LOG"; then
+  pass "#280: gh issue commentが失敗したらローカルのフォールバックログに記録する"
+else
+  fail "#280: gh issue commentが失敗したらローカルのフォールバックログに記録する" \
+    "$(cat "$NS280_GHFAIL_LOG" 2>/dev/null)"
+fi
+
+# --- notification（アイドル・承認待ち通知）はフォールバック対象外（issueが埋まらないようにする） ---
+NS280_REPO3="$(make_temp_repo)"
+mkdir -p "${NS280_REPO3}/.claude"
+printf '%s\n' "Epic #42" > "${NS280_REPO3}/.claude/.dev-workflow-run"
+: > "$NS280_GH_CALL_LOG"
+
+NS280_NOTIF_OUT="$(
+  cd "$NS280_REPO3" || exit 1
+  unset SLACK_WEBHOOK_URL
+  PATH="${NS280_FAKE_GH_DIR}:${PATH}" \
+  DEV_WORKFLOW_NOTIFY_COOLDOWN=0 \
+  bash "$NS_SCRIPT" notification <<< '{"message":"Claude needs your permission to use Bash"}' 2>&1
+)"
+NS280_NOTIF_EXIT=$?
+
+assert_exit_code "#280: notification（承認待ち）もexit 0" 0 "$NS280_NOTIF_EXIT"
+assert_eq "#280: notificationは標準出力・標準エラーが空" "" "$NS280_NOTIF_OUT"
+
+if [ -s "$NS280_GH_CALL_LOG" ]; then
+  fail "#280: notificationはgh issue commentを呼ばない（issueが通知ログで埋まらないように）" \
+    "$(cat "$NS280_GH_CALL_LOG")"
+else
+  pass "#280: notificationはgh issue commentを呼ばない（issueが通知ログで埋まらないように）"
+fi
+
+if [ -f "${NS280_REPO3}/.claude/.dev-workflow-notify-fallback.log" ]; then
+  fail "#280: notificationはローカルのフォールバックログにも記録しない" "作られてしまいました"
+else
+  pass "#280: notificationはローカルのフォールバックログにも記録しない"
+fi
+
+# --- 回帰: Slackが生きている（送信成功）場合はフォールバックが一切発生しない（多重通知にしない） ---
+NS280_REPO4="$(make_temp_repo)"
+mkdir -p "${NS280_REPO4}/.claude"
+printf '%s\n' "Epic #267" > "${NS280_REPO4}/.claude/.dev-workflow-run"
+: > "$NS280_GH_CALL_LOG"
+NS280_SLACKOK_SINK="$(mktemp "${TMPDIR:-/tmp}/dw-test-ns280-slackok.XXXXXX")"
+
+NS280_SLACKOK_OUT="$(
+  cd "$NS280_REPO4" || exit 1
+  PATH="${NS280_FAKE_GH_DIR}:${PATH}" \
+  SLACK_WEBHOOK_URL="https://example.invalid/webhook" \
+  DEV_WORKFLOW_NOTIFY_SINK="$NS280_SLACKOK_SINK" \
+  bash "$NS_SCRIPT" stall "無活動920秒" < /dev/null 2>&1
+)"
+NS280_SLACKOK_EXIT=$?
+
+assert_exit_code "回帰(#280): Slack送信成功時はexit 0（従来どおり）" 0 "$NS280_SLACKOK_EXIT"
+assert_eq "回帰(#280): Slack送信成功時は標準出力・標準エラーが空（従来どおり）" "" "$NS280_SLACKOK_OUT"
+if [ -f "$NS280_SLACKOK_SINK" ]; then
+  pass "回帰(#280): Slack送信成功時はsinkへ書く（従来どおり）"
+else
+  fail "回帰(#280): Slack送信成功時はsinkへ書く（従来どおり）" "sinkファイルが無い"
+fi
+if [ -s "$NS280_GH_CALL_LOG" ]; then
+  fail "回帰(#280): Slack送信成功時はghを呼ばない（多重通知にしない）" "$(cat "$NS280_GH_CALL_LOG")"
+else
+  pass "回帰(#280): Slack送信成功時はghを呼ばない（多重通知にしない）"
+fi
+if [ -f "${NS280_REPO4}/.claude/.dev-workflow-notify-fallback.log" ]; then
+  fail "回帰(#280): Slack送信成功時はローカルのフォールバックログも作らない" "作られてしまいました"
+else
+  pass "回帰(#280): Slack送信成功時はローカルのフォールバックログも作らない"
+fi
+
+# --- Epic番号の抽出: 「Epic #<N>」以外の形式・マーカー無しでも落ちない ---
+NS280_REPO5="$(make_temp_repo)"
+mkdir -p "${NS280_REPO5}/.claude"
+printf '%s\n' "カスタムラベル（Epic番号なし）" > "${NS280_REPO5}/.claude/.dev-workflow-run"
+: > "$NS280_GH_CALL_LOG"
+
+NS280_NOEPIC_EXIT=0
+(
+  cd "$NS280_REPO5" || exit 1
+  unset SLACK_WEBHOOK_URL
+  PATH="${NS280_FAKE_GH_DIR}:${PATH}" \
+  bash "$NS_SCRIPT" stall "無活動920秒" < /dev/null >/dev/null 2>&1
+) || NS280_NOEPIC_EXIT=$?
+
+assert_exit_code "#280: run markerにEpic番号が無い形式でもexit 0（runを止めない）" 0 "$NS280_NOEPIC_EXIT"
+if [ -s "$NS280_GH_CALL_LOG" ]; then
+  fail "#280: Epic番号を抽出できない場合はghを呼ばない" "$(cat "$NS280_GH_CALL_LOG")"
+else
+  pass "#280: Epic番号を抽出できない場合はghを呼ばない"
+fi
+if [ -f "${NS280_REPO5}/.claude/.dev-workflow-notify-fallback.log" ]; then
+  pass "#280: Epic番号を抽出できない場合もローカルのフォールバックログに記録する"
+else
+  fail "#280: Epic番号を抽出できない場合もローカルのフォールバックログに記録する" "ログが作られていない"
+fi
+
+# --- 頻度を絞る: 既存の .dev-workflow-notify-last による抑止をフォールバックにも流用する ---
+NS280_REPO6="$(make_temp_repo)"
+mkdir -p "${NS280_REPO6}/.claude"
+NS280_DEDUP_GH_FAIL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-ns280-dedup-ghfail.XXXXXX")"
+printf '#!/bin/bash\nexit 1\n' > "${NS280_DEDUP_GH_FAIL_DIR}/gh"
+chmod +x "${NS280_DEDUP_GH_FAIL_DIR}/gh"
+NS280_DEDUP_LOG="${NS280_REPO6}/.claude/.dev-workflow-notify-fallback.log"
+
+(
+  cd "$NS280_REPO6" || exit 1
+  unset SLACK_WEBHOOK_URL
+  PATH="${NS280_DEDUP_GH_FAIL_DIR}:${PATH}" \
+  bash "$NS_SCRIPT" stall "無活動920秒" < /dev/null >/dev/null 2>&1
+  PATH="${NS280_DEDUP_GH_FAIL_DIR}:${PATH}" \
+  bash "$NS_SCRIPT" stall "無活動920秒" < /dev/null >/dev/null 2>&1
+)
+
+NS280_DEDUP_COUNT="$(grep -c '応答なし' "$NS280_DEDUP_LOG" 2>/dev/null || true)"
+assert_eq "#280: 同一内容の連続記録は既存のcooldownで1回に間引かれる" "1" "$NS280_DEDUP_COUNT"
+
+NS280_DEDUP_COOLDOWN0_COUNT="$(
+  cd "$NS280_REPO6" || exit 1
+  : > "$NS280_DEDUP_LOG"
+  unset SLACK_WEBHOOK_URL
+  PATH="${NS280_DEDUP_GH_FAIL_DIR}:${PATH}" DEV_WORKFLOW_NOTIFY_COOLDOWN=0 \
+    bash "$NS_SCRIPT" stall "無活動920秒" < /dev/null >/dev/null 2>&1
+  PATH="${NS280_DEDUP_GH_FAIL_DIR}:${PATH}" DEV_WORKFLOW_NOTIFY_COOLDOWN=0 \
+    bash "$NS_SCRIPT" stall "無活動920秒" < /dev/null >/dev/null 2>&1
+  grep -c '応答なし' "$NS280_DEDUP_LOG" 2>/dev/null || true
+)"
+assert_eq "#280: DEV_WORKFLOW_NOTIFY_COOLDOWN=0なら間引かずに毎回記録する" "2" "$NS280_DEDUP_COOLDOWN0_COUNT"
+
+# --- ドキュメント: README.md / skills/run/SKILL.md にフォールバックの記述がある ---
+NS280_README="${REPO_ROOT}/README.md"
+case "$(cat "$NS280_README")" in
+  *'Epic issueへのフォールバック'*)
+    pass "README.md: Epic issueへのフォールバック（#280）の記述がある" ;;
+  *)
+    fail "README.md: Epic issueへのフォールバック（#280）の記述がある" "記述が見つからない" ;;
+esac
+case "$(cat "$NS280_README")" in
+  *'notification'*'対象外'*)
+    pass "README.md: notification（アイドル通知）はフォールバック対象外である旨が明記されている（#280）" ;;
+  *)
+    fail "README.md: notification（アイドル通知）はフォールバック対象外である旨が明記されている（#280）" \
+      "記述が見つからない" ;;
+esac
+
+NS280_RUN_SKILL_BODY="$(cat "${REPO_ROOT}/skills/run/SKILL.md")"
+case "$NS280_RUN_SKILL_BODY" in
+  *'Epic issueフォールバック'*)
+    pass "skills/run/SKILL.md: Epic issueフォールバック（#280）への言及がある" ;;
+  *)
+    fail "skills/run/SKILL.md: Epic issueフォールバック（#280）への言及がある" "記述が見つからない" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # notify-slack.sh: 既存イベント（run-start / run-complete / stop / notification）の
