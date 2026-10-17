@@ -309,7 +309,7 @@ planner / generator には与えない（Epic #66 決定4）。
 ### Codex側: エージェント単位の `mcp_servers` 宣言
 
 Codex はサブエージェント定義自体をプラグインで配布できない
-（`docs/dev-workflow-multi-vendor-guide.md` 3.3.4）。したがって `.codex-plugin/plugin.json` の
+（`docs/dev-workflow-multi-vendor-guide.md` 3.3.2）。したがって `.codex-plugin/plugin.json` の
 `mcpServers`（セッション全体に効くグローバル宣言）は使わず、代わりに
 `adapters/codex/overlays/evaluator.toml` に直接 `[mcp_servers.code-review-graph]` テーブルを
 宣言した。config.toml のキー（`mcp_servers` を含む）はエージェント定義に併記でき、
