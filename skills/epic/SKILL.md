@@ -86,19 +86,37 @@ BODY
 
 ### 4. Epicブランチの作成
 
-Epic issue番号を使ってブランチを作成し、リモートにpushする:
+Epic issue番号を使ってブランチを作成し、リモートにpushする。
+
+**ただしクラウドセッションではブランチを作らない。** クラウドは**指定されたブランチ以外への
+push が想定されていない**ため、`epic/epicNN/...` という新規ブランチの push は通らない
+（Epic #267 の実測・#296）。この場合は**ブランチ作成を `run` に委ね**、`run` が
+セッションに与えられた1本のブランチを Epic ブランチとして扱う（単一ブランチ運用。
+`skills/run/SKILL.md`「ブランチ運用モード」節で `EPIC_BRANCH="$SESSION_BRANCH"` として解決される）。
 
 ```bash
-EPIC_BRANCH="epic/epic${EPIC_NUMBER}/$ARGUMENTS"
+# shellcheck disable=SC1091
+. "${CLAUDE_PLUGIN_ROOT}/scripts/lib/detect-env.sh"
 
-git checkout main && git pull
-git checkout -b "${EPIC_BRANCH}"
-git push -u origin "${EPIC_BRANCH}"
+if dev_workflow_is_remote; then
+  # クラウド: ブランチを作らない。Epic 本文の「## ブランチ」節は未確定として記録する（次項）
+  echo "NOTE: クラウドセッションのためEpicブランチを作成しません（runがセッション指定ブランチを使います）"
+else
+  EPIC_BRANCH="epic/epic${EPIC_NUMBER}/$ARGUMENTS"
+
+  git checkout main && git pull
+  git checkout -b "${EPIC_BRANCH}"
+  git push -u origin "${EPIC_BRANCH}"
+fi
 ```
+
+**黙って劣化させない。** クラウドでブランチを作らなかった事実は、上の `NOTE` と Epic 本文の
+両方に残す（後から「なぜブランチが無いのか」を追えるようにする）。
 
 ### 5. Epic issue にブランチ名を反映
 
-作成したブランチ名をEpic issue本文に更新:
+作成したブランチ名をEpic issue本文に更新する。**クラウドでブランチを作らなかった場合は、
+ブランチ名の代わりに未確定である旨を書く**（`run` が解決するため、ここで確定させる必要はない）:
 
 ```bash
 # Epic issueのbodyの「(ブランチ作成後に更新)」を実際のブランチ名に置換して更新
@@ -109,6 +127,13 @@ gh issue edit ${EPIC_NUMBER} --body "[ブランチ名を反映したbody]"
 ```
 ## ブランチ
 `epic/epic[番号]/[機能名]`
+```
+
+クラウドセッション（ブランチを作らなかった場合）は次の形式にする。**`run` は単一ブランチ
+運用モードでこの節を読まない**（セッション指定ブランチを使う）ため、人間向けの記録として置く:
+```
+## ブランチ
+未確定（クラウド実行のため作成していない。run がセッション指定ブランチを Epic ブランチとして扱う）
 ```
 
 ### 6. Task issue の作成

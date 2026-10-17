@@ -71,7 +71,7 @@ host モードを正式化している（設計判断の詳細は `docs/adr/0013
     "dev-workflow-marketplace": {
       "source": {
         "source": "git",
-        "repo": "https://github.com/masatoImayama/claude-dev-workflow-marketplace.git"
+        "url": "https://github.com/masatoImayama/claude-dev-workflow-marketplace.git"
       }
     }
   },
@@ -89,6 +89,11 @@ host モードを正式化している（設計判断の詳細は `docs/adr/0013
 }
 ```
 
+- **`source: "git"` のときのキーは `url` である**（`repo` ではない）。`repo` を使うのは
+  `source: "github"` の場合で、値は URL ではなく `owner/name` 形式になる
+  （`{"source": "github", "repo": "masatoImayama/claude-dev-workflow-marketplace"}`）。
+  Claude Code 自身が `~/.claude/plugins/known_marketplaces.json` に書き出す形が正本であり、
+  2つの形式を混ぜると**どちらとしても解決できない**（#297）
 - **`extraKnownMarketplaces` は git URL のみを指定する。ローカル絶対パス（`source.path`）を
   書いてはならない。** クラウドコンテナのファイルシステムにはそのパスが存在せず、解決に失敗する
   （上記の背景そのもの）
@@ -106,8 +111,17 @@ host モードを正式化している（設計判断の詳細は `docs/adr/0013
 
 ### `DEV_WORKFLOW_SANDBOX_HOST=1` の渡し方（2通り。副作用が異なる）
 
-クラウドでは Docker sandbox が使えないことが多く、host モード（上記「前提条件」「Docker
-sandbox のセットアップ」参照）が必要になる。渡し方は2通りあり、**副作用が異なる**:
+**クラウド（`CLAUDE_CODE_REMOTE=true`）かつ Docker 接続不可なら、`scripts/resolve-sandbox.sh` が
+自動的に host モードへ倒すため、通常この環境変数は不要である**（Epic #267 D2。解決順 0 の
+次に評価される 0' がこれにあたる）。
+
+この環境変数が要るのは次の2つの場合だけである。
+
+- **ローカルで意図的に host モードを使いたい**（Docker を入れずに `run` を試す・host モードの
+  挙動を検証する）
+- **クラウド判定が外れた**（`CLAUDE_CODE_REMOTE` が立たない環境で host モードにしたい）
+
+渡し方は2通りあり、**副作用が異なる**:
 
 1. **クラウドセッション側の環境変数として渡す（推奨）。** そのセッションにのみ効き、
    ローカルには一切影響しない

@@ -171,9 +171,21 @@ if [ "$SINGLE_BRANCH_MODE" -eq 1 ]; then
   # 全ステップの `git -C "$EPIC_WT"` / `cd "$EPIC_WT"` をそのままセッションの作業ディレクトリに
   # 向ける（この1変数だけで以降のステップは無変更で単一ブランチ運用に対応する）
   EPIC_BRANCH="$SESSION_BRANCH"
-  EPIC_NUM=$(printf '%s' "$EPIC_BRANCH" | grep -oP 'epic\d+' | head -1)
-  EPIC_ISSUE_NUM="${EPIC_NUM#epic}"
+  # Epic 番号はブランチ名から取れるとは限らない。クラウドでは planner がブランチを作らず
+  # （#296。指定ブランチ以外への push が通らないため）、セッション指定ブランチは
+  # `epic/epicNN/...` 命名ではない任意の名前でありうる。そのため**引数で渡された Epic issue
+  # 番号を正本とし**、ブランチ名からの抽出はフォールバックに回す（ここを取り違えると
+  # EPIC_ISSUE_NUM が空になり plan-waves.sh --epic が壊れる）
+  EPIC_ISSUE_NUM="$(printf '%s' "$ARGUMENTS" | grep -oE '[0-9]+' | head -1)"
+  if [ -z "$EPIC_ISSUE_NUM" ]; then
+    EPIC_ISSUE_NUM="$(printf '%s' "$EPIC_BRANCH" | grep -oP 'epic\K\d+' | head -1)"
+  fi
+  [ -n "$EPIC_ISSUE_NUM" ] || { echo "ERROR: Epic issue番号を解決できません（引数とブランチ名の両方から取得できませんでした）" >&2; exit 1; }
+  EPIC_NUM="epic${EPIC_ISSUE_NUM}"   # sandbox-exec.sh の --epic 用の識別子（epicXX形式）
   EPIC_WT="."
+
+  # Epic 本文の「## ブランチ」節はこのモードでは読まない（上で $SESSION_BRANCH を使うため）。
+  # クラウドで planner が作成を見送った場合、その節は「未確定（…）」になっている（#296）
 else
   # Epic issueからブランチ名を取得 (形式: epic/epicXX/[機能名])
   EPIC_BRANCH=$(gh issue view $ARGUMENTS --json body -q '.body' | grep -oP '`epic/epic\d+/[^`]+`' | tr -d '`' | head -1)
