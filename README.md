@@ -1820,6 +1820,37 @@ bash adapters/codex/build.sh --check
 
 **`core/` を編集したら両方を再生成し、生成物をコミットに含めてください。**
 
+### リリース（配布マーケットプレイスへの公開）
+
+このリポジトリは**正本**であり、利用者が `/plugin update` で取りに行くのは
+**配布リポジトリ**（[claude-dev-workflow-marketplace](https://github.com/masatoImayama/claude-dev-workflow-marketplace)）の
+`marketplace.json` に書かれた `source.sha` である。**tag を打っただけでは誰にも届かない。**
+
+```bash
+# version を上げて tag を打ったあとに実行する
+bash scripts/publish-marketplace.sh            # clone → 配布物の差し替え → sha 更新 → push
+bash scripts/publish-marketplace.sh --check    # 差分だけ見る（commit も push もしない）
+```
+
+| やること | 内容 |
+|---|---|
+| 配布物の切り出し | `git archive v<version>` の中身から `docs/` `tests/` `Dockerfile.dev` `.gitignore` を除いたもの。**引き算**なので、正本に増えたディレクトリは自動で配られる |
+| コミット2本 | `Update dev-workflow to v<version>`（配布物）→ `Update SHA for v<version> (...)`（sha の書き戻し）。sha はコミット後にしか確定しないため1本にはできない |
+| sha の更新 | `"sha"` を持つ `marketplace.json` を**探して全部**直す（現在は `.claude-plugin/` と `.agents/plugins/` の2つ。片方だけ直すと、そのベンダーの利用者にだけ更新が届かない） |
+
+- **冪等**。既に公開済みなら何もコミットしない。`sha` が前バージョンを指したままの状態
+  （内容だけ push して sha を直し忘れた状態＝利用者には何も届かない）も、再実行すれば直る
+- 正本の `plugin.json` の version と、公開する ref の version が食い違う場合は公開しない
+  （「v0.20.0 として公開したのに中身は前版」という、利用者側から気づけない事故を止める）
+- このリポジトリには一切書き込まない。作業は `mktemp -d` 配下の clone で行い、
+  **完了後も消さずにパスを表示する**（push が失敗したときに人間が続きを引き継げる）
+- 公開後、手元に反映するには `claude plugin marketplace update <marketplace名>` →
+  `claude plugin update dev-workflow` → **Claude Code / Claude Desktop の再起動**まで必要
+
+検証は `tests/run-tests.sh` の `scripts/publish-marketplace.sh` セクションで行う。
+ネットワークには出ず、ローカルの bare リポジトリを配布先に見立てる
+（`--marketplace-repo` はそのための引数である）。
+
 ### run スキルの分割（progressive disclosure）
 
 `skills/run/SKILL.md` は run を回すあいだ**ずっとコンテキストに載り続ける**。ウェーブごとに

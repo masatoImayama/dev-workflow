@@ -21773,6 +21773,173 @@ esac
 unset NS293_README_ENVVARS
 
 # ---------------------------------------------------------------------------
+# scripts/publish-marketplace.sh（配布リポジトリへの公開）
+#
+# ネットワークには一切出ない。ローカルの bare リポジトリを「配布先」に見立てて
+# --marketplace-repo で差し替える（この引数が存在する理由がこのテストである）。
+#
+# 公開作業の事故は**配り手からは気づけない**（開発リポジトリに tag が立っていれば
+# 終わった気になる。実際 v0.18.1 のまま2リリース分配り漏れた）。そのため
+# 「sha が配布物を指していること」と「2回目の実行が何も増やさないこと」を機械で押さえる。
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "== scripts/publish-marketplace.sh（配布リポジトリへの公開） =="
+
+PUBLISH_SH="${REPO_ROOT}/scripts/publish-marketplace.sh"
+
+make_fake_marketplace() {
+  # make_fake_marketplace
+  # 配布先に見立てた bare リポジトリを作り、そのパスを返す。
+  # 旧版の名残として plugins/dev-workflow/old/stale.txt を置き、sha はゼロ埋めにしておく
+  # （「正本から消えたファイルが配布物に残らない」「sha が直る」ことを検証できるようにする）。
+  local dir seed
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-mp.XXXXXX")"
+  seed="${dir}/seed"
+  mkdir -p "${seed}/.claude-plugin" "${seed}/.agents/plugins" "${seed}/plugins/dev-workflow/old"
+  printf '{"plugins":[{"name":"dev-workflow","source":{"source":"git-subdir","path":"plugins/dev-workflow","ref":"master","sha":"0000000000000000000000000000000000000000"}}]}\n' > "${seed}/.claude-plugin/marketplace.json"
+  cp "${seed}/.claude-plugin/marketplace.json" "${seed}/.agents/plugins/marketplace.json"
+  printf 'stale\n' > "${seed}/plugins/dev-workflow/old/stale.txt"
+  (
+    cd "$seed" || exit 1
+    git init -q
+    git config user.email "dev-workflow-test@example.com"
+    git config user.name "dev-workflow test"
+    git config core.autocrlf false
+    git add -A
+    git commit -q -m "init"
+  ) >/dev/null 2>&1
+  git clone -q --bare "$seed" "${dir}/bare.git" >/dev/null 2>&1
+  printf '%s' "${dir}/bare.git"
+}
+
+# --- 引数エラーは黙って無視しない ---
+bash "$PUBLISH_SH" --bogus >/dev/null 2>&1
+assert_exit_code "publish-marketplace.sh: 未知のオプションは exit 2" 2 $?
+
+bash "$PUBLISH_SH" --ref >/dev/null 2>&1
+assert_exit_code "publish-marketplace.sh: --ref の値欠落は exit 2" 2 $?
+
+# --- 存在しない ref は公開に進まない ---
+bash "$PUBLISH_SH" --ref "dw-no-such-ref-for-test" >/dev/null 2>&1
+assert_exit_code "publish-marketplace.sh: 存在しない ref は exit 1（公開に進まない）" 1 $?
+
+# 作業ツリーのマニフェストと HEAD のマニフェストで version が食い違う状態
+# （リリース bump の途中など）では、--ref HEAD を使う以降のケースは成立しない。
+PUBLISH_WT_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${REPO_ROOT}/.claude-plugin/plugin.json" | head -1)"
+PUBLISH_HEAD_VERSION="$(git -C "$REPO_ROOT" show "HEAD:.claude-plugin/plugin.json" 2>/dev/null | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+
+if [ -z "$PUBLISH_HEAD_VERSION" ] || [ "$PUBLISH_WT_VERSION" != "$PUBLISH_HEAD_VERSION" ]; then
+  skip "publish-marketplace.sh: 公開一式（--ref HEAD）" "作業ツリー(${PUBLISH_WT_VERSION}) と HEAD(${PUBLISH_HEAD_VERSION}) の version が不一致"
+else
+  # --- version 不整合の検知（HEAD の中身を別 version として公開しようとしていないか） ---
+  # ここがザルだと「0.20.0 として公開したのに中身は前版」という、利用者側からは
+  # version 表記だけ見て更新済みと誤認する最悪の事故が通る。
+  PUBLISH_MISMATCH_REF=""
+  for _cand in $(git -C "$REPO_ROOT" log --format='%H' -30 -- .claude-plugin/plugin.json); do
+    _cand_version="$(git -C "$REPO_ROOT" show "${_cand}:.claude-plugin/plugin.json" 2>/dev/null | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+    if [ -n "$_cand_version" ] && [ "$_cand_version" != "$PUBLISH_WT_VERSION" ]; then
+      PUBLISH_MISMATCH_REF="$_cand"
+      break
+    fi
+  done
+  unset _cand _cand_version
+  if [ -n "$PUBLISH_MISMATCH_REF" ]; then
+    bash "$PUBLISH_SH" --ref "$PUBLISH_MISMATCH_REF" >/dev/null 2>&1
+    assert_exit_code "publish-marketplace.sh: ref の version が現行と違えば exit 1（中身と表記の食い違いを止める）" 1 $?
+  else
+    skip "publish-marketplace.sh: ref の version 不整合の検知" "直近30コミットに別 version のマニフェストが無い"
+  fi
+
+  # --- 公開一式 ---
+  PUBLISH_MP="$(make_fake_marketplace)"
+  PUBLISH_OUT="$(bash "$PUBLISH_SH" --marketplace-repo "$PUBLISH_MP" --ref HEAD 2>&1)"
+  PUBLISH_RC=$?
+  assert_exit_code "publish-marketplace.sh: 公開は exit 0" 0 "$PUBLISH_RC"
+
+  PUBLISH_COMMITS="$(git -C "$PUBLISH_MP" rev-list --count master 2>/dev/null)"
+  assert_eq "publish-marketplace.sh: 配布物と sha で2コミット積む（init + 2）" "3" "$PUBLISH_COMMITS"
+
+  PUBLISH_CONTENT_SHA="$(git -C "$PUBLISH_MP" rev-parse master~1 2>/dev/null)"
+  PUBLISH_SHA_IN_CLAUDE="$(git -C "$PUBLISH_MP" show "master:.claude-plugin/marketplace.json" 2>/dev/null | grep -o -E '[0-9a-f]{40}' | head -1)"
+  PUBLISH_SHA_IN_AGENTS="$(git -C "$PUBLISH_MP" show "master:.agents/plugins/marketplace.json" 2>/dev/null | grep -o -E '[0-9a-f]{40}' | head -1)"
+  assert_eq "publish-marketplace.sh: .claude-plugin の sha が配布物コミットを指す" "$PUBLISH_CONTENT_SHA" "$PUBLISH_SHA_IN_CLAUDE"
+  # 片方だけ直すと、そのベンダーの利用者にだけ更新が届かない（#265 と同型の配り漏れ）。
+  assert_eq "publish-marketplace.sh: .agents 側の sha も同じコミットを指す（更新漏れゼロ）" "$PUBLISH_CONTENT_SHA" "$PUBLISH_SHA_IN_AGENTS"
+
+  PUBLISH_TREE="$(git -C "$PUBLISH_MP" ls-tree -r master --name-only 2>/dev/null)"
+
+  # --- 配布対象の切り出し ---
+  PUBLISH_LEAKED=""
+  for _ex in "docs/" "tests/" "Dockerfile.dev" ".gitignore"; do
+    if printf '%s\n' "$PUBLISH_TREE" | grep -Fq "plugins/dev-workflow/${_ex}"; then
+      PUBLISH_LEAKED="${PUBLISH_LEAKED} ${_ex}"
+    fi
+  done
+  unset _ex
+  assert_eq "publish-marketplace.sh: 開発者向けファイルを配らない（docs/ tests/ Dockerfile.dev .gitignore）" "" "$PUBLISH_LEAKED"
+
+  # 「配布物 = 正本 - 除外」の引き算が効いていること。足し算（列挙）実装への退行を検知する。
+  PUBLISH_MISSING=""
+  for _need in ".claude-plugin/plugin.json" "core/instructions.md" "agents/generator.md" "skills/run/SKILL.md" "scripts/sandbox-exec.sh" "hooks"; do
+    if ! printf '%s\n' "$PUBLISH_TREE" | grep -Fq "plugins/dev-workflow/${_need}"; then
+      PUBLISH_MISSING="${PUBLISH_MISSING} ${_need}"
+    fi
+  done
+  unset _need
+  assert_eq "publish-marketplace.sh: 利用者が使うものは全部配る（core/ agents/ skills/ scripts/ hooks/）" "" "$PUBLISH_MISSING"
+
+  if printf '%s\n' "$PUBLISH_TREE" | grep -Fq "plugins/dev-workflow/old/stale.txt"; then
+    fail "publish-marketplace.sh: 正本から消えたファイルが配布物に残らない" "旧版の stale.txt が残っている（差分上書きになっている）"
+  else
+    pass "publish-marketplace.sh: 正本から消えたファイルが配布物に残らない"
+  fi
+
+  # --- 冪等性 ---
+  # 2回目が sha を書き換え続けると、公開のたびに無意味なコミットが増え、
+  # 「何も変わっていないのに更新が来た」状態を利用者に配ることになる。
+  bash "$PUBLISH_SH" --marketplace-repo "$PUBLISH_MP" --ref HEAD >/dev/null 2>&1
+  assert_exit_code "publish-marketplace.sh: 2回目も exit 0" 0 $?
+  assert_eq "publish-marketplace.sh: 2回目はコミットを増やさない（冪等）" "3" "$(git -C "$PUBLISH_MP" rev-list --count master 2>/dev/null)"
+
+  # --- sha だけが前バージョンを指している状態からの復旧 ---
+  # 「内容は push したが sha を直し忘れた」= 利用者には何も届かない状態。
+  # この状態を検知して直せることが、このスクリプトの存在理由そのものである。
+  PUBLISH_BROKEN_CLONE="$(mktemp -d "${TMPDIR:-/tmp}/dw-test-mp-broken.XXXXXX")/clone"
+  git clone -q "$PUBLISH_MP" "$PUBLISH_BROKEN_CLONE" >/dev/null 2>&1
+  (
+    cd "$PUBLISH_BROKEN_CLONE" || exit 1
+    git config user.email "dev-workflow-test@example.com"
+    git config user.name "dev-workflow test"
+    git config core.autocrlf false
+    _init="$(git rev-list --max-parents=0 HEAD)"
+    sed -i -E "s/[0-9a-f]{40}/${_init}/" .claude-plugin/marketplace.json .agents/plugins/marketplace.json
+    git commit -aq -m "break sha"
+    git push -q origin master
+  ) >/dev/null 2>&1
+  PUBLISH_BEFORE_FIX="$(git -C "$PUBLISH_MP" rev-list --count master 2>/dev/null)"
+  bash "$PUBLISH_SH" --marketplace-repo "$PUBLISH_MP" --ref HEAD >/dev/null 2>&1
+  assert_exit_code "publish-marketplace.sh: sha だけ古い状態の修復は exit 0" 0 $?
+  assert_eq "publish-marketplace.sh: sha だけ古いときはコミット1本で直す（配布物は作り直さない）" "$((PUBLISH_BEFORE_FIX + 1))" "$(git -C "$PUBLISH_MP" rev-list --count master 2>/dev/null)"
+  PUBLISH_FIXED_SHA="$(git -C "$PUBLISH_MP" show "master:.claude-plugin/marketplace.json" 2>/dev/null | grep -o -E '[0-9a-f]{40}' | head -1)"
+  assert_eq "publish-marketplace.sh: 修復後の sha が配布物の中身を指している" \
+    "$(git -C "$PUBLISH_MP" rev-parse "master:plugins/dev-workflow" 2>/dev/null)" \
+    "$(git -C "$PUBLISH_MP" rev-parse "${PUBLISH_FIXED_SHA}:plugins/dev-workflow" 2>/dev/null)"
+
+  # --- --check は何も積まない ---
+  PUBLISH_MP2="$(make_fake_marketplace)"
+  bash "$PUBLISH_SH" --marketplace-repo "$PUBLISH_MP2" --ref HEAD --check >/dev/null 2>&1
+  assert_exit_code "publish-marketplace.sh: --check は exit 0" 0 $?
+  assert_eq "publish-marketplace.sh: --check は commit も push もしない" "1" "$(git -C "$PUBLISH_MP2" rev-list --count master 2>/dev/null)"
+
+  # --- --no-push はリモートを進めない ---
+  PUBLISH_MP3="$(make_fake_marketplace)"
+  bash "$PUBLISH_SH" --marketplace-repo "$PUBLISH_MP3" --ref HEAD --no-push >/dev/null 2>&1
+  assert_exit_code "publish-marketplace.sh: --no-push は exit 0" 0 $?
+  assert_eq "publish-marketplace.sh: --no-push はリモートを進めない" "1" "$(git -C "$PUBLISH_MP3" rev-list --count master 2>/dev/null)"
+fi
+
+# ---------------------------------------------------------------------------
 # 結果集計
 # ---------------------------------------------------------------------------
 
