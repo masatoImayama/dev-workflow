@@ -8169,14 +8169,44 @@ DOC55_README="${REPO_ROOT}/README.md"
 DOC55_AGENT_GENERATOR="${REPO_ROOT}/agents/generator.md"
 DOC55_CODEX_AGENT_GENERATOR="${REPO_ROOT}/codex-agents/generator.toml"
 
-# --- 両 plugin.json のバージョンが 0.20.0 で一致している（#244 #263 の機能追加のためマイナー更新） ---
+# --- 両 plugin.json のバージョン（#300） ---
+#
+# かつてここは version を "0.20.0" とリテラルで固定していたが、それは**リリースするたびに
+# 必ず壊れるテスト**であり（実際 v0.21.0 のリリースで上げ忘れて master が赤いまま放置された）、
+# 壊れても「固定値を書き換えたか」以外の情報を与えなかった。
+# 検証したい不変条件は次の3つであり、いずれも手で書き換える必要がない。
 
 DOC55_CLAUDE_VERSION="$(grep -m1 '"version"' "$DOC55_CLAUDE_PLUGIN_JSON" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
 DOC55_CODEX_VERSION="$(grep -m1 '"version"' "$DOC55_CODEX_PLUGIN_JSON" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
 
-assert_eq ".claude-plugin/plugin.json のバージョンが0.20.0である" "0.20.0" "$DOC55_CLAUDE_VERSION"
-assert_eq ".codex-plugin/plugin.json のバージョンが0.20.0である" "0.20.0" "$DOC55_CODEX_VERSION"
+case "$DOC55_CLAUDE_VERSION" in
+  [0-9]*.[0-9]*.[0-9]*) pass ".claude-plugin/plugin.json のバージョンがsemver形式である（#300）" ;;
+  *) fail ".claude-plugin/plugin.json のバージョンがsemver形式である（#300）" "version=[${DOC55_CLAUDE_VERSION}]" ;;
+esac
+case "$DOC55_CODEX_VERSION" in
+  [0-9]*.[0-9]*.[0-9]*) pass ".codex-plugin/plugin.json のバージョンがsemver形式である（#300）" ;;
+  *) fail ".codex-plugin/plugin.json のバージョンがsemver形式である（#300）" "version=[${DOC55_CODEX_VERSION}]" ;;
+esac
+
+# 2つのマニフェストがズレると、ベンダーによって配られる version 表記が食い違う。
 assert_eq "両plugin.jsonのバージョンが一致している" "$DOC55_CLAUDE_VERSION" "$DOC55_CODEX_VERSION"
+
+# version が最新の v* tag より**後退していない**ことを見る。「一致」で見ないのは、
+# リリース bump のコミットでは version が tag より先に進む（tag は後から打つ）ためである。
+# 後退している状態＝「前版のマニフェストを新しい tag として配ろうとしている」であり、
+# これは scripts/publish-marketplace.sh が公開時に止めている事故と同じものである。
+DOC55_LATEST_TAG="$(git -C "$REPO_ROOT" tag -l 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null | sed 's/^v//' | sort -V | tail -1)"
+if [ -z "$DOC55_LATEST_TAG" ]; then
+  skip "plugin.json のバージョンが最新tagより後退していない（#300）" "v* tag がこのクローンに無い（--depth 等）"
+else
+  DOC55_VERSION_OLDEST="$(printf '%s\n%s\n' "$DOC55_LATEST_TAG" "$DOC55_CLAUDE_VERSION" | sort -V | head -1)"
+  if [ "$DOC55_CLAUDE_VERSION" = "$DOC55_LATEST_TAG" ] || [ "$DOC55_VERSION_OLDEST" = "$DOC55_LATEST_TAG" ]; then
+    pass "plugin.json のバージョンが最新tagより後退していない（#300）"
+  else
+    fail "plugin.json のバージョンが最新tagより後退していない（#300）" \
+      "plugin.json=${DOC55_CLAUDE_VERSION} / 最新tag=v${DOC55_LATEST_TAG}"
+  fi
+fi
 
 # --- core/instructions.md に watchdog の3点の記述がある ---
 
